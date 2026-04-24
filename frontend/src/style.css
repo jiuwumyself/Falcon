@@ -1,0 +1,104 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --font-size: 16px;
+  --background: #F5F5F7;
+  --foreground: #1a1a2e;
+  --card: rgba(255, 255, 255, 0.6);
+  --card-foreground: #1a1a2e;
+  --popover: rgba(255, 255, 255, 0.8);
+  --popover-foreground: #1a1a2e;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(37, 99, 235, 0.08);
+  --secondary-foreground: #2563eb;
+  --muted: rgba(0, 0, 0, 0.04);
+  --muted-foreground: #6b7280;
+  --accent: rgba(37, 99, 235, 0.06);
+  --accent-foreground: #1a1a2e;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --input: transparent;
+  --input-background: rgba(255, 255, 255, 0.7);
+  --switch-background: #d1d5db;
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+  --ring: oklch(0.708 0 0);
+  --radius: 0.625rem;
+  color-scheme: light dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.dark {
+  --background: #0A0A0A;
+  --foreground: #e8e8ed;
+  --card: rgba(255, 255, 255, 0.05);
+  --card-foreground: #e8e8ed;
+  --popover: rgba(20, 20, 30, 0.9);
+  --popover-foreground: #e8e8ed;
+  --primary: #3b82f6;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(59, 130, 246, 0.1);
+  --secondary-foreground: #93c5fd;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: rgba(255, 255, 255, 0.5);
+  --accent: rgba(59, 130, 246, 0.08);
+  --accent-foreground: #e8e8ed;
+  --destructive: #ef4444;
+  --destructive-foreground: #fecaca;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.06);
+  --ring: rgba(59, 130, 246, 0.4);
+}
+
+@theme inline {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-background: var(--input-background);
+  --color-switch-background: var(--switch-background);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+html {
+  font-size: var(--font-size);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+#app {
+  min-height: 100vh;
+}

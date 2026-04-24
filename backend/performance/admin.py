@@ -1,0 +1,42 @@
+from django.contrib import admin
+
+from .models import Environment, MetricSample, Task, TaskRun
+
+
+@admin.register(Environment)
+class EnvironmentAdmin(admin.ModelAdmin):
+    """压测环境（hosts 映射）在这里维护；前端只读。"""
+    list_display = ('id', 'name', 'is_default', 'host_entries', 'updated_at')
+    list_filter = ('is_default',)
+    search_fields = ('name', 'description')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(Task)
+class TaskAdmin(admin.ModelAdmin):
+    """Admin: use all_objects so soft-deleted tasks remain visible for audit."""
+    list_display = (
+        'id', 'title', 'biz_category', 'virtual_users', 'duration_seconds',
+        'environment', 'owner', 'is_deleted', 'deleted_at', 'created_at',
+    )
+    list_filter = ('biz_category', 'environment', 'is_deleted', 'created_at')
+    search_fields = ('title', 'description', 'jmx_filename', 'run_jmx_filename')
+    readonly_fields = (
+        'jmx_filename', 'jmx_hash', 'run_jmx_filename', 'thread_groups_config',
+        'created_at', 'updated_at', 'deleted_at',
+    )
+
+    def get_queryset(self, request):
+        return Task.all_objects.all()
+
+
+@admin.register(TaskRun)
+class TaskRunAdmin(admin.ModelAdmin):
+    list_display = ('id', 'task', 'status', 'started_at', 'finished_at', 'avg_rps', 'p99_ms', 'error_rate')
+    list_filter = ('status',)
+
+
+@admin.register(MetricSample)
+class MetricSampleAdmin(admin.ModelAdmin):
+    list_display = ('id', 'run', 'timestamp', 'rps', 'p99_ms', 'error_rate', 'active_users')
+    list_filter = ('run',)
