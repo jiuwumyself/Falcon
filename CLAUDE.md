@@ -262,3 +262,59 @@ cd backend && ./venv/Scripts/python.exe manage.py shell -c "from performance.mod
 cd backend && ./venv/Scripts/pip.exe install -r requirements.txt
 cd backend && ./venv/Scripts/pip.exe freeze > requirements.txt
 ```
+
+## 10. 换机迁移 / 多电脑同步
+
+**已同步的内容**（OneDrive 后台自动同步，跨电脑无感）：
+- Claude 记忆 + 历史对话 ≈ 27 MB
+- OneDrive 上位置：`OneDrive\FalconSync\claude-memory\`
+- Win 端机制：`~/.claude/projects/C--Users-admin-Desktop-MyProject-Coder-Falcon` 是个 **Junction 软链**指向上面 OneDrive 路径
+
+**不同步的内容**（每台机器独立，无法跨机迁移）：
+- 后端：`backend/venv/`、`backend/db.sqlite3`、`backend/.env`、`backend/jmeter/apache-jmeter-*/`（含 scripts/ 上传的 .jmx + .csv）、`backend/media/`
+- 前端：`frontend/node_modules/`
+- Claude：项目级 `Falcon/.claude/`、全局 `~/.claude/settings.json` 等
+
+**新 Mac 首次配置**（项目放 `~/Documents/Falcon`，OneDrive 在 `~/Documents/OneDrive/`）：
+
+```bash
+# 0. 一次性装工具
+brew install git python@3.12 node
+npm i -g @anthropic-ai/claude-code
+
+# 1. 装 OneDrive 客户端，登录同一微软账号，等 FalconSync/ 同步完成
+
+# 2. clone 项目
+cd ~/Documents && git clone https://github.com/jiuwumyself/Falcon.git Falcon
+cd Falcon
+
+# 3. 建 Claude 记忆软链
+#    ⚠️ 链接名严格按 Mac 项目绝对路径生成（首字符是减号，不是字母）
+mkdir -p ~/.claude/projects
+ln -s ~/Documents/OneDrive/FalconSync/claude-memory \
+      ~/.claude/projects/-Users-Falcon-Documents-Falcon
+
+# 4. 后端
+cd backend
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+./venv/bin/python manage.py migrate           # 新建空 SQLite
+./venv/bin/python manage.py setup_jmeter      # 自动下 JMeter + 插件 (~80MB)
+cp .env.example .env
+
+# 5. 前端
+cd ../frontend && npm install
+
+# 6. 启动（开两个 terminal）
+# A: cd backend && ./venv/bin/python manage.py runserver
+# B: cd frontend && npm run dev
+```
+
+**Mac vs Win 速查**：
+
+| 操作 | Win | Mac |
+|---|---|---|
+| Python 可执行 | `./venv/Scripts/python.exe` | `./venv/bin/python` |
+| pip 可执行 | `./venv/Scripts/pip.exe` | `./venv/bin/pip` |
+| 杀 8000 / 5173 | `stop.bat` | `lsof -ti:8000,5173 \| xargs kill -9` |
+| Claude 记忆目录名 | `C--Users-admin-Desktop-MyProject-Coder-Falcon` | `-Users-Falcon-Documents-Falcon` |
