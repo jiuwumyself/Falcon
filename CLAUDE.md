@@ -43,8 +43,8 @@ Falcon/
 │   │   │   └── setup_jmeter.py  手动预装 JMeter（或首次上传时自动下载）
 │   │   ├── tests/fixtures/      sample.jmx（parse/patch 测试用）
 │   │   └── migrations/0001_initial.py
-│   ├── jmeter/           **JMeter 工具 + 脚本存储**（apache-jmeter-5.4.1/ gitignored）
-│   │   └── apache-jmeter-5.4.1/scripts/   ★ 所有上传的 .jmx 物理存放在这里
+│   ├── jmeter/           **JMeter 工具 + 脚本存储**（apache-jmeter-5.6.3/ gitignored）
+│   │   └── apache-jmeter-5.6.3/scripts/   ★ 所有上传的 .jmx 物理存放在这里
 │   ├── media/            只存 CSV 了（jmx 走 jmeter/scripts，整个 media/ gitignored）
 │   ├── manage.py
 │   ├── db.sqlite3        默认数据库（gitignored）
@@ -86,8 +86,8 @@ Falcon/
 │   ├── vite.config.ts      @ → src/，/api → http://localhost:8000 代理
 │   └── package.json
 ├── figma/                 **原始 React/TSX 设计源**（参考用，不要修改，也不要在运行时引用）
-├── start.bat              一键起 Django + Vite 两窗口（双击即可）
-├── stop.bat               一键按端口杀两端
+├── start.sh / stop.sh     **Mac** 一键启停（终端跑 `./start.sh`，Ctrl+C 停止）
+├── start.bat / stop.bat   Windows 一键启停（双击 .bat）
 └── CLAUDE.md              本文件
 ```
 
@@ -95,13 +95,17 @@ Falcon/
 
 ### 一键启动/关闭（推荐）
 
-项目根目录双击：
+**Mac**（项目根目录）：
+- `./start.sh` — 后台起 Django + Vite，Ctrl+C 同时停两端
+- `./stop.sh` — 按端口（8000/5173/5174/5175）杀残留进程
+
+**Windows**（项目根目录双击）：
 - `start.bat` — 在两个新 CMD 窗口分别起 Django（:8000）和 Vite（:5173）
 - `stop.bat` — 按端口（8000/5173/5174/5175）杀进程
 
 ### 手动命令
 
-**前端**（在 `frontend/` 下）：
+**前端**（在 `frontend/` 下，跨平台）：
 ```bash
 npm run dev              # Vite dev server → http://localhost:5173
 npm run build            # 会先跑 vue-tsc -b，再 vite build
@@ -110,7 +114,14 @@ npx vue-tsc --noEmit     # 仅类型检查
 
 **后端**（在 `backend/` 下，用 venv 里的 Python）：
 ```bash
-./venv/Scripts/python.exe manage.py runserver    # http://localhost:8000
+# Mac / Linux
+./venv/bin/python manage.py runserver    # http://localhost:8000
+./venv/bin/python manage.py migrate
+./venv/bin/python manage.py check
+./venv/bin/pip install -r requirements.txt
+
+# Windows
+./venv/Scripts/python.exe manage.py runserver
 ./venv/Scripts/python.exe manage.py migrate
 ./venv/Scripts/python.exe manage.py check
 ./venv/Scripts/pip.exe install -r requirements.txt
@@ -219,7 +230,7 @@ npx vue-tsc --noEmit     # 仅类型检查
 - **motion-v 语法**：用 `<Motion as="div" :initial="..." :animate="..." :transition="...">`；SVG 用 `<Motion as="svg">`；React 版的 `motion.div` / `motion.svg` 这种写法在 Vue 里会报错。
 - **主题系统**：`style.css` 里 CSS 变量 + `.dark` 类切换。任何要用主题的组件必须在 `<AppLayout>` 下面，通过 `useTheme()` 拿到 `theme` / `toggleTheme`。
 - **平台范围**：只做性能压测调度。前端 tabs 里的 "UI 板块 / 接口板块" 是 figma 设计留的占位壳，**不要去做它们**。
-- **Windows 开发**：shell 是 bash，路径用正斜杠；但 Python 在 `backend/venv/Scripts/python.exe`（Windows 风格的 venv 目录结构，Scripts 不是 bin）。
+- **跨平台开发**：项目同时支持 Mac 和 Windows。venv 路径不同：**Mac/Linux** 是 `backend/venv/bin/python`，**Windows** 是 `backend/venv/Scripts/python.exe`（注意是 `Scripts` 不是 `bin`）。所有命令在 §4、§9 双形态给出。**Mac 上 JMeter 需要 Java 17**，`./start.sh` 自动把 `/opt/homebrew/opt/openjdk@17/bin` 加到 PATH。
 - **端口**：前端 5173（Vite），后端 8000（Django）。5173 被占时 Vite 自动挪到 5174/5175。
 - **JMX 编辑 = L1**：只碰 `ThreadGroup` 的 `num_threads` / `ramp_time` / `duration`（由 `patch_jmx` 负责，Step 2 v1.1 用），以及所有组件的 `enabled` 属性（由 `toggle_component` 负责，Step 1 当前就用）。其他元素（Samplers、Assertions、Listeners、BeanShell…）一律原样保留。用 `lxml` **patch-in-place**，不要"前端 JSON → 后端重建 JMX"。
 - **Step 2 存储模型 = 双文件**：上传的原件 `<title>.jmx` 永远只由 Step 1（toggle/rename/detail）修改；Step 2 保存 = 从最新原件 + DB 里的 `thread_groups_config` 重新生成 `<jmx_stem>_run.jmx`。**不覆盖原件**。后续压测读 `.run.jmx`。Step 1 之后的改动下次 Step 2 保存时自动带过去（因为始终从原件派生）。
@@ -239,75 +250,92 @@ npx vue-tsc --noEmit     # 仅类型检查
 ## 9. 常用命令备忘
 
 ```bash
-# 一键启停（项目根目录双击即可）
-./start.bat              # 两个窗口分别起 Django + Vite
-./stop.bat               # 按端口杀两端
+# 一键启停
+./start.sh / ./stop.sh   # Mac
+./start.bat / ./stop.bat # Windows（双击）
 
-# 前端
+# 前端（跨平台）
 cd frontend && npm run dev
 cd frontend && npm run build
 cd frontend && npx vue-tsc --noEmit
+```
 
-# 后端
-cd backend && ./venv/Scripts/python.exe manage.py runserver
-cd backend && ./venv/Scripts/python.exe manage.py migrate
-cd backend && ./venv/Scripts/python.exe manage.py makemigrations
-cd backend && ./venv/Scripts/python.exe manage.py shell
-cd backend && ./venv/Scripts/python.exe manage.py setup_jmeter    # 手动预装 JMeter
+**后端（在 `backend/` 下）**
 
-# 清掉所有测试 Task（含软删）+ 物理脚本
-cd backend && ./venv/Scripts/python.exe manage.py shell -c "from performance.models import Task; [t.hard_delete() for t in Task.all_objects.all()]"
+```bash
+# Mac / Linux
+./venv/bin/python manage.py runserver
+./venv/bin/python manage.py migrate
+./venv/bin/python manage.py makemigrations
+./venv/bin/python manage.py shell
+./venv/bin/python manage.py setup_jmeter
+./venv/bin/pip install -r requirements.txt
+./venv/bin/pip freeze > requirements.txt
 
-# 新装依赖后同步
-cd backend && ./venv/Scripts/pip.exe install -r requirements.txt
-cd backend && ./venv/Scripts/pip.exe freeze > requirements.txt
+# 清掉所有测试 Task（含软删）+ 物理脚本（Mac）
+./venv/bin/python manage.py shell -c "from performance.models import Task; [t.hard_delete() for t in Task.all_objects.all()]"
+```
+
+```bash
+# Windows
+./venv/Scripts/python.exe manage.py runserver
+./venv/Scripts/python.exe manage.py migrate
+./venv/Scripts/python.exe manage.py makemigrations
+./venv/Scripts/python.exe manage.py shell
+./venv/Scripts/python.exe manage.py setup_jmeter
+./venv/Scripts/pip.exe install -r requirements.txt
+./venv/Scripts/pip.exe freeze > requirements.txt
+
+# 清掉所有测试 Task（Win）
+./venv/Scripts/python.exe manage.py shell -c "from performance.models import Task; [t.hard_delete() for t in Task.all_objects.all()]"
 ```
 
 ## 10. 换机迁移 / 多电脑同步
 
-**已同步的内容**（OneDrive 后台自动同步，跨电脑无感）：
-- Claude 记忆 + 历史对话 ≈ 27 MB
-- OneDrive 上位置：`OneDrive\FalconSync\claude-memory\`
-- Win 端机制：`~/.claude/projects/C--Users-admin-Desktop-MyProject-Coder-Falcon` 是个 **Junction 软链**指向上面 OneDrive 路径
+**OneDrive 上**（`~/Documents/OneDrive/FalconSync/claude-memory/`）：装着老电脑的历史对话 jsonl + memory/ markdown。
 
-**不同步的内容**（每台机器独立，无法跨机迁移）：
-- 后端：`backend/venv/`、`backend/db.sqlite3`、`backend/.env`、`backend/jmeter/apache-jmeter-*/`（含 scripts/ 上传的 .jmx + .csv）、`backend/media/`
+**当前同步策略 = 仅迁移记忆**（用户 2026-04-27 选择方案 B）：
+- 新机首次配置时，把 OneDrive 的 `memory/MEMORY.md` + `*.md` **手动拷到** `~/.claude/projects/-Users-falcon-Documents-Falcon/memory/`
+- 不做软链方案 → 多台机器记忆**不互通**（每台机器独立演化）
+- 历史对话 jsonl 不拷（占空间且当前会话用不到）
+- 未来若想做实时跨机同步，可以改回软链方案：删掉本地 `~/.claude/projects/-Users-falcon-Documents-Falcon/`，再 `ln -s ~/Documents/OneDrive/FalconSync/claude-memory <同名路径>`
+
+**不同步的内容**（每台机器独立）：
+- 后端：`backend/venv/`、`backend/db.sqlite3`、`backend/.env`、`backend/jmeter/apache-jmeter-*/`、`backend/media/`
 - 前端：`frontend/node_modules/`
 - Claude：项目级 `Falcon/.claude/`、全局 `~/.claude/settings.json` 等
 
-**新 Mac 首次配置**（项目放 `~/Documents/Falcon`，OneDrive 在 `~/Documents/OneDrive/`）：
+**新 Mac 首次配置**（项目放 `~/Documents/Falcon`）：
 
 ```bash
 # 0. 一次性装工具
-brew install git python@3.12 node
+brew install git python@3.12 openjdk@17 node
 npm i -g @anthropic-ai/claude-code
 
-# 1. 装 OneDrive 客户端，登录同一微软账号，等 FalconSync/ 同步完成
-
-# 2. clone 项目
+# 1. clone 项目
 cd ~/Documents && git clone https://github.com/jiuwumyself/Falcon.git Falcon
 cd Falcon
 
-# 3. 建 Claude 记忆软链
-#    ⚠️ 链接名严格按 Mac 项目绝对路径生成（首字符是减号，不是字母）
-mkdir -p ~/.claude/projects
-ln -s ~/Documents/OneDrive/FalconSync/claude-memory \
-      ~/.claude/projects/-Users-Falcon-Documents-Falcon
+# 2. （可选）从 OneDrive 拷记忆过来
+mkdir -p ~/.claude/projects/-Users-falcon-Documents-Falcon/memory
+cp ~/Documents/OneDrive/FalconSync/claude-memory/memory/*.md \
+   ~/.claude/projects/-Users-falcon-Documents-Falcon/memory/
 
-# 4. 后端
+# 3. 后端
 cd backend
-python3 -m venv venv
+python3.12 -m venv venv
+./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
+cp .env.example .env
+echo 'JMETER_VERSION=5.6.3' >> .env
 ./venv/bin/python manage.py migrate           # 新建空 SQLite
 ./venv/bin/python manage.py setup_jmeter      # 自动下 JMeter + 插件 (~80MB)
-cp .env.example .env
 
-# 5. 前端
+# 4. 前端
 cd ../frontend && npm install
 
-# 6. 启动（开两个 terminal）
-# A: cd backend && ./venv/bin/python manage.py runserver
-# B: cd frontend && npm run dev
+# 5. 启动
+cd .. && ./start.sh            # 一键，Ctrl+C 停止
 ```
 
 **Mac vs Win 速查**：

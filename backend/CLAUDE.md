@@ -51,29 +51,39 @@ backend/
 
 **约定**：`config/` **只放项目级配置**（settings、urls、wsgi），**不要往里塞 models / views**。所有业务代码一定要在 app 里（比如 `tasks/`）。
 
-## 3. 运行命令（Windows 注意事项）
+## 3. 运行命令（跨平台注意事项）
 
-venv 在 Windows 下是 `Scripts/`（不是 Linux 的 `bin/`），直接用绝对路径更不容易出错：
+venv 路径按平台不同：**Mac/Linux** 是 `bin/`，**Windows** 是 `Scripts/`。直接用绝对路径调，比 activate 更稳。
 
 ```bash
-# 在 backend/ 目录下执行
-./venv/Scripts/python.exe manage.py runserver           # 默认 http://localhost:8000
-./venv/Scripts/python.exe manage.py migrate
-./venv/Scripts/python.exe manage.py makemigrations
-./venv/Scripts/python.exe manage.py makemigrations <app_name>
-./venv/Scripts/python.exe manage.py shell
-./venv/Scripts/python.exe manage.py createsuperuser
-./venv/Scripts/python.exe manage.py check
-./venv/Scripts/python.exe manage.py startapp <app_name>
-./venv/Scripts/python.exe manage.py test
+# Mac / Linux (在 backend/ 下)
+./venv/bin/python manage.py runserver           # 默认 http://localhost:8000
+./venv/bin/python manage.py migrate
+./venv/bin/python manage.py makemigrations
+./venv/bin/python manage.py makemigrations <app_name>
+./venv/bin/python manage.py shell
+./venv/bin/python manage.py createsuperuser
+./venv/bin/python manage.py check
+./venv/bin/python manage.py startapp <app_name>
+./venv/bin/python manage.py test
 
-# pip
-./venv/Scripts/pip.exe install -r requirements.txt
-./venv/Scripts/pip.exe install <pkg>
-./venv/Scripts/pip.exe freeze > requirements.txt
+./venv/bin/pip install -r requirements.txt
+./venv/bin/pip install <pkg>
+./venv/bin/pip freeze > requirements.txt
 ```
 
-**不要用** `python manage.py ...`（系统 Python 可能不是 3.12，也没装依赖）。**也不要** `source venv/bin/activate`（Windows 风格 venv 没这路径）。
+```bash
+# Windows (在 backend/ 下)
+./venv/Scripts/python.exe manage.py runserver
+./venv/Scripts/python.exe manage.py migrate
+./venv/Scripts/python.exe manage.py makemigrations
+# ... 其余命令同上，把 ./venv/bin/python 换成 ./venv/Scripts/python.exe，
+#     ./venv/bin/pip 换成 ./venv/Scripts/pip.exe
+
+./venv/Scripts/pip.exe install -r requirements.txt
+```
+
+**不要用** `python manage.py ...`（系统 Python 可能不是 3.12，也没装依赖）。**激活 venv** 也不推荐——直接绝对路径调最稳。
 
 ## 4. 环境变量 & 配置
 
@@ -199,12 +209,12 @@ tasks/
 └── tests.py
 ```
 
-新建 app 的完整流程：
-1. `./venv/Scripts/python.exe manage.py startapp <name>`
+新建 app 的完整流程（命令省略 `./venv/bin/python`（Mac/Linux）或 `./venv/Scripts/python.exe`（Win）前缀）：
+1. `manage.py startapp <name>`
 2. 在 `config/settings.py` 的 `INSTALLED_APPS` 追加 `'<name>'`
 3. 写 `models.py`
-4. `./venv/Scripts/python.exe manage.py makemigrations <name>`
-5. `./venv/Scripts/python.exe manage.py migrate`
+4. `manage.py makemigrations <name>`
+5. `manage.py migrate`
 6. 写 `admin.py`（可视化调试超方便）
 7. 写 `serializers.py` + `views.py`
 8. 在 `<name>/urls.py` 建 app 级路由，在 `config/urls.py` `include()` 它
@@ -261,8 +271,11 @@ tasks/
 
 ## 13. 约定 & 踩坑
 
-### 13.1 venv 是 Windows 风格
-激活用 `./venv/Scripts/activate`（bat）或 `./venv/Scripts/Activate.ps1`（PowerShell），但**更推荐不激活，直接用 `./venv/Scripts/python.exe` 绝对路径**——省掉忘记激活导致调用错 Python 的坑。
+### 13.1 venv 路径按平台不同
+- **Mac/Linux**：`./venv/bin/python`、`./venv/bin/pip`
+- **Windows**：`./venv/Scripts/python.exe`、`./venv/Scripts/pip.exe`
+
+**推荐不 activate，直接绝对路径调**——省掉忘记激活导致调用错 Python 的坑。Mac 上还要保证 `python3.12` 是 Homebrew 装的（不是系统的 3.9），建 venv 时用 `/opt/homebrew/bin/python3.12 -m venv venv` 显式指定。
 
 ### 13.2 `.env` 不要提交
 `.gitignore` 根目录已经配好了（`.env`、`.env.local`、`.env.*.local` 都忽略）。要改模板去 `.env.example`。
@@ -286,23 +299,25 @@ tasks/
 
 ## 14. 常见调试姿势
 
+下面用 Mac/Linux 的 `./venv/bin/python` 写法。Windows 把所有 `./venv/bin/python` 替换为 `./venv/Scripts/python.exe` 即可。
+
 ```bash
 # 进 shell 直接操作 ORM
-./venv/Scripts/python.exe manage.py shell
+./venv/bin/python manage.py shell
 >>> from performance.models import Task
 >>> Task.objects.create(title='Test', target_url='https://example.com', ...)
 
 # 看 SQL
-./venv/Scripts/python.exe manage.py sqlmigrate tasks 0001
+./venv/bin/python manage.py sqlmigrate performance 0001
 
 # 看路由
-./venv/Scripts/python.exe manage.py show_urls    # 需要装 django-extensions，或者
-./venv/Scripts/python.exe -c "from django.urls import get_resolver; [print(p) for p in get_resolver().reverse_dict]"
+./venv/bin/python manage.py show_urls    # 需要装 django-extensions，或者
+./venv/bin/python -c "from django.urls import get_resolver; [print(p) for p in get_resolver().reverse_dict]"
 
 # 重置数据库（开发期用）
 rm db.sqlite3
-./venv/Scripts/python.exe manage.py migrate
-./venv/Scripts/python.exe manage.py createsuperuser
+./venv/bin/python manage.py migrate
+./venv/bin/python manage.py createsuperuser
 ```
 
 ### 10.1 .jmx 上传大小上限
@@ -449,12 +464,16 @@ fixture `performance/tests/fixtures/sample.jmx` 是最简实验模板，有 HTTP
 - JMeter 工具路径（固定）：`backend/jmeter/apache-jmeter-<VERSION>/`
 - JMX 物理文件存放路径：`backend/jmeter/apache-jmeter-<VERSION>/scripts/<title>.jmx`
 - `Task.jmx_filename` CharField 只存文件名（不含路径），`Task.jmx_path()` 返回绝对路径
-- **默认 `JMETER_VERSION=5.4.1`**，通过 `.env` 可改（但改了要重新 setup_jmeter）
+- **默认 `JMETER_VERSION=5.4.1`**（代码层兜底），但**当前推荐 `5.6.3`**（最新稳定）—— 在 `.env` 写 `JMETER_VERSION=5.6.3` 切换；切换后要重跑 `setup_jmeter` 才会下载新版。Mac 首装就直接走 5.6.3。
 - `performance/services/jmeter.py` 负责：工具下载、脚本目录管理、文件名清洗
 - **设计约定**：工具路径永远是项目内 `backend/jmeter/...`，**不读 `JMETER_HOME` 环境变量**（避免被系统全局 JMeter 装载 hijack 路径）
+- **JMeter 启动需要 Java 17+**（5.6.3 要求）。Mac：`brew install openjdk@17` + `start.sh` 把 `/opt/homebrew/opt/openjdk@17/bin` 加进 PATH；Windows：装 JDK 17 让 `java` 进 PATH 即可。`setup_jmeter` 本身不依赖 Java（只下载解压）。
 
 - **首次创建任务会阻塞 1-2 分钟下载 JMeter (~100MB)**，或提前跑一次：
   ```bash
+  # Mac/Linux
+  ./venv/bin/python manage.py setup_jmeter
+  # Windows
   ./venv/Scripts/python.exe manage.py setup_jmeter
   ```
 
@@ -470,7 +489,7 @@ fixture `performance/tests/fixtures/sample.jmx` 是最简实验模板，有 HTTP
 ```dockerfile
 FROM python:3.12-slim
 WORKDIR /app
-ARG JMETER_VERSION=5.4.1
+ARG JMETER_VERSION=5.6.3
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openjdk-17-jre-headless wget unzip \
@@ -491,7 +510,7 @@ services:
   backend:
     build: .
     volumes:
-      - jmeter_scripts:/app/backend/jmeter/apache-jmeter-5.4.1/scripts
+      - jmeter_scripts:/app/backend/jmeter/apache-jmeter-5.6.3/scripts
 volumes:
   jmeter_scripts:
 ```
