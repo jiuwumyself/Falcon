@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Environment, MetricSample, Task, TaskRun
+from .models import Environment, MetricSample, Task, TaskCsvBinding, TaskRun
 
 
 class EnvironmentSerializer(serializers.ModelSerializer):
@@ -13,21 +13,36 @@ class EnvironmentSerializer(serializers.ModelSerializer):
         read_only_fields = fields  # 前端只读，编辑走 admin
 
 
+class TaskCsvBindingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TaskCsvBinding
+        fields = ['component_path', 'filename']
+        read_only_fields = fields
+
+
 class TaskSerializer(serializers.ModelSerializer):
+    csv_bindings = TaskCsvBindingSerializer(many=True, read_only=True)
+    status = serializers.SerializerMethodField()
+
     class Meta:
         model = Task
         fields = [
             'id', 'title', 'description', 'biz_category',
-            'jmx_filename', 'jmx_hash', 'csv_filename',
+            'jmx_filename', 'jmx_hash',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
-            'run_jmx_filename', 'thread_groups_config', 'environment',
+            'thread_groups_config', 'environment',
+            'csv_bindings', 'status',
             'owner', 'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'jmx_filename', 'jmx_hash', 'csv_filename',
-            'run_jmx_filename', 'thread_groups_config',
+            'jmx_filename', 'jmx_hash', 'thread_groups_config',
+            'csv_bindings', 'status',
             'owner', 'created_at', 'updated_at',
         ]
+
+    def get_status(self, obj: Task) -> str:
+        # v1: 待配置 / 已配置；v1.1+ 加 running / success / failed
+        return 'configured' if obj.thread_groups_config else 'draft'
 
 
 class MetricSampleSerializer(serializers.ModelSerializer):

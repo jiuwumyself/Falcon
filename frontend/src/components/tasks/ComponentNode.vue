@@ -81,7 +81,7 @@ async function onCsvPick(e: Event) {
   if (!f || !ctx) return
   csvUploading.value = true
   try {
-    await ctx.uploadCsv(f)
+    await ctx.uploadCsv(props.node.path, f)
   } catch {
     // Error bubbles up via the tree — ScriptTree already shows the error banner.
     // Flash our own row red too so the failure is visible near the action.
@@ -95,6 +95,11 @@ async function onCsvPick(e: Event) {
     csvUploading.value = false
   }
 }
+
+// Lookup current binding for THIS CSVDataSet from task.csv_bindings.
+const csvBinding = computed(() =>
+  ctx?.task.value.csv_bindings?.find((b) => b.component_path === props.node.path) ?? null,
+)
 
 // Auto-expand this row if it (or an ancestor) is marked "must be visible"
 // — currently used to reveal CSVDataSet rows that live below default depth.
@@ -319,13 +324,13 @@ const toolbarBtnStyle = computed(() => ({
           />
           <button
             class="w-7 h-5 rounded-md flex items-center justify-center flex-shrink-0 mr-1.5 transition-colors"
-            :title="ctx?.task.value.csv_filename ? `当前 CSV: ${ctx.task.value.csv_filename}（点击替换）` : '上传 CSV 参数化文件'"
+            :title="csvBinding ? `当前 CSV: ${csvBinding.filename}（点击替换）` : '上传 CSV 参数化文件'"
             :style="{
               background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
               border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
               cursor: csvUploading ? 'wait' : 'pointer',
               opacity: csvUploading ? 0.6 : 1,
-              color: ctx?.task.value.csv_filename
+              color: csvBinding
                 ? '#10b981'
                 : isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)',
             }"

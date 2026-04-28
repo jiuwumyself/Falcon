@@ -257,7 +257,7 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
               <AlertCircle :size="11" /> {{ saveError }}
             </div>
             <div v-if="showSaved" class="text-[11px] flex items-center gap-1" style="color: #10b981">
-              <CheckCircle2 :size="11" /> 已保存 · {{ task.run_jmx_filename }}
+              <CheckCircle2 :size="11" /> 已保存 · 跑压测时按当前配置生成
             </div>
             <div class="flex gap-2">
               <button

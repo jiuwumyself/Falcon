@@ -19,6 +19,8 @@ const emit = defineEmits<{
   (e: 'focus', id: string | null): void
   (e: 'selectBiz', id: string): void
   (e: 'create'): void
+  (e: 'editTask', id: string): void
+  (e: 'contextTask', id: string, x: number, y: number): void
 }>()
 
 const isLoading = ref(true)
@@ -175,6 +177,8 @@ function toggleBiz(id: string) {
             @hover-end="emit('focus', null)"
             @mouseenter="emit('focus', t.id)"
             @mouseleave="emit('focus', null)"
+            @click="emit('editTask', t.id)"
+            @contextmenu.prevent="(e: MouseEvent) => emit('contextTask', t.id, e.clientX, e.clientY)"
           >
             <!-- Timeline node -->
             <div

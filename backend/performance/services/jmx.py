@@ -989,3 +989,112 @@ def update_component_detail(
         raise JmxParseError(f'组件 {kind} 暂不支持编辑（v1 仅 HTTPSamplerProxy / HeaderManager）')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+# ─── 内存生成可执行 JMX（取代 _run.jmx 物理派生） ─────────────────────────
+
+
+def _set_csv_filename_at_path(xml_bytes: bytes, path: str, filename: str) -> bytes:
+    """把 path 位置（必须是 CSVDataSet）的 filename 字段设为指定绝对路径。"""
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+    el = _locate_by_path(top, path)
+    if _local(el) != 'CSVDataSet':
+        raise JmxParseError(
+            f'path {path} 指向的不是 CSVDataSet（tag={_local(el)}）'
+        )
+    _set_str_prop(el, 'filename', filename)
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+def _inject_dns_cache_manager(
+    xml_bytes: bytes, host_entries: list[dict[str, str]],
+) -> bytes:
+    """
+    在 TestPlan 的 hashTree 顶部注入一个 DNSCacheManager，把指定 hostname 直接
+    映射到 ip——执行压测时 JMeter 走 IP 直连，不依赖系统 DNS。
+
+    `host_entries`: `[{"hostname": "api.foo.com", "ip": "10.0.0.1"}, ...]`
+    空列表 / None → 不注入，原样返回。
+    """
+    pairs = [
+        (e.get('hostname', '').strip(), e.get('ip', '').strip())
+        for e in (host_entries or [])
+    ]
+    pairs = [(h, i) for h, i in pairs if h and i]
+    if not pairs:
+        return xml_bytes
+
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+
+    # TestPlan 的 hashTree 是 top 的第一个 hashTree 子节点（或 top 自己——我们就放在 top 里）
+    dns_mgr = etree.SubElement(top, 'DNSCacheManager', {
+        'guiclass': 'DNSCachePanel',
+        'testclass': 'DNSCacheManager',
+        'testname': 'Falcon Environment DNS',
+        'enabled': 'true',
+    })
+    coll = etree.SubElement(dns_mgr, 'collectionProp', {
+        'name': 'DNSCacheManager.hosts',
+    })
+    for hostname, ip in pairs:
+        eprop = etree.SubElement(coll, 'elementProp', {
+            'name': hostname, 'elementType': 'StaticHost',
+        })
+        etree.SubElement(eprop, 'stringProp', {'name': 'StaticHost.Name'}).text = hostname
+        etree.SubElement(eprop, 'stringProp', {'name': 'StaticHost.Address'}).text = ip
+    etree.SubElement(dns_mgr, 'collectionProp', {'name': 'DNSCacheManager.servers'})
+    etree.SubElement(dns_mgr, 'boolProp', {'name': 'DNSCacheManager.clearEachIteration'}).text = 'false'
+    etree.SubElement(dns_mgr, 'boolProp', {'name': 'DNSCacheManager.isCustomResolver'}).text = 'true'
+
+    # DNSCacheManager 后面紧跟一个空 hashTree（JMeter 配对结构要求）
+    etree.SubElement(top, 'hashTree')
+
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+def build_run_xml(task, *, inject_environment_dns: bool = False) -> bytes:
+    """
+    从 Task 原件 + DB 配置在内存里组装出可执行 JMX，**不写盘**。
+
+    - 读原件 `<title>.jmx` 字节流
+    - 对 `task.thread_groups_config` 中每条调 `replace_thread_group` 链式 patch
+    - 对 `task.csv_bindings` 中每条把 CSVDataSet 的 filename 改成绝对路径（scripts/ 下）
+    - `inject_environment_dns=True` 时把 `task.environment.host_entries` 注入成
+      `DNSCacheManager`（v1.1 真跑 JMeter 用，validate 不用）
+
+    返回最终 XML bytes。Step 1（脚本结构）+ Step 2（跑法）+ Environment（DNS）
+    三类配置在这里汇合。
+    """
+    # 局部 import 避免循环依赖（jmx.py 是底层服务，不应依赖 models.py）
+    from .jmeter import get_scripts_dir  # noqa: PLC0415
+
+    xml = task.read_jmx_bytes()
+
+    # 1) Thread Groups 替换
+    for entry in task.thread_groups_config or []:
+        path = entry.get('path')
+        kind = entry.get('kind')
+        params = entry.get('params') or {}
+        if not path or not kind:
+            continue
+        xml = replace_thread_group(xml, path=path, kind=kind, params=params)
+
+    # 2) CSVDataSet filename 改写到绝对路径
+    scripts_dir = get_scripts_dir()
+    for binding in task.csv_bindings.all():
+        if not binding.component_path or not binding.filename:
+            continue
+        abs_path = str((scripts_dir / binding.filename).resolve())
+        try:
+            xml = _set_csv_filename_at_path(xml, binding.component_path, abs_path)
+        except JmxParseError:
+            # 配置悬空（path 不再指向 CSVDataSet）→ 跳过；上层 replace-jmx 已经清空过
+            continue
+
+    # 3) Environment DNS 注入（仅执行时需要）
+    if inject_environment_dns and task.environment_id:
+        xml = _inject_dns_cache_manager(xml, task.environment.host_entries or [])
+
+    return xml

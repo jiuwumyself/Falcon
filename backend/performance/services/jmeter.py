@@ -80,6 +80,43 @@ def get_scripts_dir() -> Path:
     return d
 
 
+def get_runs_dir() -> Path:
+    """<jmeter_home>/runs/ — 每次跑压测时落 run.jmx 快照 + .jtl 结果（v1.1 才用）。"""
+    d = get_jmeter_home() / 'runs'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Minimum disk free space required before writing scripts / CSVs / run snapshots.
+# Below this, write functions raise to surface a clear error rather than silently
+# failing later when JMeter tries to read a half-written file.
+_MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB
+
+
+class DiskFullError(RuntimeError):
+    """Raised when free disk space at the target path is below the threshold."""
+
+
+def _check_free_space(path: Path) -> None:
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return  # If we can't stat, let the actual write fail with its own error
+    if usage.free < _MIN_FREE_BYTES:
+        free_mb = usage.free // (1024 * 1024)
+        raise DiskFullError(
+            f'磁盘空间不足（{free_mb} MB < 100 MB），请清理后重试'
+        )
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write + flush + fsync — guarantees bytes hit the disk before we return."""
+    with path.open('wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _jmeter_binary_exists(home: Path) -> bool:
     name = 'jmeter.bat' if os.name == 'nt' else 'jmeter'
     return (home / 'bin' / name).exists()
@@ -267,8 +304,10 @@ def unique_script_filename(title: str, exclude: Path | None = None) -> str:
 def write_script(filename: str, data: bytes) -> Path:
     """Write raw bytes to <scripts_dir>/<filename>. Returns full path."""
     ensure_jmeter_installed()
-    path = get_scripts_dir() / filename
-    path.write_bytes(data)
+    scripts = get_scripts_dir()
+    _check_free_space(scripts)
+    path = scripts / filename
+    _atomic_write_bytes(path, data)
     return path
 
 
@@ -319,8 +358,10 @@ def unique_csv_filename(jmx_filename: str, exclude: Path | None = None) -> str:
 def write_csv(filename: str, data: bytes) -> Path:
     """Write raw bytes to <scripts_dir>/<filename>. Returns full path."""
     ensure_jmeter_installed()
-    path = get_scripts_dir() / filename
-    path.write_bytes(data)
+    scripts = get_scripts_dir()
+    _check_free_space(scripts)
+    path = scripts / filename
+    _atomic_write_bytes(path, data)
     return path
 
 

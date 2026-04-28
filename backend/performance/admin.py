@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Environment, MetricSample, Task, TaskRun
+from .models import Environment, MetricSample, Task, TaskCsvBinding, TaskRun
 
 
 @admin.register(Environment)
@@ -12,6 +12,12 @@ class EnvironmentAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
 
+class TaskCsvBindingInline(admin.TabularInline):
+    model = TaskCsvBinding
+    extra = 0
+    readonly_fields = ('created_at', 'updated_at')
+
+
 @admin.register(Task)
 class TaskAdmin(admin.ModelAdmin):
     """Admin: use all_objects so soft-deleted tasks remain visible for audit."""
@@ -20,11 +26,12 @@ class TaskAdmin(admin.ModelAdmin):
         'environment', 'owner', 'is_deleted', 'deleted_at', 'created_at',
     )
     list_filter = ('biz_category', 'environment', 'is_deleted', 'created_at')
-    search_fields = ('title', 'description', 'jmx_filename', 'run_jmx_filename')
+    search_fields = ('title', 'description', 'jmx_filename')
     readonly_fields = (
-        'jmx_filename', 'jmx_hash', 'run_jmx_filename', 'thread_groups_config',
+        'jmx_filename', 'jmx_hash', 'thread_groups_config',
         'created_at', 'updated_at', 'deleted_at',
     )
+    inlines = [TaskCsvBindingInline]
 
     def get_queryset(self, request):
         return Task.all_objects.all()

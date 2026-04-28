@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { AnimatePresence, Motion } from 'motion-v'
 import {
-  Upload, Sliders, Play, LineChart, FileText, X, Loader, RotateCcw,
+  Upload, Sliders, Play, LineChart, FileText, X, Loader, RotateCcw, Check,
 } from 'lucide-vue-next'
 import { apiForm, ApiError } from '@/lib/api'
 import { useTheme } from '@/composables/useTheme'
@@ -10,7 +10,10 @@ import type { Task, BizCategory } from '@/types/task'
 import ScriptTree from './ScriptTree.vue'
 import ConfigStage from './ConfigStage.vue'
 
-const props = defineProps<{ defaultBiz?: BizCategory }>()
+const props = defineProps<{
+  defaultBiz?: BizCategory
+  initialTask?: Task | null    // 编辑模式：从列表点进来时传入
+}>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'created', task: Task): void }>()
 
 const { theme } = useTheme()
@@ -40,8 +43,36 @@ const uploadError = ref('')
 const uploadedTask = ref<Task | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 
+// Toast for re-upload feedback (auto-hide after 2.5s).
+const toast = ref<{ text: string } | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+function showToast(text: string) {
+  toast.value = { text }
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toast.value = null }, 2500)
+}
+
+// 编辑入口：传入 initialTask 时把它当成"已上传任务"并跳到最远完成的 Step
+function applyInitialTask(t: Task | null | undefined) {
+  if (!t) return
+  uploadedTask.value = t
+  currentStep.value = (t.thread_groups_config?.length ?? 0) > 0 ? 1 : 0
+}
+applyInitialTask(props.initialTask)
+watch(() => props.initialTask, (t) => applyInitialTask(t), { immediate: false })
+
 function triggerPicker() {
   if (uploading.value) return
+  fileInput.value?.click()
+}
+
+// 重新上传：如已配置 Step 2，先确认；否则直接打开文件选择器
+function triggerReupload() {
+  if (uploading.value) return
+  if ((uploadedTask.value?.thread_groups_config?.length ?? 0) > 0) {
+    const ok = confirm('脚本替换后，已配置的运行参数和绑定的 CSV 将被清空。是否继续？')
+    if (!ok) return
+  }
   fileInput.value?.click()
 }
 
@@ -118,13 +149,16 @@ async function doUpload() {
   if (!file.value || uploading.value) return
   uploading.value = true
   uploadError.value = ''
+  const wasReplacing = !!uploadedTask.value
+  const hadConfig = (uploadedTask.value?.thread_groups_config?.length ?? 0) > 0
   try {
     const fd = new FormData()
     fd.append('jmx_file', file.value)
 
     let task: Task
     if (uploadedTask.value) {
-      // 覆盖当前任务的 JMX：保留 title / biz / description / csv_file / created_at
+      // 覆盖当前任务的 JMX：保留 title / biz / description / created_at；
+      // 后端会清空 thread_groups_config + 解除 CSV 绑定
       task = await apiForm<Task>(`/tasks/${uploadedTask.value.id}/replace-jmx/`, fd)
     } else {
       fd.append('title', file.value.name.replace(/\.jmx$/i, ''))
@@ -134,6 +168,9 @@ async function doUpload() {
       emit('created', task)
     }
     uploadedTask.value = task
+    if (wasReplacing) {
+      showToast(hadConfig ? '脚本已替换，请重新配置 Step 2' : '脚本已替换')
+    }
   } catch (e) {
     uploadError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
@@ -268,6 +305,27 @@ const panelGlass = computed(() => ({
           <X :size="13" :color="isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)'" />
         </button>
 
+        <!-- Toast (re-upload feedback) -->
+        <AnimatePresence>
+          <Motion
+            v-if="toast"
+            key="toast"
+            :initial="{ opacity: 0, y: -8 }"
+            :animate="{ opacity: 1, y: 0 }"
+            :exit="{ opacity: 0, y: -8 }"
+            :transition="{ duration: 0.2 }"
+            class="absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3 py-1.5 rounded-lg text-[12px] flex items-center gap-1.5"
+            :style="{
+              background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.1)',
+              border: '1px solid rgba(34,197,94,0.3)',
+              color: '#22c55e',
+            }"
+          >
+            <Check :size="13" />
+            <span>{{ toast.text }}</span>
+          </Motion>
+        </AnimatePresence>
+
         <AnimatePresence mode="wait">
           <Motion
             :key="activeStep.id"
@@ -380,7 +438,7 @@ const panelGlass = computed(() => ({
                       color: isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.65)',
                       border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}`,
                     }"
-                    @click="triggerPicker"
+                    @click="triggerReupload"
                   >
                     <Motion
                       v-if="uploading"

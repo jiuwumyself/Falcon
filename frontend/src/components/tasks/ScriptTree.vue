@@ -2,7 +2,7 @@
 import { ref, watch, computed, provide, toRef } from 'vue'
 import { Motion } from 'motion-v'
 import { Loader, AlertCircle } from 'lucide-vue-next'
-import { api, apiForm, ApiError } from '@/lib/api'
+import { api, ApiError, tasksApi } from '@/lib/api'
 import type { Task, JmxComponent } from '@/types/task'
 import ComponentNode from './ComponentNode.vue'
 import DetailDrawer from './DetailDrawer.vue'
@@ -24,10 +24,8 @@ const errorFlashPath = ref<string | null>(null)
 const forceExpandPaths = ref<Set<string>>(new Set())
 const editingNode = ref<JmxComponent | null>(null)
 
-async function uploadCsv(file: File): Promise<Task> {
-  const fd = new FormData()
-  fd.append('csv_file', file)
-  const updated = await apiForm<Task>(`/tasks/${props.task.id}/upload-csv/`, fd)
+async function uploadCsv(componentPath: string, file: File): Promise<Task> {
+  const updated = await tasksApi.uploadComponentCsv(props.task.id, componentPath, file)
   emit('task-updated', updated)
   return updated
 }

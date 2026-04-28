@@ -72,24 +72,15 @@ class Task(models.Model):
     jmx_filename = models.CharField(max_length=255, blank=True)
     jmx_hash = models.CharField(max_length=64, blank=True, db_index=True)
 
-    # CSV 参数化文件和 .jmx 存在同一个 scripts/ 目录下，命名 `<jmx_stem>.csv`
-    # （冲突追加 `_2`、`_3`）。这里只记文件名，物理文件由 services/jmeter.py 管理。
-    csv_filename = models.CharField(max_length=255, blank=True)
-
     # 从 JMX 里解析出来的可编辑字段
     virtual_users = models.PositiveIntegerField(default=10)
     ramp_up_seconds = models.PositiveIntegerField(default=0)
     duration_seconds = models.PositiveIntegerField(default=60)
 
-    # ── Step 2 派生产物 ──────────────────────────────────
-    # run_jmx_filename: 保存 Step 2 配置后生成的可执行脚本文件名，空串 = 尚未配置。
-    # 物理文件和原件同在 scripts/ 下，命名 `<jmx_stem>_run.jmx`。
-    # 执行压测用这份，不污染原件 jmx_filename。
-    run_jmx_filename = models.CharField(max_length=255, blank=True)
-
     # thread_groups_config: Step 2 里用户为每个启用的 ThreadGroup 选的
-    # 类型和参数；保存 Step 2 时从原件 + 此配置重新生成 run_jmx。
-    # 形如 [{"path": "0.0", "kind": "ThreadGroup", "params": {...}}, ...]
+    # 场景 / 类型和参数。跑压测时由 services/jmx.py::build_run_xml 从原件 + 此配置
+    # 在内存生成可执行 XML（不再派生 _run.jmx 物理文件）。
+    # 形如 [{"path": "0.0", "scenario": "load", "kind": "SteppingThreadGroup", "params": {...}}, ...]
     thread_groups_config = models.JSONField(default=list, blank=True)
 
     # environment: Step 2 选的压测环境（hosts 映射等）。
@@ -130,24 +121,57 @@ class Task(models.Model):
     def write_jmx_bytes(self, data: bytes) -> None:
         self.jmx_path().write_bytes(data)
 
-    # ── Run JMX (Step 2 派生产物) ───────────────────────
-    def run_jmx_path(self):
-        """Absolute Path to the on-disk .run.jmx file, or None when not set."""
-        return get_scripts_dir() / self.run_jmx_filename if self.run_jmx_filename else None
+    # ── Soft delete ─────────────────────────────────────
+    def _purge_files(self) -> None:
+        if self.jmx_filename:
+            delete_script(self.jmx_filename)
+        for binding in self.csv_bindings.all():
+            if binding.filename:
+                delete_csv(binding.filename)
 
-    def read_run_jmx_bytes(self) -> bytes:
-        path = self.run_jmx_path()
-        return path.read_bytes() if path else b''
+    def delete(self, using=None, keep_parents=False):
+        """
+        Soft-delete: mark is_deleted + deleted_at, physically remove the
+        on-disk .jmx + bound CSVs so the JMeter scripts folder doesn't
+        accumulate. TaskRun / MetricSample rows stay via FK; queries via
+        `Task.objects` won't see this task.
+        """
+        self._purge_files()
+        self.csv_bindings.all().delete()
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.jmx_filename = ''     # path is gone — don't keep dangling reference
+        self.save(update_fields=[
+            'is_deleted', 'deleted_at', 'jmx_filename', 'updated_at',
+        ])
 
-    def write_run_jmx_bytes(self, data: bytes) -> None:
-        path = self.run_jmx_path()
-        if path is not None:
-            path.write_bytes(data)
+    def hard_delete(self, using=None, keep_parents=False):
+        """Escape hatch for genuine DB row removal (e.g. admin). Not used by API."""
+        self._purge_files()
+        return super().delete(using=using, keep_parents=keep_parents)
 
-    # ── CSV file convenience ────────────────────────────
+
+class TaskCsvBinding(models.Model):
+    """
+    每个 CSVDataSet 组件可独立绑定一个 CSV 文件。`component_path` 是组件树的索引路径
+    （和 services/jmx.py 的 path 语义一致，例如 "0.0.3"）。物理文件落 scripts/ 下，
+    命名 `<jmx_stem>__<safe_path>.csv`。
+    """
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='csv_bindings')
+    component_path = models.CharField(max_length=64)
+    filename = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('task', 'component_path')]
+        ordering = ['component_path']
+
+    def __str__(self) -> str:
+        return f'{self.task_id}@{self.component_path} → {self.filename}'
+
     def csv_path(self):
-        """Absolute Path to the on-disk CSV file, or None when not set."""
-        return get_scripts_dir() / self.csv_filename if self.csv_filename else None
+        return get_scripts_dir() / self.filename if self.filename else None
 
     def read_csv_bytes(self) -> bytes:
         path = self.csv_path()
@@ -157,40 +181,6 @@ class Task(models.Model):
         path = self.csv_path()
         if path is not None:
             path.write_bytes(data)
-
-    # ── Soft delete ─────────────────────────────────────
-    def delete(self, using=None, keep_parents=False):
-        """
-        Soft-delete: mark is_deleted + deleted_at, physically remove the
-        on-disk .jmx + .run.jmx + .csv so the JMeter scripts folder doesn't
-        accumulate. TaskRun / MetricSample rows stay via FK; queries via
-        `Task.objects` won't see this task.
-        """
-        if self.jmx_filename:
-            delete_script(self.jmx_filename)
-        if self.run_jmx_filename:
-            delete_script(self.run_jmx_filename)
-        if self.csv_filename:
-            delete_csv(self.csv_filename)
-        self.is_deleted = True
-        self.deleted_at = timezone.now()
-        self.jmx_filename = ''     # path is gone — don't keep dangling reference
-        self.run_jmx_filename = ''
-        self.csv_filename = ''
-        self.save(update_fields=[
-            'is_deleted', 'deleted_at',
-            'jmx_filename', 'run_jmx_filename', 'csv_filename', 'updated_at',
-        ])
-
-    def hard_delete(self, using=None, keep_parents=False):
-        """Escape hatch for genuine DB row removal (e.g. admin). Not used by API."""
-        if self.jmx_filename:
-            delete_script(self.jmx_filename)
-        if self.run_jmx_filename:
-            delete_script(self.run_jmx_filename)
-        if self.csv_filename:
-            delete_csv(self.csv_filename)
-        return super().delete(using=using, keep_parents=keep_parents)
 
 
 class TaskRun(models.Model):

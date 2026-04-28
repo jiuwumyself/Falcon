@@ -2,6 +2,15 @@ export type BizCategory = 'shared' | 'ai' | 'kg'
 
 export type RunStatus = 'pending' | 'running' | 'success' | 'fail' | 'cancelled'
 
+// 任务在 wizard 流程中的展示态：v1 只有 draft / configured 两态，
+// v1.1 接执行模块后会再加 running / success / failed
+export type TaskStatus = 'draft' | 'configured' | 'running' | 'success' | 'failed'
+
+export interface TaskCsvBinding {
+  component_path: string  // 索引路径，对齐组件树的 path（如 "0.0.3"）
+  filename: string        // scripts/ 下的 bare 文件名
+}
+
 export interface Task {
   id: number
   title: string
@@ -9,13 +18,13 @@ export interface Task {
   biz_category: BizCategory
   jmx_filename: string          // bare filename under <JMETER_HOME>/scripts/
   jmx_hash: string
-  csv_filename: string          // bare CSV filename (empty if none); same scripts/ dir
   virtual_users: number
   ramp_up_seconds: number
   duration_seconds: number
-  run_jmx_filename: string      // Step 2 派生可执行脚本文件名（空串 = 未配置）
   thread_groups_config: ThreadGroupConfig[]
   environment: number | null    // Environment id or null
+  csv_bindings: TaskCsvBinding[]
+  status: TaskStatus
   owner: number | null
   created_at: string
   updated_at: string
