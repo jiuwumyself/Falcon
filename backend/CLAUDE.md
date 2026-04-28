@@ -141,21 +141,25 @@ DB_PORT=5432
 | **Step 2 任务配置 = 线程组替换**（`list_thread_groups` / `replace_thread_group`，支持 **5 种** TG：标准 / Stepping / Concurrency / Ultimate / Arrivals）| ✅ |
 | **CSV 作用域变量替换**（`validator.py::collect_effective_csv_vars` + `substitute_vars`）| ✅ |
 | **Environment 模型**（name / is_default / host_entries JSONField）+ admin 编辑 | ✅ |
-| **派生可执行脚本 `.run.jmx`**（Task.run_jmx_filename + thread_groups_config）| ✅ |
+| **可执行 JMX = 内存生成**（`build_run_xml(task)` 不再写 `_run.jmx` 物理文件）| ✅（2026-04-28 取消派生）|
+| **CSV 多绑定**（`TaskCsvBinding` 关联表，按 CSVDataSet 组件 path 独立挂 CSV）| ✅（2026-04-28）|
 | **插件自动安装**（ensure_plugins_installed：jmeter-plugins-casutg + cmn-jmeter）| ✅ |
 | **1 并发校验**（`performance/services/validator.py`：HeaderManager 作用域合并 + Python requests）| ✅ |
+| 任务列表页（性能板块 ChronosNerve）+ 右键删除 | ✅ |
 | 压测执行引擎（调 JMeter CLI） | ❌ v1.1 |
 | MetricSample 时序写入 | ❌ v1.1（表建了，暂无写入） |
 | 异步调度（Celery + Redis） | ❌ v1.1 |
 | 认证（JWT） | ❌ 故意不做 |
-| Ultimate ThreadGroup 参数编辑 | ❌ Step 2 不做；建议用户改用 Stepping |
+| Ultimate ThreadGroup 参数编辑 | ❌ v1：单行参数；多行（多峰错峰）v1.2+ |
 | 集合点测试（Synchronizing Timer）模式预设 | ❌ v1.1 |
+| Service / Grafana / Pinpoint / Arthus 接入 | ❌ v1.2+（Step 2 选 service → 跑完拉指标 → AI 报告对比）|
 
 ## 8. 已落地的业务模型（见 `performance/models.py`）
 
 ```
 Environment (压测环境，hosts 映射等，Step 2 用)
-Task (压测任务定义 + JMX 文件 + Step 2 派生 .run.jmx)
+Task (压测任务定义 + JMX 文件 + Step 2 配置 JSON + environment FK)
+ ├─── TaskCsvBinding (按 CSVDataSet 组件 path 绑定 CSV，多个)
  └─── TaskRun (一次执行记录，v1.1 才会有数据)
        └─── MetricSample (时序采样点，v1.1 才会有数据)
 ```
@@ -170,17 +174,24 @@ Task (压测任务定义 + JMX 文件 + Step 2 派生 .run.jmx)
 - `title`、`description`、`biz_category`（TextChoices: shared/ai/kg）
 - `jmx_filename`（CharField，bare 文件名）—— **原件**物理文件在 `<JMETER_HOME>/scripts/<jmx_filename>`
 - `jmx_hash`（sha256，去重）
-- `csv_filename`（CharField，bare 文件名，空串表示未传）—— 物理文件和 .jmx 同放 `<JMETER_HOME>/scripts/`，命名 `<jmx_stem>.csv`
+- `csv_bindings` 反向关联 `TaskCsvBinding`（每个 CSVDataSet 一条；2026-04-28 取代旧 `csv_filename` 单字段）
 - **JMX 解析字段**：`virtual_users`、`ramp_up_seconds`、`duration_seconds` — 这三个字段与 JMX 文件里的 `ThreadGroup` 内容**保持同步**；Step 2 保存时也会同步（用第一个启用的标准 TG 的参数）
-- **Step 2 字段**（新增）：
-  - `run_jmx_filename`（CharField，空串 = 还没做过 Step 2 配置）—— 派生可执行脚本，命名 `<jmx_stem>_run.jmx`，物理文件同在 scripts/ 下
-  - `thread_groups_config`（JSONField，默认 `[]`）—— `[{"path":"0.0","kind":"ThreadGroup","params":{...}}, ...]`
+- **Step 2 字段**：
+  - `thread_groups_config`（JSONField，默认 `[]`）—— `[{"path":"0.0","scenario":"baseline","kind":"ThreadGroup","params":{...}}, ...]`
   - `environment`（FK → Environment, nullable）
+  - **没有 `run_jmx_filename`**（2026-04-28 移除）：跑压测前 `services/jmx.py::build_run_xml(task)` 在内存生成可执行 XML，不写盘。状态由 serializer 计算字段 `status` 给前端：空配置 → `draft`，非空 → `configured`
 - `owner`（FK User，nullable）
 - `is_deleted` / `deleted_at`（软删除标记）
 - `created_at` / `updated_at`
 - **Manager**：`Task.objects`（默认，过滤掉软删）/ `Task.all_objects`（全量，admin 用）
-- **方法**：`delete()` 软删 + 物理删文件（jmx/run_jmx/csv 都清）；`hard_delete()` 真·删行；`jmx_path()`/`run_jmx_path()`/`csv_path()` + `read_*_bytes()`/`write_*_bytes()` 三套平行读写 API
+- **方法**：`delete()` 软删 + 物理删 .jmx + 删全部 csv_bindings（含物理 CSV）；`hard_delete()` 真·删行；`jmx_path()` + `read_jmx_bytes()` / `write_jmx_bytes()` 一组读写 API
+
+### `TaskCsvBinding`（2026-04-28 新增）
+按 CSVDataSet 组件 path 绑定 CSV 文件。一个 Task 可有多条。
+- `task` FK（cascade 删）
+- `component_path`（如 `"0.0.3"`）+ `filename` —— 唯一约束 `(task, component_path)`
+- 物理 CSV 在 `<JMETER_HOME>/scripts/<jmx_stem>__<safe_path>.csv`（path 的 `.` 换成 `_`）
+- `build_run_xml` 把 CSVDataSet 的 `filename` 字段 patch 成绝对路径，确保 JMeter 找得到（无论"全局"还是"局部" CSVDataSet——位置不动，只改 filename）
 
 ### `TaskRun`
 - `task` FK、`status`（pending/running/success/fail/cancelled）
@@ -235,18 +246,20 @@ tasks/
 | `GET` | `/api/performance/tasks/:id/` | 详情 |
 | `PATCH` | `/api/performance/tasks/:id/` | 改标题/描述/分类/vuser/ramp/duration；后三个改了会同步 patch 到 JMX 文件（v1 前端已不调，留给 v1.1 Step 2） |
 | `DELETE` | `/api/performance/tasks/:id/` | **软删除**：`is_deleted=True` + 物理删除 scripts/ 下的 .jmx（TaskRun/MetricSample 保留） |
-| `POST` | `/api/performance/tasks/:id/upload-csv/` | 单独上传 CSV（字段名 `csv_file`）；校验 10MB 上限；落盘到 `scripts/<jmx_stem>.csv`；覆盖旧 CSV（如有） |
-| `POST` | `/api/performance/tasks/:id/replace-jmx/` | 覆盖同一任务的 JMX（multipart，字段名 `jmx_file`）；保留 title/biz/description/csv_file/created_at，仅换 jmx 内容 + 重 parse vuser/ramp/duration + 更 `jmx_hash`；磁盘文件名不变 |
-| `GET` | `/api/performance/tasks/:id/raw-xml/` | 返回 `{ xml: "..." }` |
-| `GET` | `/api/performance/tasks/:id/download/` | 二进制 JMX 下载 |
+| `POST` | `/api/performance/tasks/:id/replace-jmx/` | 覆盖同一任务的 JMX（multipart，字段名 `jmx_file`）；保留 title/biz/description/created_at；**自动清空 `thread_groups_config` + 解绑全部 csv_bindings + 删物理 CSV**；磁盘文件名不变 |
+| `GET` | `/api/performance/tasks/:id/raw-xml/` | 返回 `{ xml: "..." }`（原件） |
+| `GET` | `/api/performance/tasks/:id/download/` | 二进制 JMX 下载（原件） |
+| `GET` | `/api/performance/tasks/:id/preview-run-xml/` | 返回 `{ xml }`（内存中由 `build_run_xml(task)` 组装的可执行版，调试 / 用户预览用，不写盘） |
 | `GET` | `/api/performance/tasks/:id/components/` | 组件树 `[JmxComponent]`（按 `<hashTree>` 配对结构递归；每项 `path/tag/testname/enabled/children`） |
 | `POST` | `/api/performance/tasks/:id/components/toggle/` | body `{path, enabled}` → 定位组件改 `enabled` 属性，写盘，返回新树 |
 | `POST` | `/api/performance/tasks/:id/components/rename/` | body `{path, testname}` → 定位组件改 `testname` 属性（允许空串），写盘，返回新树 |
 | `GET` | `/api/performance/tasks/:id/components/detail/?path=...` | 返回该组件的编辑字段结构。HTTPSamplerProxy → `{kind, domain, port, protocol, method, path, bodyMode, params:[{name,value}], body, files:[{path,paramname,mimetype}]}`；HeaderManager → `{kind, headers:[{name,value}]}`；其他 tag 返 400 |
 | `PATCH` | `/api/performance/tasks/:id/components/detail/` | body `{path, kind, fields}` → 按 kind 写回（HTTPSampler 带 bodyMode 时重建 Arguments collection + 切换 `HTTPSampler.postBodyRaw`；带 files 时重建 Files collection；HeaderManager 整条 collectionProp 重建），写盘，返回新树 |
+| `POST` | `/api/performance/tasks/:id/components/upload-csv/` | multipart `path` + `csv_file` → 校验 path 在 JMX 中且 tag=CSVDataSet → 落盘 + upsert `TaskCsvBinding`；返回更新后 Task |
+| `POST` | `/api/performance/tasks/:id/components/delete-csv/` | body `{path}` → 删 binding + 物理 CSV；返回更新后 Task |
 | `GET` | `/api/performance/tasks/:id/thread-groups/` | 返回 `{thread_groups:[{path,kind,tag,testname,enabled,current_params}], saved_config, environment}`；前端 Step 2 初始化用 |
-| `PATCH` | `/api/performance/tasks/:id/thread-groups/` | body `{thread_groups:[{path,kind,params}], environment_id}`；按配置**从原件重新生成** `<jmx_stem>_run.jmx`；Stepping/Concurrency 会按需调 `ensure_plugins_installed()`；保存 `thread_groups_config` + `environment` 到 Task |
-| `POST` | `/api/performance/tasks/:id/validate/` | body `{environment_id?}`；遍历启用的 HTTPSampler 各发一次请求（读 .run.jmx 若存在否则原件；按 HeaderManager 作用域合并；Environment.host_entries 映射通过 IP 直连 + Host 头）；返回 `[{path,testname,url,status,elapsed_ms,ok,error?}]` |
+| `PATCH` | `/api/performance/tasks/:id/thread-groups/` | body `{thread_groups:[{path,kind,params}], environment_id}`；**仅入库**（`thread_groups_config` + `environment`），不再写 `_run.jmx`；先 dry-run 一次 `replace_thread_group` 校验所有 path/kind/params 合法；Stepping/Concurrency/Ultimate/Arrivals 会按需调 `ensure_plugins_installed()` |
+| `POST` | `/api/performance/tasks/:id/validate/` | body `{environment_id?}`；调 `build_run_xml(task)` 内存生成 XML → 遍历启用的 HTTPSampler 各发一次请求；按 HeaderManager 作用域合并；Environment.host_entries 映射通过 IP 直连 + Host 头；返回 `[{path,testname,url,status,elapsed_ms,ok,error?,unresolved_vars?}]` |
 | `GET` | `/api/performance/environments/` | Environment 列表（不分页），前端 Step 2 下拉用 |
 | `GET` | `/api/performance/environments/:id/` | Environment 详情 |
 
@@ -398,6 +411,15 @@ new_bytes = replace_thread_group(xml_bytes, path='0.0', kind='SteppingThreadGrou
 # 边界：用户数 ≤ MAX_USERS=5000；各时间字段 ≤ MAX_DURATION_SECONDS=43200；target_rps ≤ 1_000_000
 ```
 
+```python
+# 9) 跑压测前内存生成可执行 XML（取代 _run.jmx 物理派生，2026-04-28）
+from performance.services.jmx import build_run_xml
+xml = build_run_xml(task)                              # validate / 默认场景
+xml = build_run_xml(task, inject_environment_dns=True) # v1.1 跑 JMeter 时
+# 内部步骤：读原件 → 链式 replace_thread_group → patch CSVDataSet filename
+# 为绝对路径 → 可选注入 DNSCacheManager（按 task.environment.host_entries）
+```
+
 **关键细节**：
 - XPath 用 `stringProp` / `intProp` 双兜底（见 `_find_prop`），JMeter 模板有两种写法
 - 改 `duration_seconds` 时**自动**把 `ThreadGroup.scheduler` 置 true（否则 JMeter 忽略 duration）
@@ -408,6 +430,7 @@ new_bytes = replace_thread_group(xml_bytes, path='0.0', kind='SteppingThreadGrou
 - `toggle_component` 的 `path` 非法/越界抛 `JmxParseError` → view 层 catch 后返 400
 - **索引路径语义**：`"0.2.1"` = top-level hashTree 第 0 个组件（TestPlan）→ 它的子 hashTree 第 2 个组件（比如 ThreadGroup）→ 该 ThreadGroup 的子 hashTree 第 1 个组件。代码里 `_hashtree_pairs` 负责把 "元素 + 紧跟的 hashTree" 配对起来
 - **`replace_thread_group` 语义**：定位到 path 位置的 ThreadGroup 元素，用 lxml `parent.replace()` 整体替换成新 kind 的元素。**紧跟的 hashTree（装 Samplers/HeaderManager 的那个）保持不动**——这是 Step 2 不破坏原有 Sampler 配置的关键。禁用的 ThreadGroup 前端不展示、PATCH body 也不会包含它们，所以在 JMX 里原样保留（含 enabled=false）。
+- **`build_run_xml`**：纯内存操作，无副作用。默认 `inject_environment_dns=False`（validate 用）；v1.1 跑 JMeter 时传 `True` 让 hosts 通过 JMX 内的 `DNSCacheManager` 生效（不依赖系统 DNS / 不污染压力机 hosts）。
 
 ## 16. Step 2 校验服务 `performance/services/validator.py`
 
@@ -449,14 +472,46 @@ results: list[ValidateResult] = validate_task(
 
 fixture `performance/tests/fixtures/sample.jmx` 是最简实验模板，有 HTTP Sampler + CSVDataSet，parse/patch/components/thread-groups 测试都拿它。
 
-## 17. v1.1 规划（下一阶段）
+## 17. v1.1 规划（Step 3 执行模块，下一阶段）
 
-1. **`performance/services/executor.py`**：用 `subprocess` 调 `jmeter -n -t <jmx> -l <jtl> -e -o <report_dir>`
-2. **`@action` on TaskViewSet**：`POST /api/performance/tasks/:id/run` → 创建 `TaskRun(status=running)` → 异步起 JMeter → 返回 run id
-3. **JTL 结果解析**：`.jtl` 是 CSV 格式，读完算 `avg_rps` / `p99_ms` / `error_rate` / `total_requests` 填回 `TaskRun`
+### 17.1 数据流
+```
+PATCH thread-groups (Step 2 入库)
+        ↓
+POST tasks/:id/run
+        ↓
+build_run_xml(task, inject_environment_dns=True)   ← 内存生成
+        ↓
+write to <jmeter_home>/runs/<run_id>/run.jmx       ← 唯一一次落盘（归档）
+        ↓
+subprocess.Popen('jmeter', '-n', '-t run.jmx',
+                 '-l results.jtl', '-e', '-o report/')
+        ↓
+TaskRun(status=running) + 后台线程/Celery worker tail .jtl
+        ↓
+每秒聚合 → MetricSample(run, ts, rps, p99_ms, error_rate, active_users)
+        ↓
+进程退出 → 解析全量 .jtl → 填 TaskRun 汇总指标 → status=success/fail
+```
+
+### 17.2 关键模块
+1. **`performance/services/executor.py`**：用 `subprocess.Popen` 调 `jmeter -n -t <run.jmx> -l <jtl> -e -o <report_dir>`；维护 `Popen` handle 给 cancel 用
+2. **`@action` on TaskViewSet**：
+   - `POST /api/performance/tasks/:id/run` → 创建 `TaskRun(status=running)` → 异步起 JMeter → 返回 `{run_id}`
+   - `POST /api/performance/runs/:run_id/cancel` → `Popen.terminate()` → status=cancelled
+   - `GET /api/performance/runs/:run_id/` → run 详情（含汇总指标）
+   - `GET /api/performance/runs/:run_id/metrics?since=<ts>` → 增量时序点
+   - `GET /api/performance/tasks/:id/runs/` → 历史 run 列表
+3. **JTL 结果解析**：`.jtl` 是 CSV 格式（`timeStamp,elapsed,label,responseCode,responseMessage,...`），读完算 `avg_rps` / `p99_ms` / `error_rate` / `total_requests` 填回 `TaskRun`
 4. **时序采样**：执行期间每秒 tail `.jtl` 新增行，聚合成一个 `MetricSample` 写 DB
-5. **Celery + Redis**：subprocess 直接跑会卡住 gunicorn worker，必须 Celery 异步化
-6. **前端查询 run**：新端点 `GET /api/performance/tasks/:id/runs/`、`GET /api/runs/:id/metrics?since=<ts>` 供前端轮询画图
+5. **执行器选型**：v1 dev 阶段用 Python `threading.Thread` 跑通；上量必须 **Celery + Redis**（subprocess 直接跑会卡住 gunicorn worker）
+6. **压力机管理**（v1.2+）：当前 master = web 进程同主机；以后加 `LoadGenerator` 模型 + 远程 JMeter slave（`-R <host:port>`）
+7. **磁盘空间**：每次 run 落盘 `runs/<run_id>/{run.jmx, results.jtl, report/}`，长跑 .jtl 可能上 GB；v1.1 加"自动清理超过 N 天 / 仅保留最新 M 个 run"策略
+
+### 17.3 Step 2 还要补的（执行前必须）
+- **Environment DNS 注入实测**：`build_run_xml(inject_environment_dns=True)` 已实现 `DNSCacheManager` 注入逻辑，但还没真跑过 JMeter 验证 hosts 生效
+- **TG 参数与 JMeter 字段对齐**：ArrivalsThreadGroup 的 `ConcurrencyLimit / LogFilename / Iterations`、Stepping 的"每步内部 ramp"等当前写死兜底值，需暴露给前端调
+- **"压测的服务"字段**：Task 加 `service` FK → Service 模型（含 grafana_url / pinpoint_app / arthus_endpoint）；Step 2 选择 service 后 → Step 3 跑完拉对应监控数据 → AI 对比报告。服务未接入监控时退化为"仅 JTL 总结 + 接入指引"
 
 ## 18. JMeter 工具与脚本存储（v1 已落地）
 
@@ -478,10 +533,16 @@ fixture `performance/tests/fixtures/sample.jmx` 是最简实验模板，有 HTTP
   ```
 
 ### 18.2 文件名规则
-- 任务 title 创建时自动加日期前缀：`YYYY-MM-DD_<用户输入>`
+- 任务 title 直接用用户输入（**2026-04-28 取消日期前缀**）
 - 文件名 = `sanitize_script_name(title) + '.jmx'`；非法字符 (`< > : " / \\ | ? *` 及控制符) 剔除，中文保留
 - 冲突时追加 `_2`、`_3`
 - Windows 保留名 (CON/PRN/...) 加下划线前缀防爆
+- CSV 命名：`<jmx_stem>__<safe_path>.csv`（按 `TaskCsvBinding.component_path` 决定，path 的 `.` 换 `_`，例 `0.0.3` → `0_0_3`）
+
+### 18.3 写盘安全保护（2026-04-28）
+- `write_script` / `write_csv` 写盘前 `shutil.disk_usage()` 检查 < 100 MB → 抛 `DiskFullError`，views 转 503 + 明确文案
+- 实际写盘走 `_atomic_write_bytes(path, data)`：open + write + flush + `os.fsync(f.fileno())`，确保 bytes 落盘后才返回，避免半写文件被 JMeter 读到
+- 新增 `get_runs_dir() → <jmeter_home>/runs/`，给 v1.1 执行模块的 `runs/<run_id>/run.jmx` + `results.jtl` 准备
 
 ### 18.3 Docker 部署（v1.2+）
 **不要**让容器首次请求时下载 JMeter——慢、可能无外网、每次重启重下。由于代码固定用 `backend/jmeter/apache-jmeter-<VERSION>/` 这个路径，Dockerfile 在构建期就把 JMeter 解压到这里，**代码零改动**。
@@ -518,7 +579,7 @@ volumes:
 关键是：**镜像里 JMeter 要解压到 `/app/backend/jmeter/apache-jmeter-<VERSION>/`，路径跟 Django `BASE_DIR` 下的 `jmeter/` 对齐**，运行时 `ensure_jmeter_installed()` 检测到已有 `bin/jmeter` 就直接返回，不触发下载。
 
 ### 18.4 软删除
-- `Task.delete()` = 设 `is_deleted=True` + 物理删除 scripts/ 下的 .jmx + 删 CSV（DB 行保留）
+- `Task.delete()` = 设 `is_deleted=True` + 物理删除 .jmx + 全部 csv_bindings（含物理 CSV）；DB 行保留
 - 默认 `Task.objects.all()` 过滤掉软删除
-- Admin 用 `Task.all_objects` 看全量（包括已删）
+- Admin 用 `Task.all_objects` 看全量（包括已删）；管理界面 Task 详情内嵌 `TaskCsvBinding` inline
 - 真要删行用 `instance.hard_delete()`（API 没暴露）

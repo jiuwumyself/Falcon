@@ -37,6 +37,12 @@ main.ts  →  App.vue (RouterView)
 
 **任务创建入口**：进 `/performance` → 左列 ChronosNerve 顶部那个渐变色大 "+" 按钮 → `router.push('/performance/tasks')` → TasksPage 加载 `TaskCreateWizard`；wizard 的 close 事件 `router.push('/performance')` 回性能页。Wizard 内部 step 是 ref state，**不改 URL**（/performance/tasks 是单一路由）。
 
+**任务编辑入口**（2026-04-28）：性能板块 ChronosNerve 任务卡 `@click` → `router.push('/performance/tasks?id=N')` → `TasksPage` `onMounted` 拉 `tasksApi.get(id)` → 把 task 作 `initialTask` prop 喂给 wizard → wizard 跳到最远完成的 Step（`thread_groups_config` 非空 → Step 2，否则 Step 1）。
+
+**右键删除**：ChronosNerve 任务卡 `@contextmenu.prevent="emit('contextTask', id, x, y)"` → PerformanceStage 弹 `<TaskContextMenu>` 浮层 → 点删除 confirm → `tasksApi.delete(id)` → 重拉列表。
+
+**后台入口**：`MainLayout` 顶栏右侧主题切换按钮和头像之间，加 Settings 齿轮，新 tab 打开 `/admin/`（让用户去管理 Environment 等模型）。
+
 ## 3. 目录约定
 
 | 目录 | 放什么 | 举例 |
@@ -44,10 +50,10 @@ main.ts  →  App.vue (RouterView)
 | `src/pages/` | 顶层页面，被路由直接加载 | `LoginPage.vue`、`HomePage.vue`、`PerformancePage.vue`、`TasksPage.vue`、`UIPage.vue`、`APIPage.vue` |
 | `src/layouts/` | 布局壳，包 `<RouterView />` | `AppLayout.vue`（仅 provideTheme）、`MainLayout.vue`（顶栏 nav + 4 个板块 page 容器） |
 | `src/components/` | **跨页共用**的组件 | `FalconLogo.vue`、`GlassNav.vue`、`PerformanceStage.vue` |
-| `src/components/tasks/` | 任务创建/编辑相关 | `TaskCreateWizard.vue`（5 步向导，左竖脊 stepper）、`ScriptTree.vue`/`ComponentNode.vue`（Step 1 组件树）、`DetailDrawer.vue` + `detail/*.vue`（Step 1 HTTPSampler/HeaderManager 抽屉编辑）、`ConfigStage.vue` + `config/*.vue`（Step 2 任务配置）、`scriptTreeCtx.ts` / `configStageCtx.ts`（两套独立 InjectionKey） |
+| `src/components/tasks/` | 任务创建/编辑相关 | `TaskCreateWizard.vue`（5 步向导，左竖脊 stepper，**支持 initialTask 编辑模式 + 重新上传 confirm + toast**）、`ScriptTree.vue`/`ComponentNode.vue`（Step 1 组件树，CSVDataSet 行内**按 path 绑定** CSV）、`DetailDrawer.vue` + `detail/*.vue`（Step 1 HTTPSampler/HeaderManager 抽屉编辑）、`ConfigStage.vue` + `config/*.vue`（Step 2 任务配置）、`scriptTreeCtx.ts` / `configStageCtx.ts`（两套独立 InjectionKey） |
 | `src/components/tasks/config/` | Step 2 子组件（v2 场景驱动） | `ScenarioTabs.vue`（6 个场景 pill + 说明条）、`ThreadGroupPicker.vue`（多 TG 时显示的切换器）、`TgParamsForm.vue`（参数表单，字段随 kind 自适应）、`ThreadGroupChart.vue`（echarts 线图）、`EnvironmentPicker.vue`（环境下拉）、`ValidateResultTable.vue`（校验结果表，含未解析变量警告） |
 | `src/components/home/` | HomePage 专属子组件 | `HeroSection`、`ZoomSection`、`ScrollDots` |
-| `src/components/perf/` | PerformanceStage 专属（仍是 mock 数据） | `ChronosNerve`、`MetricsColumn`、`TemporalColumn`、`data.ts`、`useRimColor.ts` |
+| `src/components/perf/` | PerformanceStage 专属（**ChronosNerve 已接真任务列表**；其他列暂仍 mock） | `ChronosNerve`、`MetricsColumn`、`TemporalColumn`、`TaskContextMenu`（右键删除浮层）、`data.ts`、`useRimColor.ts` |
 | `src/composables/` | Vue composable（`useXxx`） | `useTheme.ts` |
 | `src/lib/` | 纯 TS 工具，无 Vue 依赖 | `api.ts`（fetch 封装）、`utils.ts` 的 `cn()` |
 | `src/types/` | 共享 TypeScript 类型 | `task.ts`（Task / TaskRun / Paginated / JmxComponent） |
@@ -225,23 +231,26 @@ await apiForm<Task>('/tasks/', fd)
 
 > **多板块演进**：以后做 UI 板块 / 接口板块会有 `/api/uiauto/...` 和 `/api/apitest/...`，届时把 `api.ts` 拆成 `api/performance.ts` / `api/uiauto.ts` 等 per-module 实例。现在单板块阶段只用一个 BASE。
 
-### 已有的 API 端点（v1）
+### 已有的 API 端点（v1，**lib/api.ts 的 `tasksApi` 已封装常用调用**）
 
-- `GET /api/performance/tasks/` → `Paginated<Task>`（PAGE_SIZE=50，**默认过滤软删**）
-- `POST /api/performance/tasks/`（multipart, 含 `jmx_file`） → 后端会解析 JMX 自动填 `virtual_users/ramp_up_seconds/duration_seconds`，title 自动加 `YYYY-MM-DD_` 前缀
-- `GET/PATCH /api/performance/tasks/:id/`（`PATCH title` 会 rename 磁盘文件；`PATCH vuser/ramp/duration` 会 `patch_jmx` 重写文件——v1 前端已不调用 PATCH，留给 v1.1 Step 2）
-- `DELETE /api/performance/tasks/:id/` → **软删除**（DB `is_deleted=True` + 物理删除 scripts/ 下的 .jmx）
-- `POST /api/performance/tasks/:id/upload-csv/`（multipart，字段名 `csv_file`）
-- `GET /api/performance/tasks/:id/raw-xml/` → `{ xml: string }`
-- `GET /api/performance/tasks/:id/download/` → 二进制 JMX（打开新窗口直接下载）
-- `GET /api/performance/tasks/:id/components/` → `JmxComponent[]`（嵌套树，每项 `path/tag/testname/enabled/children`）
-- `POST /api/performance/tasks/:id/components/toggle/` body `{path, enabled}` → 切换单个组件 enabled 并返回新树
-- `POST /api/performance/tasks/:id/components/rename/` body `{path, testname}` → 改某组件 testname 并返回新树
-- `GET /api/performance/tasks/:id/components/detail/?path=...` → HTTPSampler / HeaderManager 的可编辑字段
-- `PATCH /api/performance/tasks/:id/components/detail/` body `{path, kind, fields}` → 写回字段，返回新树
-- `GET /api/performance/tasks/:id/thread-groups/` → `ThreadGroupsResponse { thread_groups, saved_config, environment }` —— Step 2 初始化
-- `PATCH /api/performance/tasks/:id/thread-groups/` body `{thread_groups:[{path,kind,params}], environment_id}` → 保存 Step 2 配置、重生成 `.run.jmx`、返回更新后的 Task
-- `POST /api/performance/tasks/:id/validate/` body `{environment_id?}` → `ValidateResult[]`（1 并发请求每个启用的 HTTPSampler）
+- `GET /api/performance/tasks/` → `Paginated<Task>`（PAGE_SIZE=50，**默认过滤软删**；`Task` 含 `status: 'draft'|'configured'` 计算字段 + `csv_bindings: TaskCsvBinding[]`）
+- `POST /api/performance/tasks/`（multipart, 含 `jmx_file`） → 后端解析 JMX 自动填 `virtual_users/ramp_up_seconds/duration_seconds`；**title 不再加日期前缀**，直接用用户输入
+- `GET/PATCH /api/performance/tasks/:id/`（`PATCH title` 会 rename 磁盘文件；`PATCH vuser/ramp/duration` 会 `patch_jmx` 重写文件——v1 前端已不调用 PATCH）
+- `DELETE /api/performance/tasks/:id/` → **软删除**（DB `is_deleted=True` + 物理删除原件 + 全部 csv_bindings 物理 CSV）
+- `POST /api/performance/tasks/:id/replace-jmx/`（multipart）→ 覆盖原件；**自动清空 `thread_groups_config` + 解绑 csv_bindings**；前端按钮在已配置 Step 2 时弹 confirm
+- `POST /api/performance/tasks/:id/components/upload-csv/` body `path` + `csv_file` → 按 CSVDataSet 路径绑定（替换旧 binding 同时删旧 CSV 物理文件）
+- `POST /api/performance/tasks/:id/components/delete-csv/` body `{path}` → 解除绑定 + 删物理文件
+- `GET /api/performance/tasks/:id/raw-xml/` → `{ xml: string }`（原件）
+- `GET /api/performance/tasks/:id/download/` → 二进制 JMX（原件）
+- `GET /api/performance/tasks/:id/preview-run-xml/` → `{ xml }` 内存生成的可执行版（调试 / 预览，不写盘）
+- `GET /api/performance/tasks/:id/components/` → `JmxComponent[]`
+- `POST /api/performance/tasks/:id/components/toggle/` body `{path, enabled}`
+- `POST /api/performance/tasks/:id/components/rename/` body `{path, testname}`
+- `GET /api/performance/tasks/:id/components/detail/?path=...` → HTTPSampler / HeaderManager 字段
+- `PATCH /api/performance/tasks/:id/components/detail/` body `{path, kind, fields}`
+- `GET /api/performance/tasks/:id/thread-groups/` → `ThreadGroupsResponse { thread_groups, saved_config, environment }`
+- `PATCH /api/performance/tasks/:id/thread-groups/` body `{thread_groups, environment_id}` → **仅入库**（不再写 `_run.jmx`）
+- `POST /api/performance/tasks/:id/validate/` body `{environment_id?}` → `ValidateResult[]`（1 并发请求每个启用的 HTTPSampler，内存生成 XML）
 - `GET /api/performance/environments/` → `Environment[]`（不分页；编辑走后台 admin）
 
 ## 10. 构建 / 类型检查
@@ -260,12 +269,15 @@ npx vue-tsc --noEmit      # 只跑类型检查（快）
 ### 11.1 `figma/` 是参考源，不是运行时代码
 **永远不要** `import ... from '../../figma/...'`。需要还原 figma 设计时：读 `figma/src/app/components/*.tsx` → 照着写对应的 `.vue`。
 
-### 11.2 Mock 数据 vs 真 API 数据（重要）
-前端同时存在两种数据源，不要混：
-- **`src/components/perf/data.ts`**：`TASKS` / `PEOPLE` / `BIZ` 全是 mock。**只给 PerformanceStage 的视觉 showcase 用**。将来可能废弃。
-- **`src/types/task.ts`**：真的 `Task` / `JmxComponent` / `TaskRun` 类型，字段对应 Django 后端的 API 响应。**所有新业务（TasksPage、ScriptTree、TaskUploadDialog 等）一律用这个类型 + `api()` 取数据**。
+### 11.2 Mock 数据 vs 真 API 数据（2026-04-28 更新）
+前端同时存在两种数据源：
+- **`src/components/perf/data.ts`**：`TASKS` 是 mock（仍保留作为 `MetricsColumn` / `TemporalColumn` 视觉占位，因为它们需要 rps / p99 / phases 这些运行时数据，v1 还没有），`PEOPLE` / `BIZ` 是视觉点缀
+- **`PerformanceStage.vue`**：mounted 时调 `tasksApi.list()` → `mapApiTask()` 映射成 `StreamTask` schema → 喂给 ChronosNerve（左列任务列表，**这一列是真数据**）
+- **`src/types/task.ts`**：API 真类型，新业务统一用它
 
-两个 `Task` 接口**字段并不兼容**——mock 版本有 `rps/p99/errorRate/vuser/phases/rpsWave` 等"运行时指标"，真 API 的 Task 只有定义字段（vuser / duration / ramp_up）。运行时指标属于 `TaskRun`，v1.1 接执行时才会有。
+`StreamTask`（perf/data.ts）保留是因为它的视觉 schema 比 API Task 多了运行时字段；映射函数把缺的字段填 0 / 空串。等 v1.1 接 TaskRun，`MetricsColumn` / `TemporalColumn` 也切真数据时，能消掉这层映射。
+
+`StreamTask.status`：`success` / `fail` / `running` / `draft` / `configured`，对应到 `stColor()`（draft=灰、configured=紫、其他原色）。
 
 ### 11.3 API helper = `src/lib/api.ts`（v1 新写的）
 当前版本**没有** token/auth 逻辑。如果以后要加鉴权，改这一个文件就够。**不要**在组件里直接 `fetch()`——统一走 `api()` / `apiForm()` 方便拦截错误和加 header。
@@ -309,8 +321,16 @@ class Foo {
 ### 11.6 Windows 下的依赖
 `@rollup/rollup-win32-x64-msvc` 一类的 native 包跟着 `npm install` 自动处理，不要手动装。如果 `npm run dev` 报 "Cannot find module" 带 platform 后缀的 native 包，删 `node_modules` 重装。
 
-### 11.8 `Task` 类型字段跟后端对齐
-`src/types/task.ts` 的 `Task.jmx_filename` / `Task.csv_filename` 都是**文件名字符串**（不是 URL），对应后端 `Task.jmx_filename` / `Task.csv_filename` CharField。物理文件都落 `<jmeter_home>/scripts/`。需要下载 .jmx 用 `GET /api/performance/tasks/:id/download/` 端点（开新窗口）。CSV 上传走 `POST /api/performance/tasks/:id/upload-csv/`。
+### 11.8 `Task` 类型字段跟后端对齐（2026-04-28 改造）
+`src/types/task.ts` 的 `Task.jmx_filename` 是**文件名字符串**（不是 URL），对应后端 CharField；物理文件落 `<jmeter_home>/scripts/`。
+
+**已删除字段**：`csv_filename` / `run_jmx_filename`。
+
+**新增字段**：
+- `csv_bindings: TaskCsvBinding[]` —— 每个 `{component_path, filename}` 对应一个 CSVDataSet 绑定
+- `status: 'draft' | 'configured' | 'running' | 'success' | 'failed'` —— 后端计算字段，前端按它着色 / 排序
+
+下载 .jmx 用 `GET /api/performance/tasks/:id/download/` 端点（开新窗口）。CSV 上传走 `POST /api/performance/tasks/:id/components/upload-csv/`（multipart，body `path` + `csv_file`），通过 `tasksApi.uploadComponentCsv(id, path, file)` 调用。
 
 ## 12. TaskCreateWizard 结构约定（v1 已落地）
 
@@ -332,14 +352,15 @@ Wizard 是单一 glass panel：
 ```
 
 ### 12.1 Step 语义（重要，不要搞反）
-- **Step 1 `upload`**（序号从 1 起，代码数组里还是 index 0）：**同时承载"上传 + 查看/切换组件 enabled"**。`uploadedTask` 为 null 时 → 居中 dropzone；非 null 时 → 左侧 header（title + filename + 右上 "重新上传" 按钮）+ 下方 `<ScriptTree>` 渲染组件树（每行有 enabled toggle）。**不切换到 Step 2**。
-- **Step 2 `config`**（v2 场景驱动）：`<ConfigStage>` 三段式布局。顶部 TG 切换器（单 TG 时隐藏） + 禁用 TG 提示 → 场景 Tab pill（6 选一）+ 常驻说明条 → 左右分栏（左 35% 参数表单 + 环境下拉 + 校验/保存按钮 / 右 65% echarts 线图 + 校验结果）
+- **Step 1 `upload`**（序号从 1 起，代码数组里还是 index 0）：**同时承载"上传 + 查看/切换组件 enabled"**。`uploadedTask` 为 null 时 → 居中 dropzone；非 null 时 → 左侧 header（title + filename + 右上 "重新上传" 按钮，**已配置 Step 2 时点重新上传弹 confirm 提示清空**）+ 下方 `<ScriptTree>` 渲染组件树（每行 enabled toggle，CSVDataSet 行内 Paperclip 按 path 上传）。**不切换到 Step 2**。
+- **Step 2 `config`**（v2 场景驱动）：`<ConfigStage>` 三段式布局。顶部 TG 切换器（单 TG 时隐藏） + 禁用 TG 提示 → 场景 Tab pill（6 选一，**每个 pill 旁有 `?` 图标 hover tooltip：用途 / 典型参数 / 关注指标**）+ 常驻说明条 → 左右分栏（左 35% 参数表单 + 环境下拉 + 校验/保存按钮 / 右 65% echarts 线图 + 校验结果）
 - **Step 3-5 `execute/analyze/report`**：占位 "v1.1 即将推出"，内容在 `TaskCreateWizard.vue` 的 `STEPS` 数组末尾 template 里
 
 ### 12.2 状态机
-- `currentStep: ref<number>` —— 0-4 数组索引，初始 0（= Step 1 上传）
-- `uploadedTask: ref<Task | null>` —— null 代表还没上传
-- `fileInput: ref<HTMLInputElement | null>` —— 共享的隐藏 `<input type="file">`；dropzone 点击和"重新上传"按钮都通过 `fileInput.value?.click()` 触发
+- `currentStep: ref<number>` —— 0-4 数组索引；初始 0；编辑模式（`initialTask` 非空 + `thread_groups_config` 非空）→ 直接跳到 1
+- `uploadedTask: ref<Task | null>` —— null 代表还没上传；接受 `props.initialTask` 时通过 `applyInitialTask()` 同步
+- `fileInput: ref<HTMLInputElement | null>` —— 共享的隐藏 `<input type="file">`；dropzone 点击走 `triggerPicker`，"重新上传"按钮走 `triggerReupload`（已配置 Step 2 时 confirm，否则直接打开选择器）
+- `toast: ref<{text}|null>` —— 重新上传成功后短暂展示反馈（`脚本已替换` 或 `脚本已替换，请重新配置 Step 2`），2.5s 自动消失
 - `isDone(i)`: `i === 0 && !!uploadedTask.value`（v1 只有 Step 1 有"完成"概念）
 - `canEnterStep(i)`: `i === 0 || !!uploadedTask.value`（Step 2-5 需要先上传过）
 - 节点点击 → 如果 `!canEnterStep(i)` → no-op + 灰度视觉 + `cursor-not-allowed`
@@ -360,7 +381,7 @@ Wizard 是单一 glass panel：
 - **展开 / 折叠全部**：两个按钮分别 `ctx.expandTrigger.value++` / `collapseTrigger.value++`；`ComponentNode` watch 这两个 ref——展开时把 depth 0/1/2 的节点设 `expanded=true`（跟初值一致），折叠时把 depth ≥ 1 的节点设 `expanded=false`（TestPlan 根节点保持展开，否则工具栏就成了孤零零一行）
 - **搜索行为**：搜索框 v-model 到 `ctx.searchQuery`，ComponentNode 里基于它 computed `isMatch`（`testname` 或 `tag` 大小写不敏感 contains）和 `hasMatchingDescendant`（递归子树）。匹配 → 行背景 `rgba(254,240,138,0.55)` / dark 下 `rgba(250,204,21,0.18)`（淡黄高亮）。只要 `isMatch || hasMatchingDescendant` 为 true，**watch 强制把这条分支的 `expanded` 设 true**（自动展开祖先路径）；搜索清空**不自动回弹**，保留用户已展开状态
 - **保存失败闪红**：`ScriptTree` 的 `handleToggle` catch 里把出错的 path 写进 `ctx.errorFlashPath`，800 ms 后清空。ComponentNode 检测到 `errorFlashPath === 自己.path` 时行背景变淡红（优先级高于搜索高亮）。文件没变 + UI 闪红一眼就知道"这次切换没保存成功"。CSV 行上传失败同样触发闪红。
-- **CSVDataSet 行**特殊渲染：enabled toggle 左侧多一个 Paperclip 图标 → 点了打开文件选择器 → `POST /api/performance/tasks/:id/upload-csv/` → ScriptTree 把回传的新 Task emit 给 TaskCreateWizard（`@task-updated`）→ `uploadedTask.value = $event` 刷新 header 上的 `csv_filename`。按钮颜色在已关联 CSV 时变成绿色（`#10b981`），hover 提示显示当前文件名。
+- **CSVDataSet 行**特殊渲染（2026-04-28 改成按 path 多绑定）：enabled toggle 左侧多一个 Paperclip 图标 → 点了打开文件选择器 → `tasksApi.uploadComponentCsv(taskId, node.path, file)` 调 `POST /tasks/:id/components/upload-csv/` → ScriptTree 把回传的新 Task emit 给 TaskCreateWizard（`@task-updated`）。按钮颜色：在 `task.csv_bindings` 找到对应 path 的 binding 时变绿（`#10b981`），hover 提示显示该 binding 的 filename；未绑定时灰色。
 - **CSVDataSet 自动可见**：ScriptTree 每次拉到新 tree 后扫出所有 `tag === 'CSVDataSet'` 节点的 path 和祖先 path，放进 `ctx.forceExpandPaths`。ComponentNode watch 此 set，若命中自己 path，强制 `expanded = true`——这样即便 CSVDataSet 深度超过 3 级，也能第一眼看到。用户后续可手动折叠。
 - **双击 testname 改名**：非 TestPlan 节点的 testname 文字 `@dblclick` 进入编辑态（替换为 input + 蓝色边框）。Enter / 失焦 → `emit('rename', path, newName)` → ScriptTree 调 `POST /components/rename/` 写盘；Esc 取消；没改动就不发请求。失败依旧触发 errorFlashPath 闪红。TestPlan 根行不开放改名（那一级承载工具栏）。
 - **HTTPSampler / HeaderManager 抽屉编辑**：ComponentNode 在 enabled toggle 左侧 (对这两种 tag) 加紫色齿轮按钮（Settings 图标）→ `emit('edit', node)` → ScriptTree 把 `editingNode` 设为该节点 → `DetailDrawer` 从右侧滑入（400px 宽）→ mount 时 `GET /components/detail/?path=...` 拉字段；子组件 `HttpSamplerForm` 或 `HeaderManagerForm` 按 `detail.kind` 条件渲染；保存时 `PATCH /components/detail/` 写盘，返回的新树直接 `tree.value = event`；抽屉自动关闭。HeaderManager 整条重建 collectionProp，增/删/改 headers 都在表单里完成。
@@ -392,11 +413,11 @@ Wizard 是单一 glass panel：
 
 **读写规则**：`thread_groups_config` JSON 每项存 `{path, scenario, kind, params}`。老数据（v1 没 scenario 字段）→ `inferScenarioFromKind` 按 kind 反推一个。新 TG 首次进 Step 2 → 默认 `load` 场景。
 
-### 12.7 Step 2 与 Step 1 的协作
+### 12.7 Step 2 与 Step 1 的协作（2026-04-28 改造：取消 `_run.jmx`）
 
-- Step 2 **只显示启用的 TG**；禁用的 TG 在 PATCH body 里缺席 → 后端从原件读时它们原样保留（含 `enabled=false`）→ `.run.jmx` 里一样留着
-- Step 2 保存后 `uploadedTask.run_jmx_filename` 从空串变有值，界面短暂显示"已保存 · xxx.run.jmx"
-- **原件 vs 派生**：Step 1 所有操作改原件 `<title>.jmx`；Step 2 每次保存**从原件重新派生** `.run.jmx`（DB 里 `thread_groups_config` 记参数）。Step 1 之后的组件启用/detail 修改会自动反映到下次 Step 2 保存生成的 `.run.jmx` 里，不会出现两份文件不一致
+- Step 2 **只显示启用的 TG**；禁用的 TG 在 PATCH body 里缺席 → 后端原件里它们原样保留（含 `enabled=false`），跑压测时也一样保留禁用
+- Step 2 保存 = **仅写 DB**（`thread_groups_config` + `environment`），**不写盘**；状态变成 `configured`，列表里徽标变紫
+- **原件 vs 内存生成**：Step 1 所有操作改原件 `<title>.jmx`；Step 2 配置入 DB；validate / 跑压测时（v1.1）后端 `services/jmx.py::build_run_xml(task)` 在内存里读原件 → 套 thread_groups_config + csv_bindings → 返回 bytes。**没有派生文件，永远没有"派生品过期"**——Step 1 后续改动自动反映到下次 run。
 
 ### 12.8 configStageCtx.ts
 
