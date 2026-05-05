@@ -21,7 +21,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'toggle', path: string, next: boolean): void
   (e: 'rename', path: string, testname: string): void
-  (e: 'edit', node: JmxComponent): void
+  // 第二个参数 effective：祖先链全部 enabled 才是 true，否则 false
+  // 用于 DetailDrawer 在用户编辑禁用 TG 下的 sampler 时显示警告条
+  (e: 'edit', node: JmxComponent, effective: boolean): void
 }>()
 
 // Default: expand first three levels (depth 0/1/2). Deeper stays collapsed,
@@ -284,7 +286,7 @@ const toolbarBtnStyle = computed(() => ({
         :class="!isRootTestPlan && isEditable ? 'cursor-pointer hover:underline' : !isRootTestPlan ? 'cursor-text' : ''"
         :style="{ color: isDark ? '#fff' : '#1a1a2e' }"
         :title="!isRootTestPlan ? (isEditable ? '点击编辑 / 双击改名' : '双击改名') : undefined"
-        @click.stop="isEditable && !isRootTestPlan && emit('edit', node)"
+        @click.stop="isEditable && !isRootTestPlan && emit('edit', node, effectivelyActive)"
         @dblclick.stop="startRename"
       >
         {{ node.testname || '(未命名)' }}
@@ -434,7 +436,7 @@ const toolbarBtnStyle = computed(() => ({
         :parent-enabled="effectivelyActive"
         @toggle="(p, n) => emit('toggle', p, n)"
         @rename="(p, name) => emit('rename', p, name)"
-        @edit="(n) => emit('edit', n)"
+        @edit="(n, eff) => emit('edit', n, eff)"
       />
     </div>
   </div>

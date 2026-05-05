@@ -7,7 +7,7 @@ import {
 import { api, ApiError } from '@/lib/api'
 import type {
   Task, ThreadGroupInfo, ThreadGroupConfig, ThreadGroupsResponse,
-  ValidateResult, ValidateResponse, ScenarioId,
+  ValidateResult, ValidateResponse, ExecutedTg, ScenarioId,
 } from '@/types/task'
 import ScenarioTabs from './config/ScenarioTabs.vue'
 import ThreadGroupPicker from './config/ThreadGroupPicker.vue'
@@ -42,6 +42,7 @@ const currentPath = ref<string>('')                // 当前在编辑哪个 TG
 const environmentId = ref<number | null>(null)
 const validateResults = ref<ValidateResult[]>([])
 const validateWarnings = ref<string[]>([])
+const validateExecutedTgs = ref<ExecutedTg[]>([])
 const validateTriggered = ref(false)
 const showPreviewXml = ref(false)
 
@@ -167,6 +168,7 @@ async function validate() {
     )
     validateResults.value = r.results
     validateWarnings.value = r.warnings || []
+    validateExecutedTgs.value = r.executed_tgs || []
   } catch (e) {
     validateError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
@@ -337,6 +339,7 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
             <ValidateResultTable
               :results="validateResults"
               :warnings="validateWarnings"
+              :executed-tgs="validateExecutedTgs"
               :is-dark="isDark"
             />
           </div>

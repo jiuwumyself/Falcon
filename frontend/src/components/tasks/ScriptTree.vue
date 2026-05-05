@@ -23,6 +23,8 @@ const collapseTrigger = ref(0)
 const errorFlashPath = ref<string | null>(null)
 const forceExpandPaths = ref<Set<string>>(new Set())
 const editingNode = ref<JmxComponent | null>(null)
+// 编辑节点是否在启用的祖先链下；false 时 DetailDrawer 顶部显示警告条
+const editingNodeEffective = ref(true)
 
 async function uploadCsv(componentPath: string, file: File): Promise<Task> {
   const updated = await tasksApi.uploadComponentCsv(props.task.id, componentPath, file)
@@ -189,7 +191,7 @@ const isEmpty = computed(() => !loading.value && tree.value.length === 0)
         :busy-paths="busyPaths"
         @toggle="handleToggle"
         @rename="handleRename"
-        @edit="editingNode = $event"
+        @edit="(n, eff) => { editingNode = n; editingNodeEffective = eff }"
       />
     </div>
 
@@ -197,6 +199,7 @@ const isEmpty = computed(() => !loading.value && tree.value.length === 0)
       :node="editingNode"
       :task-id="task.id"
       :is-dark="!!isDark"
+      :effective-enabled="editingNodeEffective"
       @close="editingNode = null"
       @saved="tree = $event"
     />

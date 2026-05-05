@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { Motion, AnimatePresence } from 'motion-v'
-import { X, Loader, Save, AlertCircle } from 'lucide-vue-next'
+import { X, Loader, Save, AlertCircle, AlertTriangle } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import type { JmxComponent, ComponentDetail } from '@/types/task'
 import HttpSamplerForm from './detail/HttpSamplerForm.vue'
@@ -13,11 +13,16 @@ import RegexExtractorForm from './detail/RegexExtractorForm.vue'
 import JSONExtractorForm from './detail/JSONExtractorForm.vue'
 import CsvDataSetForm from './detail/CsvDataSetForm.vue'
 
-const props = defineProps<{
-  node: JmxComponent | null
-  taskId: number
-  isDark: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    node: JmxComponent | null
+    taskId: number
+    isDark: boolean
+    // 节点是否在启用的祖先链下；false 时顶部加黄色警告
+    effectiveEnabled?: boolean
+  }>(),
+  { effectiveEnabled: true },
+)
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -125,6 +130,20 @@ const title = computed(() => {
           >
             <X :size="13" :color="isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)'" />
           </button>
+        </div>
+
+        <!-- 禁用 TG 警告 (祖先链有禁用时) -->
+        <div
+          v-if="node && !effectiveEnabled"
+          class="flex items-start gap-2 px-5 py-2.5 flex-shrink-0 text-[11px]"
+          :style="{
+            background: isDark ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.08)',
+            borderBottom: `1px solid ${isDark ? 'rgba(245,158,11,0.2)' : 'rgba(245,158,11,0.18)'}`,
+            color: '#b45309',
+          }"
+        >
+          <AlertTriangle :size="12" class="flex-shrink-0 mt-0.5" />
+          <span>当前组件位于<strong>禁用的 ThreadGroup</strong>下，试跑/压测时不会执行。改这里的字段不会影响试跑结果。</span>
         </div>
 
         <!-- Body -->

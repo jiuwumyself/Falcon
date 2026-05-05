@@ -128,12 +128,26 @@ export interface ValidateResult {
   error?: string
   unresolved_vars?: string[]
   warnings?: string[]
+  // 仅 XML JTL 模式有值（试跑期间 save_response_data=true）
+  response_body?: string
+  response_headers?: string
+  request_data?: string
+  response_message?: string
+  assertion_failures?: string[]
 }
 
-// 试跑响应：任务级 warnings（如 DNS 注入跳过）+ 每接口结果
+// 本次试跑实际执行的 TG（仅 enabled=true 的），用户能看出禁用 TG 没参与
+export interface ExecutedTg {
+  path: string
+  kind: string
+  testname: string
+}
+
+// 试跑响应：任务级 warnings（DNS 注入跳过等）+ 每接口结果 + 实际跑的 TG
 export interface ValidateResponse {
   warnings: string[]
   results: ValidateResult[]
+  executed_tgs: ExecutedTg[]
 }
 
 export interface TaskRun {
