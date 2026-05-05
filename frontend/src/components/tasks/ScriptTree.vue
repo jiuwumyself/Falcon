@@ -27,7 +27,8 @@ const editingNode = ref<JmxComponent | null>(null)
 const editingNodeEffective = ref(true)
 
 /**
- * 检查祖先链 enabled：每一层都启用才返回 true。
+ * 检查 path **祖先链**是否全部 enabled——警告语义是"位于禁用的 TG 下"，
+ * 跟节点自己的 enabled 无关（用户也可能在编辑一个故意禁用的 CSVDataSet）。
  *
  * 注意：JmxComponent.path（如 "0.4.4"）是后端**未过滤前**的索引路径，
  * 而前端 tree 是已过滤掉 BackendListener 等隐藏组件的视图——children
@@ -37,11 +38,12 @@ const editingNodeEffective = ref(true)
 function effectiveEnabledByPath(path: string): boolean {
   if (!tree.value.length) return true  // tree 还没加载，给默认值，避免误报警告
   const segs = path.split('.')
-  if (!segs.length) return true
+  if (segs.length <= 1) return true    // 根级节点没有祖先可查
   let cur: JmxComponent | undefined = tree.value.find((n) => n.path === segs[0])
   if (!cur || !cur.enabled) return false
   let prefix = segs[0]
-  for (let i = 1; i < segs.length; i++) {
+  // 循环到倒数第二段截止：只检查祖先链，不检查 leaf 自己的 enabled
+  for (let i = 1; i < segs.length - 1; i++) {
     prefix = `${prefix}.${segs[i]}`
     cur = cur.children.find((c) => c.path === prefix)
     if (!cur || !cur.enabled) return false
