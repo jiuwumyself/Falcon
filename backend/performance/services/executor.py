@@ -248,12 +248,20 @@ class RunExecutor:
             lines.append(f'❌ InfluxDB 检查异常: {e}')
 
         # 5) Environment hosts TCP 探测
+        # host_entries 兼容两种格式（同 _inject_dns_cache_manager）：
+        #   - dict {"hostname": "...", "ip": "..."}
+        #   - str "10.0.0.1 hostname.foo.com"（/etc/hosts 风格 + # 注释）
+        # 用 jmx_svc._parse_host_entry 统一规范化，避免 string 上调 .get 炸 AttributeError。
         if task.environment_id and task.environment.host_entries:
-            for entry in task.environment.host_entries:
-                host = entry.get('hostname', '')
-                ip = entry.get('ip', '')
-                if not host or not ip:
+            # 海量 hosts 时 TCP 探测会拖慢 pre_check（用户那台环境有 1500+ 条），
+            # 这里只挑前 50 条做探测代表性即可——超过的话用户去 admin 自己分类拆环境。
+            entries = task.environment.host_entries[:50]
+            skipped = max(0, len(task.environment.host_entries) - 50)
+            for entry in entries:
+                pair = jmx_svc._parse_host_entry(entry)
+                if not pair:
                     continue
+                host, ip = pair
                 reachable = False
                 for port in (80, 443):
                     try:
@@ -269,6 +277,8 @@ class RunExecutor:
                     lines.append(
                         f'⚠️  Environment {host} → {ip}: TCP 80/443 探测未通过（非致命）'
                     )
+            if skipped:
+                lines.append(f'ℹ️  Environment 还有 {skipped} 条 hosts 跳过探测（>50 条只抽样）')
 
         return ok, '\n'.join(lines)
 
