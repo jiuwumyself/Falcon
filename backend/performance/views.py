@@ -602,9 +602,11 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         # JMeter CLI 跑 1 线程 × 1 循环：validator 内部
         # build_validate_xml(task) → 写盘到 runs/_validate_<id>/run.jmx →
-        # subprocess jmeter -n → 解析 JTL → 返回 (warnings, results)
+        # subprocess jmeter -n → 解析 JTL → 返回 (warnings, results, executed_tgs)
         try:
-            warnings, results = validate_task(instance, host_entries=host_entries)
+            warnings, results, executed_tgs = validate_task(
+                instance, host_entries=host_entries,
+            )
         except (FileNotFoundError, OSError) as e:
             raise Http404(f'JMX 文件不存在: {e}')
         except JmxParseError as e:
@@ -617,6 +619,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response({
             'warnings': warnings,
             'results': [r.to_dict() for r in results],
+            'executed_tgs': executed_tgs,
         })
 
     @action(detail=True, methods=['post'], url_path='components/toggle')

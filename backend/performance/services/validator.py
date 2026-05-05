@@ -28,7 +28,7 @@ from .jmeter import get_runs_dir
 from .jmeter_runner import JMeterRunError, JtlSample, run_jmeter
 from .jmx import (
     JmxParseError, _hashtree_pairs, _local, _parse_tree, _top_hashtree,
-    build_validate_xml,
+    _tg_kind_from_tag, build_validate_xml,
 )
 
 
@@ -43,6 +43,12 @@ class ValidateResult:
     error: str = ''
     unresolved_vars: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 仅 XML JTL 模式有值，前端点击行展开使用
+    response_body: str = ''
+    response_headers: str = ''
+    request_data: str = ''
+    response_message: str = ''
+    assertion_failures: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -59,6 +65,17 @@ class ValidateResult:
             d['unresolved_vars'] = self.unresolved_vars
         if self.warnings:
             d['warnings'] = self.warnings
+        # 详情字段：只有非空才返，省带宽
+        if self.response_body:
+            d['response_body'] = self.response_body
+        if self.response_headers:
+            d['response_headers'] = self.response_headers
+        if self.request_data:
+            d['request_data'] = self.request_data
+        if self.response_message:
+            d['response_message'] = self.response_message
+        if self.assertion_failures:
+            d['assertion_failures'] = self.assertion_failures
         return d
 
 
@@ -144,6 +161,11 @@ def _match_samples_to_paths(
                       or sample.response_code
                       or '请求失败')
             ),
+            response_body=sample.response_body,
+            response_headers=sample.response_headers,
+            request_data=sample.request_data,
+            response_message=sample.response_message,
+            assertion_failures=sample.assertion_failures,
         ))
 
     # 没被 JMeter 执行的 sampler（可能被前面失败 / 控制器跳过 / 多 TG 并行下漏）
@@ -164,27 +186,64 @@ def _match_samples_to_paths(
 # ─── 公共 API ──────────────────────────────────────────────────────────
 
 
+def _collect_enabled_tgs(xml_bytes: bytes) -> list[dict[str, Any]]:
+    """从原件 JMX 收集所有 enabled=true 的 ThreadGroup-like 节点信息。
+
+    用于试跑结果头部展示"本次执行了哪些 TG"——和 build_validate_xml 的
+    "把 enabled TG 降级为 1×1" 同源（同一筛选规则）。
+    """
+    tree = _parse_tree(xml_bytes)
+    try:
+        top = _top_hashtree(tree)
+    except JmxParseError:
+        return []
+    out: list[dict[str, Any]] = []
+
+    def _walk(ht, prefix: str = '') -> None:
+        for el, child_ht, idx in _hashtree_pairs(ht):
+            path = f'{prefix}{idx}'
+            tag = _local(el)
+            kind = _tg_kind_from_tag(tag)
+            if kind is not None and (el.get('enabled', 'true') or 'true').lower() == 'true':
+                out.append({
+                    'path': path,
+                    'kind': kind,
+                    'testname': el.get('testname') or '',
+                })
+            if child_ht is not None:
+                _walk(child_ht, f'{path}.')
+
+    _walk(top)
+    return out
+
+
 def validate_task(
     task,
     host_entries: Iterable[dict[str, str]] | None = None,
-) -> tuple[list[str], list[ValidateResult]]:
-    """对 Task 跑 1 线程 × 1 循环的 JMeter 试跑，返回 (warnings, results)。
+) -> tuple[list[str], list[ValidateResult], list[dict[str, Any]]]:
+    """对 Task 跑 1 线程 × 1 循环的 JMeter 试跑，返回 (warnings, results, executed_tgs)。
 
     host_entries: 显式覆盖 task.environment.host_entries（视图层接收 body
     的 environment_id 时用）。None 则用 task 本身关联的 environment。
     返回 tuple：
-      warnings: 任务级提示（如 DNS 注入跳过的原因），用于前端表头横条
-      results:  每个 Sampler 的执行结果（含失败信息）
+      warnings:     任务级提示（如 DNS 注入跳过的原因），前端表头横条
+      results:      每个 Sampler 的执行结果（含失败信息 + 响应体）
+      executed_tgs: 本次实际跑的 ThreadGroup 列表（仅启用的）；前端展示
+                    "本次执行 TG"行，用户能看出禁用 TG 没参与
     """
     he_list = list(host_entries) if host_entries is not None else None
     warnings: list[str] = []
+    # 注意 executed_tgs 取自原件（含真实 kind/testname），不取自 build_validate_xml
+    # 的产物——后者已经全部替换为标准 TG，看不出原 kind。
+    executed_tgs = _collect_enabled_tgs(task.read_jmx_bytes())
     xml_bytes = build_validate_xml(task, host_entries=he_list, warnings=warnings)
     samplers = _list_sampler_infos(xml_bytes)
 
     work_dir = get_runs_dir() / f'_validate_{task.id}'
-    samples = run_jmeter(xml_bytes, work_dir)
+    # save_response_data=True 让 JTL 出 XML 格式，附带响应体 / 头 / sampler 数据
+    samples = run_jmeter(xml_bytes, work_dir, save_response_data=True)
 
-    return warnings, _match_samples_to_paths(samplers, samples)
+    return warnings, _match_samples_to_paths(samplers, samples), executed_tgs
 
 
 # 兼容用：旧 import 还在引用
