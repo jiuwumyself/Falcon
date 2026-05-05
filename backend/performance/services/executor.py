@@ -33,6 +33,7 @@ from django.utils import timezone as dj_timezone
 
 from . import influxdb as influxdb_svc
 from . import jmx as jmx_svc
+from .jmeter_runner import _augmented_env
 from .jmeter import (
     archive_run_dir,
     cleanup_old_runs,
@@ -326,8 +327,11 @@ class RunExecutor:
             '-Jjmeterengine.remote.system.exit=false',
         ]
 
-        # JMeter 需要 Java 17+；start.sh 把 openjdk@17 加进 PATH 了，子进程继承即可
-        env = os.environ.copy()
+        # JMeter 需要 Java 17+。光靠 PATH 不够：JMeter 的 bin/jmeter shell
+        # 脚本在 mac 上会调 /usr/libexec/java_home 探测，命中 stub /usr/bin/java
+        # 后启动失败（连 jmeter.log 都来不及写）。复用 jmeter_runner 的 helper：
+        # 显式塞 JAVA_HOME + PATH 兜底（与试跑用的同一逻辑）。
+        env = _augmented_env()
         # 防止 JMeter 子进程把控制台编码搞坏（中文 testname 落 jmeter.log 时）
         env.setdefault('JAVA_TOOL_OPTIONS', '-Dfile.encoding=UTF-8')
 
