@@ -534,20 +534,23 @@ def validate_thread_group_params(kind: str, params: dict[str, Any]) -> None:
         _int('shutdown', 0, MAX_DURATION_SECONDS)
     elif kind == 'ConcurrencyThreadGroup':
         _int('target_concurrency', 1, MAX_USERS)
-        _int('ramp_up', 0, MAX_DURATION_SECONDS)
         _int('steps', 0, 1000)
-        _int('hold', 0, MAX_DURATION_SECONDS)
         unit = params.get('unit', 'S')
         if unit not in ('S', 'M'):
             raise JmxParseError("unit 必须是 'S' 或 'M'")
+        # ramp_up / hold 单位跟随 Unit：S 时 cap 12 小时 = 43200 秒；M 时 cap 720 分钟
+        cap = MAX_DURATION_SECONDS if unit == 'S' else MAX_DURATION_SECONDS // 60
+        _int('ramp_up', 0, cap)
+        _int('hold', 0, cap)
     elif kind == 'ArrivalsThreadGroup':
         _int('target_rps', 1, 1_000_000)  # RPS 不按用户数限
-        _int('ramp_up', 0, MAX_DURATION_SECONDS)
         _int('steps', 0, 1000)
-        _int('hold', 0, MAX_DURATION_SECONDS)
         unit = params.get('unit', 'M')
         if unit not in ('S', 'M'):
             raise JmxParseError("unit 必须是 'S' 或 'M'")
+        cap = MAX_DURATION_SECONDS if unit == 'S' else MAX_DURATION_SECONDS // 60
+        _int('ramp_up', 0, cap)
+        _int('hold', 0, cap)
     elif kind == 'UltimateThreadGroup':
         _int('users', 1, MAX_USERS)
         _int('initial_delay', 0, MAX_DURATION_SECONDS)
@@ -606,6 +609,10 @@ def _build_stepping_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree.
     etree.SubElement(controller, 'boolProp', {'name': 'LoopController.continue_forever'}).text = 'false'
     etree.SubElement(controller, 'intProp', {'name': 'LoopController.loops'}).text = '-1'
 
+    # SteppingTG 必须写入 ThreadGroup.num_threads (= 总目标用户数)，否则 JMeter
+    # 默认 0，整个组空跑。total = 初始 + 每步 × 步数。
+    total = int(p['initial_threads']) + int(p['step_users']) * int(p['step_count'])
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.num_threads'}).text = str(total)
     etree.SubElement(el, 'stringProp', {'name': 'Threads initial delay'}).text = '0'
     etree.SubElement(el, 'stringProp', {'name': 'Start users count'}).text = str(p['step_users'])
     etree.SubElement(el, 'stringProp', {'name': 'Start users count burst'}).text = str(p['initial_threads'])
