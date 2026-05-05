@@ -27,19 +27,23 @@ const editingNode = ref<JmxComponent | null>(null)
 const editingNodeEffective = ref(true)
 
 /**
- * 走索引路径检查祖先链：path "0.4.4" → tree[0] → children[4] → children[4]，
- * 每一层 enabled 都为 true 才返回 true。任一环节禁用即返 false。
+ * 检查祖先链 enabled：每一层都启用才返回 true。
+ *
+ * 注意：JmxComponent.path（如 "0.4.4"）是后端**未过滤前**的索引路径，
+ * 而前端 tree 是已过滤掉 BackendListener 等隐藏组件的视图——children
+ * 数组下标跟 path 数字段不一致。这里按 path 字符串前缀在 children
+ * 里 find，绕开下标错位。
  */
 function effectiveEnabledByPath(path: string): boolean {
   if (!tree.value.length) return true  // tree 还没加载，给默认值，避免误报警告
-  const segs = path.split('.').map((s) => parseInt(s, 10))
-  if (segs.length === 0 || isNaN(segs[0])) return true
-  let cur: JmxComponent | undefined = tree.value[segs[0]]
+  const segs = path.split('.')
+  if (!segs.length) return true
+  let cur: JmxComponent | undefined = tree.value.find((n) => n.path === segs[0])
   if (!cur || !cur.enabled) return false
+  let prefix = segs[0]
   for (let i = 1; i < segs.length; i++) {
-    const idx = segs[i]
-    if (isNaN(idx)) return false
-    cur = cur.children[idx]
+    prefix = `${prefix}.${segs[i]}`
+    cur = cur.children.find((c) => c.path === prefix)
     if (!cur || !cur.enabled) return false
   }
   return true
