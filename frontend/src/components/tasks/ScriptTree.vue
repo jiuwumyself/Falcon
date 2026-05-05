@@ -26,6 +26,30 @@ const editingNode = ref<JmxComponent | null>(null)
 // 编辑节点是否在启用的祖先链下；false 时 DetailDrawer 顶部显示警告条
 const editingNodeEffective = ref(true)
 
+/**
+ * 走索引路径检查祖先链：path "0.4.4" → tree[0] → children[4] → children[4]，
+ * 每一层 enabled 都为 true 才返回 true。任一环节禁用即返 false。
+ */
+function effectiveEnabledByPath(path: string): boolean {
+  if (!tree.value.length) return true  // tree 还没加载，给默认值，避免误报警告
+  const segs = path.split('.').map((s) => parseInt(s, 10))
+  if (segs.length === 0 || isNaN(segs[0])) return true
+  let cur: JmxComponent | undefined = tree.value[segs[0]]
+  if (!cur || !cur.enabled) return false
+  for (let i = 1; i < segs.length; i++) {
+    const idx = segs[i]
+    if (isNaN(idx)) return false
+    cur = cur.children[idx]
+    if (!cur || !cur.enabled) return false
+  }
+  return true
+}
+
+function handleEdit(node: JmxComponent) {
+  editingNode.value = node
+  editingNodeEffective.value = effectiveEnabledByPath(node.path)
+}
+
 async function uploadCsv(componentPath: string, file: File): Promise<Task> {
   const updated = await tasksApi.uploadComponentCsv(props.task.id, componentPath, file)
   emit('task-updated', updated)
@@ -191,7 +215,7 @@ const isEmpty = computed(() => !loading.value && tree.value.length === 0)
         :busy-paths="busyPaths"
         @toggle="handleToggle"
         @rename="handleRename"
-        @edit="(n, eff) => { editingNode = n; editingNodeEffective = eff }"
+        @edit="handleEdit"
       />
     </div>
 

@@ -21,9 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'toggle', path: string, next: boolean): void
   (e: 'rename', path: string, testname: string): void
-  // 第二个参数 effective：祖先链全部 enabled 才是 true，否则 false
-  // 用于 DetailDrawer 在用户编辑禁用 TG 下的 sampler 时显示警告条
-  (e: 'edit', node: JmxComponent, effective: boolean): void
+  (e: 'edit', node: JmxComponent): void
 }>()
 
 const TG_KINDS = new Set([
@@ -312,7 +310,7 @@ const toolbarBtnStyle = computed(() => ({
           fontWeight: isThreadGroup && node.enabled ? 600 : 400,
         }"
         :title="!isRootTestPlan ? (isEditable ? '点击编辑 / 双击改名' : '双击改名') : undefined"
-        @click.stop="isEditable && !isRootTestPlan && emit('edit', node, effectivelyActive)"
+        @click.stop="isEditable && !isRootTestPlan && emit('edit', node)"
         @dblclick.stop="startRename"
       >
         {{ node.testname || '(未命名)' }}
@@ -462,7 +460,7 @@ const toolbarBtnStyle = computed(() => ({
         :parent-enabled="effectivelyActive"
         @toggle="(p, n) => emit('toggle', p, n)"
         @rename="(p, name) => emit('rename', p, name)"
-        @edit="(n, eff) => emit('edit', n, eff)"
+        @edit="(n) => emit('edit', n)"
       />
     </div>
   </div>
