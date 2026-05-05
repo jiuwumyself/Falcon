@@ -26,9 +26,21 @@ const emit = defineEmits<{
   (e: 'edit', node: JmxComponent, effective: boolean): void
 }>()
 
-// Default: expand first three levels (depth 0/1/2). Deeper stays collapsed,
-// user can click chevron to drill further.
-const expanded = ref(props.depth < 2)
+const TG_KINDS = new Set([
+  'ThreadGroup', 'SteppingThreadGroup', 'ConcurrencyThreadGroup',
+  'UltimateThreadGroup', 'ArrivalsThreadGroup',
+])
+
+// 是否为 ThreadGroup-like 节点（前端按 kind 优先；老数据没有 kind 时回退到 tag）
+const isThreadGroup = computed(() =>
+  TG_KINDS.has(props.node.kind || props.node.tag),
+)
+
+// Default: 前三层展开，但 TG 类型节点禁用时折叠（少占视觉，让"启用的"突出）。
+// 用户可手动点 chevron 展开。
+const expanded = ref(
+  props.depth < 2 && !(isThreadGroup.value && !props.node.enabled),
+)
 
 const ctx = inject(SCRIPT_TREE_CTX, null)
 
@@ -284,7 +296,12 @@ const toolbarBtnStyle = computed(() => ({
         v-else
         class="text-[13px] truncate select-none"
         :class="!isRootTestPlan && isEditable ? 'cursor-pointer hover:underline' : !isRootTestPlan ? 'cursor-text' : ''"
-        :style="{ color: isDark ? '#fff' : '#1a1a2e' }"
+        :style="{
+          color: isThreadGroup && node.enabled
+            ? (isDark ? '#ffffff' : '#0a0a0a')
+            : (isDark ? 'rgba(255,255,255,0.78)' : 'rgba(0,0,0,0.72)'),
+          fontWeight: isThreadGroup && node.enabled ? 600 : 400,
+        }"
         :title="!isRootTestPlan ? (isEditable ? '点击编辑 / 双击改名' : '双击改名') : undefined"
         @click.stop="isEditable && !isRootTestPlan && emit('edit', node, effectivelyActive)"
         @dblclick.stop="startRename"
