@@ -146,11 +146,20 @@ async function onJarPick(e: Event) {
 }
 
 // Auto-expand this row if it (or an ancestor) is marked "must be visible"
-// — currently used to reveal CSVDataSet rows that live below default depth.
+// — currently用于初次挂载时把 CSVDataSet 祖先链打开，方便看到行内上传图标。
+//
+// 重要：仅初次挂载触发；后续 tree 改动（保存编辑、toggle 等）不再触发，
+// 否则用户手动折叠的状态会被反复重置（"改个 HTTP 内容全部又展开"的源头）。
+// 同时禁用的 TG 即使有 CSV 后代也不展开——用户禁了说明不参与执行，没必要打开看。
+let _csvForceFired = false
 watch(
   () => ctx?.forceExpandPaths.value,
   (paths) => {
-    if (paths && paths.has(props.node.path)) expanded.value = true
+    if (_csvForceFired) return
+    _csvForceFired = true
+    if (!paths || !paths.has(props.node.path)) return
+    if (isThreadGroup.value && !props.node.enabled) return
+    expanded.value = true
   },
   { immediate: true },
 )
