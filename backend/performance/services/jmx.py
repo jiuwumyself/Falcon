@@ -1346,12 +1346,16 @@ def _inject_backend_listener(
         ('application', 'falcon'),
         ('measurement', 'jmeter'),
         ('summaryOnly', 'false'),
-        # 关键参数对齐 JMeter 5.6.3 实际期望（拼写陷阱）：
-        #   - useRegexpForSamplersList（regex**p** + Samplers 复数 + List）
-        #   - samplersList=.*（列表语义；为空时所有 sampler 都被过滤掉）
-        # 老版本 samplersRegex 已弃用，不再单独写。
+        # JMeter 5.6.3 BackendListener 链路有两层独立的 sampler 过滤：
+        #   1. 父类 BackendListener (Filter): samplersList + useRegexpForSamplersList
+        #      过滤 sampleOccurred 事件 — 决定这条 sample 要不要分发给 client
+        #   2. InfluxdbBackendListenerClient 自己 (samplersToFilter Pattern):
+        #      samplersRegex 单独再过滤 — 决定这条 sample 要不要进 SamplerMetric
+        # 两层任一拒绝 sampler-级数据就不会写到 InfluxDB（之前只配上一层 →
+        # InfluxDB 里只有 transaction=internal 的活跃线程数据）
         ('samplersList', '.*'),
         ('useRegexpForSamplersList', 'true'),
+        ('samplersRegex', '.*'),
         ('testTitle', f'Falcon-Run-{run_id}'),
         # 自定义 tags：JMeter 把 TAG_<key>=<val> 自动加到每条数据点
         ('TAG_run_id', run_id),
