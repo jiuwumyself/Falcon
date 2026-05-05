@@ -454,7 +454,12 @@ xml = build_run_xml(task, inject_environment_dns=True) # v1.1 跑 JMeter 时
 - **`build_run_xml`**：纯内存操作，无副作用。默认 `inject_environment_dns=False`（validate 用）；v1.1 跑 JMeter 时传 `True` 让 hosts 通过 JMX 内的 `DNSCacheManager` 生效。BackendListener 注入由 `BackendListenerConfig.get_config()` 决定，全局生效，**不需要传参**。
 - **`_compute_kind(tag, guiclass)`**：把 XML tag+guiclass 映射成前端规范化 kind。`ConfigTestElement+HttpDefaultsGui` → `'HttpDefaults'`，其余 kind==tag。
 - **`_set_any_prop(parent, name, value)`**：更新已有 stringProp/intProp（任一）或新建 stringProp，解决 connect_timeout 等以 intProp 存储的字段的写回问题。
-- **`_inject_backend_listener(xml_bytes, cfg)`**：在 TestPlan hashTree 末尾追加完整 BackendListener 元素（含 influxdbMetricsSender / influxdbUrl / application / measurement 等参数 + cfg.extra_args 扩展）。
+- **`_inject_backend_listener(xml_bytes, cfg)`**：注入完整 BackendListener 元素（含 influxdbMetricsSender / influxdbUrl / application / measurement 等参数 + cfg.extra_args 扩展）。
+  - **🚨 关键：注入位置在 TestPlan 的子 hashTree（跟 ThreadGroup 同级），不是 root 的 hashTree（跟 TestPlan 平级）**。JMeter 引擎只把 `sampleOccurred` 事件向下分发到 TestPlan 子树里的 SampleListener；放在 TestPlan 平级 BackendListener 拿不到任何 sample，InfluxDB 只剩 `transaction=internal` 心跳数据，所有 sampler 级 RPS/RT 全丢（c5456a1 的踩坑）。
+  - **🚨 sampler 过滤参数（JMeter 5.6.3）有两层独立 + 拼写陷阱**：
+    1. 父类 BackendListener.Filter：`samplersList=.*` + `useRegexpForSamplersList=true`（注意 **regex"p"** + 复数 **Samplers**，写错 JMeter 不识别 → 默认 false）
+    2. InfluxdbBackendListenerClient 自己：`samplersRegex=.*`（client 内部还有第二层 Pattern 过滤，独立配）
+    三个参数缺一不可，否则 sampler 数据全被某层过滤（13cee64 + b015a1e 的踩坑）。
 
 ## 16. Step 2 校验服务（JMeter CLI 版）
 
@@ -565,7 +570,8 @@ RunExecutor(run).start() → 子线程：
 
 1. **`performance/services/executor.py`** —— RunExecutor 类 + 模块级 `RUN_EXECUTORS` 注册表 + `get_executor` / `register_executor` / `unregister_executor`；helpers `_is_port_free` / `_summarize_jtl`
 2. **`performance/services/influxdb.py`** —— v1 client 封装（带连接缓存 + 失败 short-circuit）；`get_client` / `ping` / `query_run_realtime` / `query_run_summary` / `delete_run_data`；查询都走 InfluxQL，按 1s window 聚合，by_tg 按 transaction tag 切片
-3. **`performance/services/jmx.py::_inject_backend_listener`** + 扩展的 `build_run_xml(task, *, inject_environment_dns=False, inject_backend_listener=False, run_id=None)` —— 注入位置在 TestPlan 顶层 hashTree；`samplersRegex='.*'` + `useRegexForSamplerList=true`；自定义 tag `TAG_run_id` / `TAG_task_id`
+3. **`performance/services/jmx.py::_inject_backend_listener`** + 扩展的 `build_run_xml(task, *, inject_environment_dns=False, inject_backend_listener=False, run_id=None)` —— 注入位置 TestPlan 的子 hashTree（跟 ThreadGroup 同级，c5456a1 修过位置）；过滤三件套 `samplersList='.*'` + `useRegexpForSamplersList='true'` + `samplersRegex='.*'`（13cee64 / b015a1e 修过参数，详见 §15 注释）；自定义 tag `TAG_run_id` / `TAG_task_id`
+4. **`performance/services/executor.py::_spawn_jmeter` 用 `jmeter_runner._augmented_env()`** —— mac 上不显式设 `JAVA_HOME` 时 jmeter shell 会调 `/usr/libexec/java_home` 命中 stub `/usr/bin/java` 启动失败（da7e1fc 修过）；试跑和 Step 3 共用同一 helper
 4. **`performance/services/jmeter.py`** 微扩展：`get_jmeter_bin()` / `get_run_dir(run_id)` / `archive_run_dir(run_id)` / `cleanup_old_runs(keep=20)`
 5. **`performance/views.py`**：
    - `TaskViewSet.run` (`POST /tasks/:id/run/`) + `TaskViewSet.runs` (`GET /tasks/:id/runs/`)
