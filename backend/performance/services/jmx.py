@@ -221,6 +221,7 @@ class JmxComponent:
     tag: str               # 元素标签名，如 "HTTPSamplerProxy"
     testname: str          # JMeter GUI 里显示的名字（<... testname="..." />）
     enabled: bool          # 对应元素的 enabled 属性
+    kind: str = ''         # 前端规范化类型（通常等于 tag；ConfigTestElement 按 guiclass 区分）
     children: list['JmxComponent'] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -229,8 +230,16 @@ class JmxComponent:
             'tag': self.tag,
             'testname': self.testname,
             'enabled': self.enabled,
+            'kind': self.kind,
             'children': [c.to_dict() for c in self.children],
         }
+
+
+def _compute_kind(tag: str, guiclass: str) -> str:
+    """把 tag + guiclass 映射成前端可用的规范化 kind 字符串。"""
+    if tag == 'ConfigTestElement' and guiclass == 'HttpDefaultsGui':
+        return 'HttpDefaults'
+    return tag
 
 
 def _local(el: etree._Element) -> str:
@@ -274,14 +283,18 @@ def _walk_components(ht: etree._Element, prefix: str) -> list[JmxComponent]:
     out: list[JmxComponent] = []
     for el, child_ht, idx in _hashtree_pairs(ht):
         path = f'{prefix}{idx}'
+        tag = _local(el)
+        guiclass = el.get('guiclass', '') or ''
+        kind = _compute_kind(tag, guiclass)
         children = (
             _walk_components(child_ht, f'{path}.') if child_ht is not None else []
         )
         out.append(JmxComponent(
             path=path,
-            tag=_local(el),
+            tag=tag,
             testname=el.get('testname') or '',
             enabled=(el.get('enabled', 'true') or 'true').lower() == 'true',
+            kind=kind,
             children=children,
         ))
     return out
@@ -774,6 +787,14 @@ def _remove_bool_prop(parent: etree._Element, name: str) -> None:
         parent.remove(el)
 
 
+def _set_any_prop(parent: etree._Element, name: str, value: str) -> None:
+    """更新已有的 stringProp/intProp（任意一种），不存在则新建 stringProp。"""
+    el = _find_prop(parent, name)
+    if el is None:
+        el = etree.SubElement(parent, 'stringProp', {'name': name})
+    el.text = value or ''
+
+
 def _ensure_http_args_coll(sampler: etree._Element) -> etree._Element:
     """确保 HTTPsampler.Arguments > Arguments.arguments 这个 collection 存在并返回。"""
     wrapper = sampler.find("elementProp[@name='HTTPsampler.Arguments']")
@@ -880,7 +901,79 @@ def get_component_detail(xml_bytes: bytes, path: str) -> dict[str, Any]:
                 })
         return {'kind': 'HeaderManager', 'headers': headers}
 
-    raise JmxParseError(f'组件 {tag} 暂不支持编辑（v1 仅 HTTPSamplerProxy / HeaderManager）')
+    guiclass = el.get('guiclass', '') or ''
+    kind = _compute_kind(tag, guiclass)
+
+    if kind == 'HttpDefaults':
+        connect_el = _find_prop(el, 'HTTPSampler.connect_timeout')
+        response_el = _find_prop(el, 'HTTPSampler.response_timeout')
+        return {
+            'kind': 'HttpDefaults',
+            'domain': _str_prop(el, 'HTTPSampler.domain'),
+            'port': _str_prop(el, 'HTTPSampler.port'),
+            'protocol': _str_prop(el, 'HTTPSampler.protocol'),
+            'path': _str_prop(el, 'HTTPSampler.path'),
+            'contentEncoding': _str_prop(el, 'HTTPSampler.contentEncoding'),
+            'connectTimeout': (connect_el.text or '') if connect_el is not None else '',
+            'responseTimeout': (response_el.text or '') if response_el is not None else '',
+            'implementation': _str_prop(el, 'HTTPSampler.implementation'),
+            'followRedirects': _bool_prop(el, 'HTTPSampler.follow_redirects'),
+            'useKeepAlive': _bool_prop(el, 'HTTPSampler.use_keepalive'),
+        }
+
+    if tag == 'JSONPathAssertion':
+        return {
+            'kind': 'JSONPathAssertion',
+            'jsonPath': _str_prop(el, 'JSON_PATH'),
+            'expectedValue': _str_prop(el, 'EXPECTED_VALUE'),
+            'jsonValidation': _bool_prop(el, 'JSONVALIDATION'),
+            'expectNull': _bool_prop(el, 'EXPECT_NULL'),
+            'invert': _bool_prop(el, 'INVERT'),
+            'isRegex': _bool_prop(el, 'ISREGEX'),
+        }
+
+    if tag in ('BeanShellPostProcessor', 'BeanShellPreProcessor'):
+        return {
+            'kind': tag,
+            'script': _str_prop(el, 'script'),
+            'parameters': _str_prop(el, 'parameters'),
+            'resetInterpreter': _bool_prop(el, 'resetInterpreter'),
+        }
+
+    if tag == 'RegexExtractor':
+        return {
+            'kind': 'RegexExtractor',
+            'refname': _str_prop(el, 'RegexExtractor.refname'),
+            'regex': _str_prop(el, 'RegexExtractor.regex'),
+            'template': _str_prop(el, 'RegexExtractor.template'),
+            'default': _str_prop(el, 'RegexExtractor.default'),
+            'matchNumber': _str_prop(el, 'RegexExtractor.match_number'),
+            'useHeaders': _str_prop(el, 'RegexExtractor.useHeaders'),
+        }
+
+    if tag == 'JSONPathExtractor':
+        return {
+            'kind': 'JSONPathExtractor',
+            'varName': _str_prop(el, 'JSONPostProcessor.referenceNames'),
+            'jsonpath': _str_prop(el, 'JSONPostProcessor.jsonPathExprs'),
+            'default': _str_prop(el, 'JSONPostProcessor.defaultValues'),
+            'matchNo': _str_prop(el, 'JSONPostProcessor.match_numbers'),
+        }
+
+    if tag == 'CSVDataSet':
+        return {
+            'kind': 'CSVDataSet',
+            'variableNames': _str_prop(el, 'variableNames'),
+            'delimiter': _str_prop(el, 'delimiter'),
+            'fileEncoding': _str_prop(el, 'fileEncoding'),
+            'ignoreFirstLine': _bool_prop(el, 'ignoreFirstLine'),
+            'quotedData': _bool_prop(el, 'quotedData'),
+            'recycle': _bool_prop(el, 'recycle'),
+            'stopThread': _bool_prop(el, 'stopThread'),
+            'shareMode': _str_prop(el, 'shareMode'),
+        }
+
+    raise JmxParseError(f'组件 {tag} 暂不支持编辑')
 
 
 def update_component_detail(
@@ -895,7 +988,10 @@ def update_component_detail(
     el = _locate_by_path(top, path)
     actual_tag = _local(el)
 
-    if kind != actual_tag:
+    # HttpDefaults 的 kind 和 actual_tag 不同（ConfigTestElement），单独允许
+    _KIND_EXPECTED_TAG: dict[str, str] = {'HttpDefaults': 'ConfigTestElement'}
+    expected_tag = _KIND_EXPECTED_TAG.get(kind, kind)
+    if actual_tag != expected_tag:
         raise JmxParseError(f'kind ({kind}) 和实际组件 ({actual_tag}) 不匹配')
 
     if kind == 'HTTPSamplerProxy':
@@ -985,8 +1081,80 @@ def update_component_detail(
             etree.SubElement(eprop, 'stringProp', {'name': 'Header.name'}).text = name
             etree.SubElement(eprop, 'stringProp', {'name': 'Header.value'}).text = value
 
+    elif kind == 'HttpDefaults':
+        for key in ('domain', 'port', 'protocol', 'path', 'contentEncoding', 'implementation'):
+            if key in fields:
+                val = fields[key]
+                if not isinstance(val, str):
+                    raise JmxParseError(f'字段 {key} 必须是字符串')
+                _set_any_prop(el, f'HTTPSampler.{key}', val)
+        if 'connectTimeout' in fields:
+            _set_any_prop(el, 'HTTPSampler.connect_timeout', str(fields['connectTimeout']))
+        if 'responseTimeout' in fields:
+            _set_any_prop(el, 'HTTPSampler.response_timeout', str(fields['responseTimeout']))
+        if 'followRedirects' in fields:
+            _set_bool_prop(el, 'HTTPSampler.follow_redirects', bool(fields['followRedirects']))
+        if 'useKeepAlive' in fields:
+            _set_bool_prop(el, 'HTTPSampler.use_keepalive', bool(fields['useKeepAlive']))
+
+    elif kind == 'JSONPathAssertion':
+        if 'jsonPath' in fields:
+            _set_str_prop(el, 'JSON_PATH', str(fields['jsonPath']))
+        if 'expectedValue' in fields:
+            _set_str_prop(el, 'EXPECTED_VALUE', str(fields['expectedValue']))
+        _JSON_ASSERT_BOOL_MAP = {
+            'jsonValidation': 'JSONVALIDATION',
+            'expectNull': 'EXPECT_NULL',
+            'invert': 'INVERT',
+            'isRegex': 'ISREGEX',
+        }
+        for fk, pk in _JSON_ASSERT_BOOL_MAP.items():
+            if fk in fields:
+                _set_bool_prop(el, pk, bool(fields[fk]))
+
+    elif kind in ('BeanShellPostProcessor', 'BeanShellPreProcessor'):
+        if 'script' in fields:
+            _set_str_prop(el, 'script', str(fields['script']))
+        if 'parameters' in fields:
+            _set_str_prop(el, 'parameters', str(fields['parameters']))
+        if 'resetInterpreter' in fields:
+            _set_bool_prop(el, 'resetInterpreter', bool(fields['resetInterpreter']))
+
+    elif kind == 'RegexExtractor':
+        _REGEX_FIELD_MAP = {
+            'refname': 'RegexExtractor.refname',
+            'regex': 'RegexExtractor.regex',
+            'template': 'RegexExtractor.template',
+            'default': 'RegexExtractor.default',
+            'matchNumber': 'RegexExtractor.match_number',
+            'useHeaders': 'RegexExtractor.useHeaders',
+        }
+        for fk, pk in _REGEX_FIELD_MAP.items():
+            if fk in fields:
+                _set_str_prop(el, pk, str(fields[fk]))
+
+    elif kind == 'JSONPathExtractor':
+        _JSON_EXT_FIELD_MAP = {
+            'varName': 'JSONPostProcessor.referenceNames',
+            'jsonpath': 'JSONPostProcessor.jsonPathExprs',
+            'default': 'JSONPostProcessor.defaultValues',
+            'matchNo': 'JSONPostProcessor.match_numbers',
+        }
+        for fk, pk in _JSON_EXT_FIELD_MAP.items():
+            if fk in fields:
+                _set_str_prop(el, pk, str(fields[fk]))
+
+    elif kind == 'CSVDataSet':
+        for fk in ('variableNames', 'delimiter', 'fileEncoding', 'shareMode'):
+            if fk in fields:
+                _set_str_prop(el, fk, str(fields[fk]))
+        for bool_key in ('ignoreFirstLine', 'quotedData', 'recycle', 'stopThread'):
+            if bool_key in fields:
+                _set_bool_prop(el, bool_key, bool(fields[bool_key]))
+        # Never write 'filename' — that's managed by TaskCsvBinding
+
     else:
-        raise JmxParseError(f'组件 {kind} 暂不支持编辑（v1 仅 HTTPSamplerProxy / HeaderManager）')
+        raise JmxParseError(f'组件 {kind} 暂不支持编辑')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
@@ -1007,25 +1175,55 @@ def _set_csv_filename_at_path(xml_bytes: bytes, path: str, filename: str) -> byt
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
+def _parse_host_entry(entry: dict | str) -> tuple[str, str] | None:
+    """
+    把单条 host_entries 条目统一成 (hostname, ip)。
+    支持两种格式：
+      - dict: {"hostname": "api.foo.com", "ip": "10.0.0.1"}
+      - str:  "10.0.0.1 api.foo.com"（/etc/hosts 风格，# 开头为注释）
+    无法解析或注释行返回 None。
+    """
+    if isinstance(entry, dict):
+        h = (entry.get('hostname') or '').strip()
+        i = (entry.get('ip') or '').strip()
+        return (h, i) if h and i else None
+    if isinstance(entry, str):
+        line = entry.split('#')[0].strip()
+        parts = line.split()
+        if len(parts) >= 2:
+            return (parts[1].strip(), parts[0].strip())
+    return None
+
+
 def _inject_dns_cache_manager(
-    xml_bytes: bytes, host_entries: list[dict[str, str]],
+    xml_bytes: bytes, host_entries: list,
 ) -> bytes:
     """
     在 TestPlan 的 hashTree 顶部注入一个 DNSCacheManager，把指定 hostname 直接
     映射到 ip——执行压测时 JMeter 走 IP 直连，不依赖系统 DNS。
 
-    `host_entries`: `[{"hostname": "api.foo.com", "ip": "10.0.0.1"}, ...]`
+    `host_entries`: dict 列表 `[{"hostname": ..., "ip": ...}]` 或
+                    /etc/hosts 风格字符串列表 `["10.0.0.1 api.foo.com"]`，两种格式均支持。
     空列表 / None → 不注入，原样返回。
     """
-    pairs = [
-        (e.get('hostname', '').strip(), e.get('ip', '').strip())
-        for e in (host_entries or [])
-    ]
-    pairs = [(h, i) for h, i in pairs if h and i]
+    pairs = [r for e in (host_entries or []) if (r := _parse_host_entry(e))]
     if not pairs:
         return xml_bytes
 
+    # 只注入 JMX 里实际用到的域名，避免冗余 StaticHost 条目干扰
     tree = _parse_tree(xml_bytes)
+    used_domains: set[str] = set()
+    for sampler in tree.iter('HTTPSamplerProxy'):
+        if sampler.get('enabled', 'true').lower() == 'false':
+            continue
+        for sp in sampler.findall('stringProp'):
+            if sp.get('name') == 'HTTPSampler.domain' and sp.text:
+                d = sp.text.strip()
+                if d:
+                    used_domains.add(d)
+    pairs = [(h, i) for h, i in pairs if h in used_domains]
+    if not pairs:
+        return xml_bytes
     top = _top_hashtree(tree)
 
     # TestPlan 的 hashTree 是 top 的第一个 hashTree 子节点（或 top 自己——我们就放在 top 里）
@@ -1049,6 +1247,64 @@ def _inject_dns_cache_manager(
     etree.SubElement(dns_mgr, 'boolProp', {'name': 'DNSCacheManager.isCustomResolver'}).text = 'true'
 
     # DNSCacheManager 后面紧跟一个空 hashTree（JMeter 配对结构要求）
+    etree.SubElement(top, 'hashTree')
+
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+def _inject_backend_listener(xml_bytes: bytes, cfg) -> bytes:
+    """
+    在 TestPlan 的顶层 hashTree 末尾注入 BackendListener 元素（+ 空 hashTree 配对）。
+
+    cfg: BackendListenerConfig 实例（已验证 enabled=True, influxdb_url 非空）。
+    """
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+
+    bl = etree.SubElement(top, 'BackendListener', {
+        'guiclass': 'BackendListenerGui',
+        'testclass': 'BackendListener',
+        'testname': 'Backend Listener',
+        'enabled': 'true',
+    })
+
+    # arguments wrapper
+    args_elem = etree.SubElement(bl, 'elementProp', {
+        'name': 'arguments',
+        'elementType': 'Arguments',
+        'guiclass': 'ArgumentsPanel',
+        'testclass': 'Arguments',
+        'enabled': 'true',
+    })
+    args_coll = etree.SubElement(args_elem, 'collectionProp', {'name': 'Arguments.arguments'})
+
+    def _add_arg(name: str, value: str) -> None:
+        eprop = etree.SubElement(args_coll, 'elementProp', {
+            'name': name, 'elementType': 'Argument',
+        })
+        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.name'}).text = name
+        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.value'}).text = value
+        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.metadata'}).text = '='
+
+    _add_arg('influxdbMetricsSender',
+             'org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender')
+    _add_arg('influxdbUrl', cfg.influxdb_url)
+    _add_arg('application', cfg.application or '')
+    _add_arg('measurement', cfg.measurement or 'jmeter')
+    _add_arg('summaryOnly', 'false')
+    _add_arg('samplersRegex', '.*')
+    _add_arg('percentiles', '90;95;99')
+    _add_arg('testTitle', 'Test started')
+    _add_arg('eventTags', '')
+
+    # extra_args overrides / extends defaults
+    for k, v in (cfg.extra_args or {}).items():
+        _add_arg(str(k), str(v))
+
+    etree.SubElement(bl, 'stringProp', {'name': 'classname'}).text = cfg.classname
+    etree.SubElement(bl, 'intProp', {'name': 'QUEUE_SIZE'}).text = '5000'
+
+    # JMeter hashTree 配对结构要求每个元素后紧跟一个 hashTree
     etree.SubElement(top, 'hashTree')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
@@ -1096,5 +1352,105 @@ def build_run_xml(task, *, inject_environment_dns: bool = False) -> bytes:
     # 3) Environment DNS 注入（仅执行时需要）
     if inject_environment_dns and task.environment_id:
         xml = _inject_dns_cache_manager(xml, task.environment.host_entries or [])
+
+    # 4) Backend Listener 注入（全局 Admin 配置）
+    from performance.models import BackendListenerConfig  # noqa: PLC0415
+    cfg = BackendListenerConfig.get_config()
+    if cfg.enabled and cfg.influxdb_url:
+        xml = _inject_backend_listener(xml, cfg)
+
+    return xml
+
+
+# ─── Step 2 校验专用：所有 TG 替换成 1 线程 1 循环 ────────────────────────
+
+
+def _build_validate_tg_element(testname: str, enabled: str) -> etree._Element:
+    """1 thread × 1 loop × 0 ramp，无 scheduler。Step 2 "每个接口跑一次"用。"""
+    el = etree.Element('ThreadGroup', {
+        'guiclass': 'ThreadGroupGui',
+        'testclass': 'ThreadGroup',
+        'testname': testname,
+        'enabled': enabled,
+    })
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.on_sample_error'}).text = 'continue'
+
+    controller = etree.SubElement(el, 'elementProp', {
+        'name': 'ThreadGroup.main_controller',
+        'elementType': 'LoopController',
+        'guiclass': 'LoopControlPanel',
+        'testclass': 'LoopController',
+        'testname': 'Loop Controller',
+        'enabled': 'true',
+    })
+    etree.SubElement(controller, 'boolProp', {'name': 'LoopController.continue_forever'}).text = 'false'
+    etree.SubElement(controller, 'stringProp', {'name': 'LoopController.loops'}).text = '1'
+
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.num_threads'}).text = '1'
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.ramp_time'}).text = '0'
+    etree.SubElement(el, 'boolProp', {'name': 'ThreadGroup.scheduler'}).text = 'false'
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.delay'}).text = ''
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.duration'}).text = ''
+    return el
+
+
+def replace_tgs_for_validate(xml_bytes: bytes) -> bytes:
+    """把所有**启用**的 ThreadGroup-like 元素替换成 1 线程 1 循环的标准 ThreadGroup。
+
+    Step 2 校验调用：用户配置的 5 种 TG（标准/Stepping/Concurrency/Ultimate/Arrivals）
+    在校验期统统降级为 1 用户跑 1 圈，目的只是把每个 Sampler 真跑一次确认接口通不通。
+    禁用的 TG 原样保留（JMeter 不会执行）。紧跟的子 hashTree 不动。"""
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+
+    # 先抓出所有目标元素（不能边遍历边改）
+    enabled_tgs: list[etree._Element] = []
+    def _walk(ht: etree._Element) -> None:
+        for el, child_ht, _idx in _hashtree_pairs(ht):
+            tag = _local(el)
+            if _tg_kind_from_tag(tag) is not None:
+                if (el.get('enabled', 'true') or 'true').lower() == 'true':
+                    enabled_tgs.append(el)
+            if child_ht is not None:
+                _walk(child_ht)
+    _walk(top)
+
+    for old_el in enabled_tgs:
+        new_el = _build_validate_tg_element(
+            testname=old_el.get('testname') or 'Validate TG',
+            enabled='true',
+        )
+        parent = old_el.getparent()
+        if parent is None:
+            continue
+        parent.replace(old_el, new_el)
+
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+def build_validate_xml(task, host_entries: list | None = None) -> bytes:
+    """Step 2 校验用 XML：原件 → 所有启用 TG 降级为 1 线程 1 循环 → 套 CSV 绑定 →
+    可选注入 Environment DNS。**不写盘**（runner 自己写到 runs/ 目录）。
+
+    host_entries: 显式覆盖；None 时回落到 task.environment。"""
+    from .jmeter import get_scripts_dir  # noqa: PLC0415
+
+    xml = task.read_jmx_bytes()
+    xml = replace_tgs_for_validate(xml)
+
+    scripts_dir = get_scripts_dir()
+    for binding in task.csv_bindings.all():
+        if not binding.component_path or not binding.filename:
+            continue
+        abs_path = str((scripts_dir / binding.filename).resolve())
+        try:
+            xml = _set_csv_filename_at_path(xml, binding.component_path, abs_path)
+        except JmxParseError:
+            continue
+
+    if host_entries is None and task.environment_id:
+        host_entries = list(task.environment.host_entries or [])
+    if host_entries:
+        xml = _inject_dns_cache_manager(xml, host_entries)
 
     return xml

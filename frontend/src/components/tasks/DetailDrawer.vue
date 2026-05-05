@@ -6,6 +6,12 @@ import { api, ApiError } from '@/lib/api'
 import type { JmxComponent, ComponentDetail } from '@/types/task'
 import HttpSamplerForm from './detail/HttpSamplerForm.vue'
 import HeaderManagerForm from './detail/HeaderManagerForm.vue'
+import HttpDefaultsForm from './detail/HttpDefaultsForm.vue'
+import JSONAssertionForm from './detail/JSONAssertionForm.vue'
+import BeanShellForm from './detail/BeanShellForm.vue'
+import RegexExtractorForm from './detail/RegexExtractorForm.vue'
+import JSONExtractorForm from './detail/JSONExtractorForm.vue'
+import CsvDataSetForm from './detail/CsvDataSetForm.vue'
 
 const props = defineProps<{
   node: JmxComponent | null
@@ -155,6 +161,42 @@ const title = computed(() => {
             />
             <HeaderManagerForm
               v-else-if="detail.kind === 'HeaderManager'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <HttpDefaultsForm
+              v-else-if="detail.kind === 'HttpDefaults'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <JSONAssertionForm
+              v-else-if="detail.kind === 'JSONPathAssertion'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <BeanShellForm
+              v-else-if="detail.kind === 'BeanShellPostProcessor' || detail.kind === 'BeanShellPreProcessor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <RegexExtractorForm
+              v-else-if="detail.kind === 'RegexExtractor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <JSONExtractorForm
+              v-else-if="detail.kind === 'JSONPathExtractor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <CsvDataSetForm
+              v-else-if="detail.kind === 'CSVDataSet'"
               :detail="detail"
               :is-dark="isDark"
               @update:detail="detail = $event"

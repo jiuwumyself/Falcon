@@ -17,6 +17,8 @@ export interface ScriptTreeCtx {
   // Intra-row action: upload a CSV for the CSVDataSet at `componentPath`.
   // Returns the updated Task so the tree can refresh csv_bindings.
   uploadCsv: (componentPath: string, file: File) => Promise<Task>
+  // Intra-row action: upload a JAR to JMeter lib/ext/ (global, shared).
+  uploadJar: (componentPath: string, file: File) => Promise<void>
 }
 
 export const SCRIPT_TREE_CTX: InjectionKey<ScriptTreeCtx> = Symbol('SCRIPT_TREE_CTX')

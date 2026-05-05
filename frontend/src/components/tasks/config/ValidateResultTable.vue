@@ -90,7 +90,13 @@ function statusColor(s: number): string {
           v-if="r.unresolved_vars && r.unresolved_vars.length"
           class="col-span-5 text-[11px] mt-0.5"
           style="color: #f59e0b"
-        >⚠ 有未解析变量：{{ r.unresolved_vars.join(', ') }}（不在 CSV / 环境变量里）</span>
+        >⚠ 有未解析变量：{{ r.unresolved_vars.join(', ') }}（不在 CSV / 环境变量 / 提取器里）</span>
+        <span
+          v-for="(w, wi) in (r.warnings || [])"
+          :key="`w-${wi}`"
+          class="col-span-5 text-[11px] mt-0.5"
+          style="color: #f97316"
+        >⚠ {{ w }}</span>
       </div>
 
       <p

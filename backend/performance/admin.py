@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Environment, MetricSample, Task, TaskCsvBinding, TaskRun
+from .models import BackendListenerConfig, Environment, MetricSample, Task, TaskCsvBinding, TaskRun
 
 
 @admin.register(Environment)
@@ -47,3 +47,16 @@ class TaskRunAdmin(admin.ModelAdmin):
 class MetricSampleAdmin(admin.ModelAdmin):
     list_display = ('id', 'run', 'timestamp', 'rps', 'p99_ms', 'error_rate', 'active_users')
     list_filter = ('run',)
+
+
+@admin.register(BackendListenerConfig)
+class BackendListenerConfigAdmin(admin.ModelAdmin):
+    """Backend Listener 全局配置——只允许存在一条（pk=1），不能新增也不能删除。"""
+    list_display = ('id', 'enabled', 'influxdb_url', 'application', 'measurement')
+    readonly_fields = ('id',)
+
+    def has_add_permission(self, request):
+        return not BackendListenerConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

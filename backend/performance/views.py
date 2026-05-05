@@ -14,17 +14,32 @@ from .serializers import EnvironmentSerializer, TaskSerializer
 from .services.jmeter import (
     DiskFullError, delete_csv, delete_script, ensure_jmeter_installed,
     ensure_plugins_installed, get_scripts_dir, rename_script,
-    unique_script_filename, write_csv, write_script,
+    unique_script_filename, write_csv, write_jar, write_script,
 )
 from .services.jmx import (
     JmxParseError, build_run_xml, get_component_detail, list_components,
     list_thread_groups, parse_jmx, patch_jmx, rename_component, replace_thread_group,
     toggle_component, update_component_detail,
 )
+from .services.jmeter_runner import JMeterRunError
 from .services.validator import validate_task
 
 
 _SAFE_PATH_RE = re.compile(r'[^A-Za-z0-9]+')
+
+_HIDDEN_COMPONENT_TAGS = frozenset({'BackendListener'})
+
+
+def _filter_tree_dicts(nodes: list, hidden_tags: frozenset) -> list:
+    """从组件树 dict 列表里递归过滤掉指定 tag 的节点（前端不展示 BackendListener 等）。"""
+    result = []
+    for d in nodes:
+        if d.get('tag') in hidden_tags:
+            continue
+        d = dict(d)  # 浅拷贝避免修改原对象
+        d['children'] = _filter_tree_dicts(d.get('children', []), hidden_tags)
+        result.append(d)
+    return result
 
 
 def _safe_path_token(path: str) -> str:
@@ -256,7 +271,8 @@ class TaskViewSet(viewsets.ModelViewSet):
             xml_bytes = instance.read_jmx_bytes()
         except (FileNotFoundError, OSError) as e:
             raise Http404(f'JMX 文件不存在: {e}')
-        return Response([c.to_dict() for c in list_components(xml_bytes)])
+        tree_dicts = [c.to_dict() for c in list_components(xml_bytes)]
+        return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
 
     @action(detail=True, methods=['get', 'patch'], url_path='components/detail')
     def component_detail(self, request, pk=None):
@@ -297,7 +313,8 @@ class TaskViewSet(viewsets.ModelViewSet):
         instance.write_jmx_bytes(new_xml)
         instance.jmx_hash = hashlib.sha256(new_xml).hexdigest()
         instance.save(update_fields=['jmx_hash', 'updated_at'])
-        return Response([c.to_dict() for c in list_components(new_xml)])
+        tree_dicts = [c.to_dict() for c in list_components(new_xml)]
+        return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
 
     @action(detail=True, methods=['post'], url_path='components/rename')
     def rename_component(self, request, pk=None):
@@ -326,7 +343,8 @@ class TaskViewSet(viewsets.ModelViewSet):
         instance.write_jmx_bytes(new_xml)
         instance.jmx_hash = hashlib.sha256(new_xml).hexdigest()
         instance.save(update_fields=['jmx_hash', 'updated_at'])
-        return Response([c.to_dict() for c in list_components(new_xml)])
+        tree_dicts = [c.to_dict() for c in list_components(new_xml)]
+        return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
 
     # —— 单个 CSVDataSet 绑定：上传 / 替换 —— #
     @action(detail=True, methods=['post'], url_path='components/upload-csv',
@@ -425,6 +443,42 @@ class TaskViewSet(viewsets.ModelViewSet):
             binding.delete()
         instance.refresh_from_db()
         return Response(self.get_serializer(instance).data)
+
+    # —— BeanShell 预处理器 JAR 上传 —— #
+    @action(detail=True, methods=['post'], url_path='components/upload-jar',
+            parser_classes=[MultiPartParser, FormParser])
+    def upload_jar(self, request, pk=None):
+        """把 JAR 文件写入 JMeter lib/ext/（全局共享，所有任务公用）。"""
+        self.get_object()  # 只做 404 检查，JAR 不绑定到特定任务
+        jar_upload = request.FILES.get('jar_file')
+        if not jar_upload:
+            return Response(
+                {'jar_file': ['必须上传 .jar 文件']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not jar_upload.name.lower().endswith('.jar'):
+            return Response(
+                {'jar_file': ['仅支持 .jar 文件']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if jar_upload.size and jar_upload.size > 50 * 1024 * 1024:
+            return Response(
+                {'jar_file': ['JAR 文件超过 50 MB 上限']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            dest = write_jar(jar_upload.name, jar_upload.read())
+        except (ValueError, RuntimeError) as e:
+            return Response({'jar_file': [str(e)]}, status=status.HTTP_400_BAD_REQUEST)
+        except DiskFullError as e:
+            return Response({'jar_file': [str(e)]}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response({
+            'filename': dest.name,
+            'message': (
+                f'JAR 已安装到 JMeter lib/ext/，'
+                f'远程执行时需在所有压力机手动安装相同 JAR（{dest.name}）'
+            ),
+        })
 
     # —— Step 2：任务配置（线程组场景 / 参数 / 环境） —— #
     @action(detail=True, methods=['get', 'patch'], url_path='thread-groups')
@@ -546,17 +600,20 @@ class TaskViewSet(viewsets.ModelViewSet):
         if env_obj:
             host_entries = list(env_obj.host_entries or [])
 
-        # 内存生成可执行 XML（套 Step 2 thread_groups + CSV 绑定）。
-        # 没配过 Step 2 的任务 thread_groups_config 是 []，build_run_xml 退化为
-        # 仅 patch CSVDataSet，等价原件 → 上传后立即 validate 也工作。
+        # JMeter CLI 跑 1 线程 × 1 循环：validator 内部
+        # build_validate_xml(task) → 写盘到 runs/_validate_<id>/run.jmx →
+        # subprocess jmeter -n → 解析 JTL → 返回每个 Sampler 的结果
         try:
-            xml_bytes = build_run_xml(instance)
+            results = validate_task(instance, host_entries=host_entries)
         except (FileNotFoundError, OSError) as e:
             raise Http404(f'JMX 文件不存在: {e}')
         except JmxParseError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-        results = validate_task(xml_bytes, host_entries=host_entries)
+        except JMeterRunError as e:
+            return Response(
+                {'detail': f'JMeter 执行失败：{e}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         return Response([r.to_dict() for r in results])
 
     @action(detail=True, methods=['post'], url_path='components/toggle')
@@ -586,4 +643,5 @@ class TaskViewSet(viewsets.ModelViewSet):
         instance.write_jmx_bytes(new_xml)
         instance.jmx_hash = hashlib.sha256(new_xml).hexdigest()
         instance.save(update_fields=['jmx_hash', 'updated_at'])
-        return Response([c.to_dict() for c in list_components(new_xml)])
+        tree_dicts = [c.to_dict() for c in list_components(new_xml)]
+        return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))

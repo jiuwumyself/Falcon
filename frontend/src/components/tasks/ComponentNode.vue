@@ -2,7 +2,7 @@
 import { ref, computed, inject, watch, nextTick } from 'vue'
 import { Motion } from 'motion-v'
 import {
-  ChevronRight, Search, ChevronsDownUp, ChevronsUpDown, Paperclip, Settings,
+  ChevronRight, Search, ChevronsDownUp, ChevronsUpDown, Paperclip, Package,
 } from 'lucide-vue-next'
 import type { JmxComponent } from '@/types/task'
 import { SCRIPT_TREE_CTX } from './scriptTreeCtx'
@@ -36,9 +36,14 @@ const isRootTestPlan = computed(
 )
 
 const isCsvDataSet = computed(() => props.node.tag === 'CSVDataSet')
-const isEditable = computed(
-  () => props.node.tag === 'HTTPSamplerProxy' || props.node.tag === 'HeaderManager',
-)
+const isBeanShellPre = computed(() => props.node.tag === 'BeanShellPreProcessor')
+
+const EDITABLE_KINDS = new Set([
+  'HTTPSamplerProxy', 'HeaderManager', 'HttpDefaults',
+  'JSONPathAssertion', 'BeanShellPostProcessor', 'BeanShellPreProcessor',
+  'RegexExtractor', 'JSONPathExtractor', 'CSVDataSet',
+])
+const isEditable = computed(() => EDITABLE_KINDS.has(props.node.kind || props.node.tag))
 
 // testname 行内编辑：双击 → input，Enter/失焦保存，Esc 取消。
 const isEditingName = ref(false)
@@ -100,6 +105,31 @@ async function onCsvPick(e: Event) {
 const csvBinding = computed(() =>
   ctx?.task.value.csv_bindings?.find((b) => b.component_path === props.node.path) ?? null,
 )
+
+// JAR inline upload state — hidden <input> + click handler; shown only on
+// BeanShellPreProcessor rows.
+const jarInput = ref<HTMLInputElement | null>(null)
+const jarUploading = ref(false)
+
+async function onJarPick(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f || !ctx) return
+  jarUploading.value = true
+  try {
+    await ctx.uploadJar(props.node.path, f)
+  } catch {
+    if (ctx) {
+      ctx.errorFlashPath.value = props.node.path
+      setTimeout(() => {
+        if (ctx.errorFlashPath.value === props.node.path) ctx.errorFlashPath.value = null
+      }, 800)
+    }
+  } finally {
+    jarUploading.value = false
+  }
+}
 
 // Auto-expand this row if it (or an ancestor) is marked "must be visible"
 // — currently used to reveal CSVDataSet rows that live below default depth.
@@ -251,10 +281,11 @@ const toolbarBtnStyle = computed(() => ({
       <span
         v-else
         class="text-[13px] truncate select-none"
-        :class="!isRootTestPlan ? 'cursor-text' : ''"
+        :class="!isRootTestPlan && isEditable ? 'cursor-pointer hover:underline' : !isRootTestPlan ? 'cursor-text' : ''"
         :style="{ color: isDark ? '#fff' : '#1a1a2e' }"
-        :title="!isRootTestPlan ? '双击改名' : undefined"
-        @dblclick="startRename"
+        :title="!isRootTestPlan ? (isEditable ? '点击编辑 / 双击改名' : '双击改名') : undefined"
+        @click.stop="isEditable && !isRootTestPlan && emit('edit', node)"
+        @dblclick.stop="startRename"
       >
         {{ node.testname || '(未命名)' }}
       </span>
@@ -341,20 +372,31 @@ const toolbarBtnStyle = computed(() => ({
           </button>
         </template>
 
-        <!-- Settings gear (only on editable rows: HTTPSamplerProxy / HeaderManager) -->
-        <button
-          v-if="isEditable"
-          class="w-7 h-5 rounded-md flex items-center justify-center flex-shrink-0 mr-1.5 cursor-pointer"
-          :title="`编辑 ${node.tag} 属性`"
-          :style="{
-            background: isDark ? 'rgba(139,92,246,0.1)' : 'rgba(139,92,246,0.08)',
-            border: `1px solid ${isDark ? 'rgba(139,92,246,0.25)' : 'rgba(139,92,246,0.22)'}`,
-            color: '#8b5cf6',
-          }"
-          @click="emit('edit', node)"
-        >
-          <Settings :size="11" />
-        </button>
+        <!-- JAR inline upload (only on BeanShellPreProcessor rows) -->
+        <template v-if="isBeanShellPre">
+          <input
+            ref="jarInput"
+            type="file"
+            accept=".jar"
+            class="hidden"
+            @change="onJarPick"
+          />
+          <button
+            class="w-7 h-5 rounded-md flex items-center justify-center flex-shrink-0 mr-1.5 transition-colors"
+            title="上传 JAR 到 JMeter lib/ext/"
+            :style="{
+              background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+              border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
+              cursor: jarUploading ? 'wait' : 'pointer',
+              opacity: jarUploading ? 0.6 : 1,
+              color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)',
+            }"
+            :disabled="jarUploading"
+            @click.stop="jarInput?.click()"
+          >
+            <Package :size="11" />
+          </button>
+        </template>
 
         <!-- enabled toggle -->
         <button

@@ -1,12 +1,13 @@
-import { BookOpen, Atom, GitBranch } from 'lucide-vue-next'
+import { BookOpen, Atom, GitBranch, Wrench } from 'lucide-vue-next'
 
 export const SPRING = { stiffness: 150, damping: 18 }
 export const P99_THRESHOLD = 80
 
 export const BIZ = [
-  { id: 'shared', label: '共享课', sub: 'Shared Courses', icon: BookOpen, color: '#60a5fa' },
-  { id: 'ai', label: 'AI 事业中心', sub: 'AI Center', icon: Atom, color: '#a78bfa' },
-  { id: 'kg', label: 'KG 知识图谱', sub: 'Knowledge Graph', icon: GitBranch, color: '#34d399' },
+  { id: 'shared', label: '共享课',     sub: 'Shared Courses',  icon: BookOpen,  color: '#60a5fa' },
+  { id: 'ai',     label: 'AI 事业中心', sub: 'AI Center',       icon: Atom,      color: '#a78bfa' },
+  { id: 'kg',     label: 'KG 知识图谱', sub: 'Knowledge Graph', icon: GitBranch, color: '#34d399' },
+  { id: 'custom', label: '定制',        sub: 'Custom',          icon: Wrench,    color: '#fb7185' },
 ]
 
 export interface Person {

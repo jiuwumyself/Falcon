@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { tasksApi, ApiError } from '@/lib/api'
-import type { Task } from '@/types/task'
+import type { BizCategory, Task } from '@/types/task'
 import TaskCreateWizard from '@/components/tasks/TaskCreateWizard.vue'
 
 const router = useRouter()
 const route = useRoute()
 const initialTask = ref<Task | null>(null)
 const loadError = ref('')
+
+const defaultBiz = computed(() => (route.query.biz as BizCategory) || undefined)
 
 function handleClose() {
   router.push('/performance')
@@ -34,6 +36,7 @@ onMounted(async () => {
       <p v-if="loadError" class="text-[12px] text-red-500 px-3 py-2">{{ loadError }}</p>
       <TaskCreateWizard
         :initial-task="initialTask"
+        :default-biz="defaultBiz"
         @close="handleClose"
       />
     </div>

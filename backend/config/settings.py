@@ -130,6 +130,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # DRF
 REST_FRAMEWORK = {
+    # 平台暂不做认证（CLAUDE.md §7）。显式清空，避免 DRF 默认的
+    # SessionAuthentication 在浏览器有 admin session cookie 时触发 CSRF 校验。
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 50,

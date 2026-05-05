@@ -9,6 +9,7 @@ class BizCategory(models.TextChoices):
     SHARED = 'shared', '共享课'
     AI = 'ai', 'AI 事业中心'
     KG = 'kg', 'KG 知识图谱'
+    CUSTOM = 'custom', '定制'
 
 
 class RunStatus(models.TextChoices):
@@ -226,3 +227,61 @@ class MetricSample(models.Model):
     class Meta:
         ordering = ['timestamp']
         indexes = [models.Index(fields=['run', 'timestamp'])]
+
+
+class BackendListenerConfig(models.Model):
+    """
+    Backend Listener 全局配置（singleton，pk=1）。
+
+    压测时 build_run_xml 会把此配置注入到所有任务的 JMX 内存版——效果等同于
+    每个测试计划末尾都有一个 BackendListener，不需要在脚本里手动添加。
+
+    编辑走 Django admin（/admin/performance/backendlistenerconfig/）；
+    前端不暴露此配置。
+    """
+    enabled = models.BooleanField(
+        default=False,
+        help_text='开关：压测时是否在所有任务的 JMX 中注入 Backend Listener。'
+                  '关闭时此配置不生效，脚本里原有的 BackendListener 也会被过滤掉不显示。',
+    )
+    influxdb_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='InfluxDB 写入地址，例：http://10.0.0.1:8086/write?db=jmeter。'
+                  '留空时即使 enabled=True 也不注入。',
+    )
+    classname = models.CharField(
+        max_length=300,
+        default='org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient',
+        help_text='Backend 实现类全名。InfluxDB 用默认值；Graphite 换成 '
+                  'org.apache.jmeter.visualizers.backend.graphite.GraphiteBackendListenerClient。',
+    )
+    application = models.CharField(
+        max_length=100, blank=True,
+        help_text='应用标识，作为 InfluxDB tag 区分不同应用的压测数据，例：user-service。',
+    )
+    measurement = models.CharField(
+        max_length=100, default='jmeter',
+        help_text='InfluxDB measurement 名（即表名），默认 jmeter。',
+    )
+    extra_args = models.JSONField(
+        default=dict, blank=True,
+        help_text='额外参数（JSON 对象），key=参数名 value=参数值。'
+                  '例：{"percentiles":"90|95|99","summaryOnly":"false","testTitle":"我的压测"}。',
+    )
+
+    class Meta:
+        verbose_name = 'Backend Listener 全局配置'
+        verbose_name_plural = 'Backend Listener 全局配置'
+
+    def __str__(self) -> str:
+        status = '已启用' if self.enabled else '已禁用'
+        return f'Backend Listener 全局配置（{status}）'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls) -> 'BackendListenerConfig':
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj

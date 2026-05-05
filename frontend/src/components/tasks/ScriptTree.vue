@@ -30,6 +30,12 @@ async function uploadCsv(componentPath: string, file: File): Promise<Task> {
   return updated
 }
 
+async function uploadJar(_componentPath: string, file: File): Promise<void> {
+  const fd = new FormData()
+  fd.append('jar_file', file)
+  await api(`/tasks/${props.task.id}/components/upload-jar/`, { method: 'POST', body: fd })
+}
+
 const ctx: ScriptTreeCtx = {
   searchQuery,
   expandTrigger,
@@ -38,6 +44,7 @@ const ctx: ScriptTreeCtx = {
   forceExpandPaths,
   task: toRef(props, 'task'),
   uploadCsv,
+  uploadJar,
 }
 provide(SCRIPT_TREE_CTX, ctx)
 

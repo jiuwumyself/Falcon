@@ -1,4 +1,4 @@
-export type BizCategory = 'shared' | 'ai' | 'kg'
+export type BizCategory = 'shared' | 'ai' | 'kg' | 'custom'
 
 export type RunStatus = 'pending' | 'running' | 'success' | 'fail' | 'cancelled'
 
@@ -127,6 +127,7 @@ export interface ValidateResult {
   ok: boolean
   error?: string
   unresolved_vars?: string[]
+  warnings?: string[]
 }
 
 export interface TaskRun {
@@ -157,6 +158,7 @@ export interface JmxComponent {
   tag: string           // JMX 元素标签，如 "HTTPSamplerProxy"
   testname: string      // GUI 里的组件名
   enabled: boolean
+  kind: string          // 规范化类型（通常等于 tag；ConfigTestElement 按 guiclass 区分为 HttpDefaults）
   children: JmxComponent[]
 }
 
@@ -183,4 +185,73 @@ export interface HeaderManagerDetail {
   headers: { name: string; value: string }[]
 }
 
-export type ComponentDetail = HttpSamplerDetail | HeaderManagerDetail
+export interface HttpDefaultsDetail {
+  kind: 'HttpDefaults'
+  domain: string
+  port: string
+  protocol: string
+  path: string
+  contentEncoding: string
+  connectTimeout: string
+  responseTimeout: string
+  implementation: string
+  followRedirects: boolean
+  useKeepAlive: boolean
+}
+
+export interface JSONAssertionDetail {
+  kind: 'JSONPathAssertion'
+  jsonPath: string
+  expectedValue: string
+  jsonValidation: boolean
+  expectNull: boolean
+  invert: boolean
+  isRegex: boolean
+}
+
+export interface BeanShellDetail {
+  kind: 'BeanShellPostProcessor' | 'BeanShellPreProcessor'
+  script: string
+  parameters: string
+  resetInterpreter: boolean
+}
+
+export interface RegexExtractorDetail {
+  kind: 'RegexExtractor'
+  refname: string
+  regex: string
+  template: string
+  default: string
+  matchNumber: string
+  useHeaders: string
+}
+
+export interface JSONExtractorDetail {
+  kind: 'JSONPathExtractor'
+  varName: string
+  jsonpath: string
+  default: string
+  matchNo: string
+}
+
+export interface CsvDataSetDetail {
+  kind: 'CSVDataSet'
+  variableNames: string
+  delimiter: string
+  fileEncoding: string
+  ignoreFirstLine: boolean
+  quotedData: boolean
+  recycle: boolean
+  stopThread: boolean
+  shareMode: string
+}
+
+export type ComponentDetail =
+  | HttpSamplerDetail
+  | HeaderManagerDetail
+  | HttpDefaultsDetail
+  | JSONAssertionDetail
+  | BeanShellDetail
+  | RegexExtractorDetail
+  | JSONExtractorDetail
+  | CsvDataSetDetail

@@ -74,7 +74,7 @@ async function loadTasks() {
 onMounted(loadTasks)
 
 function handleCreate() {
-  router.push('/performance/tasks')
+  router.push(`/performance/tasks?biz=${activeBiz.value}`)
 }
 
 function handleEdit(streamId: string) {
