@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.db.models import Q, UniqueConstraint
 from django.utils import timezone
 
 from .services.jmeter import delete_csv, delete_script, get_scripts_dir
@@ -13,11 +14,31 @@ class BizCategory(models.TextChoices):
 
 
 class RunStatus(models.TextChoices):
+    PRE_CHECKING = 'pre_checking', '环境检测中'
+    PRE_CHECK_FAILED = 'pre_check_failed', '环境检测失败'
     PENDING = 'pending', '待执行'
     RUNNING = 'running', '执行中'
+    CANCELLING = 'cancelling', '正在停止'
     SUCCESS = 'success', '成功'
-    FAIL = 'fail', '失败'
+    FAILED = 'failed', '失败'
+    TIMEOUT = 'timeout', '超时'
     CANCELLED = 'cancelled', '已取消'
+
+
+# 非终态：用于唯一约束 + 控制可 cancel
+ACTIVE_RUN_STATUSES = (
+    RunStatus.PRE_CHECKING,
+    RunStatus.PENDING,
+    RunStatus.RUNNING,
+    RunStatus.CANCELLING,
+)
+TERMINAL_RUN_STATUSES = (
+    RunStatus.PRE_CHECK_FAILED,
+    RunStatus.SUCCESS,
+    RunStatus.FAILED,
+    RunStatus.TIMEOUT,
+    RunStatus.CANCELLED,
+)
 
 
 def csv_upload_path(instance, filename):
@@ -185,10 +206,13 @@ class TaskCsvBinding(models.Model):
 
 
 class TaskRun(models.Model):
-    """Task 的一次执行记录（v1 先建表，v1.1 接 JMeter CLI 后往里写）"""
+    """Task 的一次执行记录。Step 3 (v1.1) 起，由 services/executor.py 的 RunExecutor
+    在子线程里编排：pre_checking → pending → running → 终态。run_id 是面向用户的
+    短 uuid（运行目录名、InfluxDB tag、URL 都用它，不暴露 DB pk）。"""
     task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='runs')
+    run_id = models.CharField(max_length=32, unique=True, db_index=True)
     status = models.CharField(
-        max_length=20, choices=RunStatus.choices, default=RunStatus.PENDING,
+        max_length=20, choices=RunStatus.choices, default=RunStatus.PRE_CHECKING,
     )
 
     started_at = models.DateTimeField(null=True, blank=True)
@@ -207,11 +231,37 @@ class TaskRun(models.Model):
 
     error_message = models.TextField(blank=True)
 
+    # Step 3 子进程编排相关
+    pre_check_log = models.TextField(blank=True)
+    pid = models.PositiveIntegerField(null=True, blank=True)
+    stop_port = models.PositiveIntegerField(null=True, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    cancel_requested_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ['-started_at']
+        constraints = [
+            # 同 task 同时只允许一个非终态 run；第二次 INSERT 会撞约束 → views 转 409
+            UniqueConstraint(
+                fields=['task'],
+                condition=Q(status__in=[
+                    'pre_checking', 'pending', 'running', 'cancelling',
+                ]),
+                name='unique_active_run_per_task',
+            ),
+        ]
 
     def __str__(self) -> str:
-        return f'Run #{self.id} of "{self.task.title}" [{self.status}]'
+        return f'Run {self.run_id} of "{self.task.title}" [{self.status}]'
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in {s.value for s in ACTIVE_RUN_STATUSES}
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {s.value for s in TERMINAL_RUN_STATUSES}
 
 
 class MetricSample(models.Model):

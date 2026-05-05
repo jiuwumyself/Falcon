@@ -144,3 +144,13 @@ CORS_ALLOWED_ORIGINS = os.getenv(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:5173,http://127.0.0.1:5173',
 ).split(',')
+
+
+# InfluxDB v1.x — Step 3 实时指标管道。
+# JMeter Backend Listener 直接 POST /write?db=<INFLUXDB_DB>，写入由它做；
+# performance/services/influxdb.py 只读取查询结果给前端展示。
+INFLUXDB_URL = os.getenv('INFLUXDB_URL', 'http://localhost:8086')
+INFLUXDB_DB = os.getenv('INFLUXDB_DB', 'jmeter')
+INFLUXDB_USER = os.getenv('INFLUXDB_USER', '')
+INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', '')
+INFLUXDB_RETENTION = os.getenv('INFLUXDB_RETENTION', '30d')

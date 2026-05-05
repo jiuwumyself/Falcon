@@ -39,8 +39,17 @@ class TaskAdmin(admin.ModelAdmin):
 
 @admin.register(TaskRun)
 class TaskRunAdmin(admin.ModelAdmin):
-    list_display = ('id', 'task', 'status', 'started_at', 'finished_at', 'avg_rps', 'p99_ms', 'error_rate')
-    list_filter = ('status',)
+    list_display = (
+        'id', 'run_id', 'task', 'status',
+        'started_at', 'finished_at',
+        'avg_rps', 'p99_ms', 'error_rate', 'archived_at',
+    )
+    list_filter = ('status', 'archived_at')
+    search_fields = ('run_id', 'task__title')
+    readonly_fields = (
+        'run_id', 'pre_check_log', 'pid', 'stop_port',
+        'last_heartbeat_at', 'cancel_requested_at', 'archived_at',
+    )
 
 
 @admin.register(MetricSample)

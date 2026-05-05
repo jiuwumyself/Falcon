@@ -31,8 +31,17 @@ function pad3(n: number) { return n.toString().padStart(3, '0') }
 function statusFromApi(s: ApiTask['status']): StreamTask['status'] {
   switch (s) {
     case 'success': return 'success'
-    case 'failed': return 'fail'
-    case 'running': return 'running'
+    case 'failed':
+    case 'timeout':
+    case 'pre_check_failed':
+      return 'fail'
+    case 'running':
+    case 'pre_checking':
+    case 'pending':
+    case 'cancelling':
+      return 'running'
+    case 'cancelled':
+      return 'fail'   // 视觉对齐"非成功"
     case 'configured': return 'configured'
     default: return 'draft'
   }

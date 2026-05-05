@@ -447,28 +447,26 @@ def _extract_tg_params(el: etree._Element, kind: str) -> dict[str, Any]:
             'unit': _s('Unit', 'M') or 'M',   # Arrivals 习惯用 M (每分钟)
         }
     if kind == 'UltimateThreadGroup':
-        # 从 ultimatethreadgroupdata 里读第一行（v1 Ultimate 只生成/编辑单行）
+        def _parse_row(row_el: etree._Element) -> dict[str, int]:
+            def _ri(idx: str, fb: int) -> int:
+                e = row_el.find(f"stringProp[@name='{idx}']")
+                try:
+                    return int((e.text or '').strip()) if e is not None else fb
+                except (ValueError, AttributeError):
+                    return fb
+            return {
+                'users': _ri('1', 100),
+                'initial_delay': _ri('2', 0),
+                'ramp_up': _ri('3', 5),
+                'hold': _ri('4', 60),
+                'shutdown': _ri('5', 5),
+            }
         data = el.find("collectionProp[@name='ultimatethreadgroupdata']")
         if data is not None:
-            rows = data.findall('collectionProp')
-            if rows:
-                row = rows[0]
-                def _row_i(idx: str, fb: int) -> int:
-                    e = row.find(f"stringProp[@name='{idx}']")
-                    try:
-                        return int((e.text or '').strip()) if e is not None else fb
-                    except (ValueError, AttributeError):
-                        return fb
-                return {
-                    'users': _row_i('1', 100),
-                    'initial_delay': _row_i('2', 0),
-                    'ramp_up': _row_i('3', 5),
-                    'hold': _row_i('4', 60),
-                    'shutdown': _row_i('5', 5),
-                }
-        return {
-            'users': 100, 'initial_delay': 0, 'ramp_up': 5, 'hold': 60, 'shutdown': 5,
-        }
+            xml_rows = data.findall('collectionProp')
+            if xml_rows:
+                return {'rows': [_parse_row(r) for r in xml_rows]}
+        return {'rows': [{'users': 100, 'initial_delay': 0, 'ramp_up': 5, 'hold': 60, 'shutdown': 5}]}
     return {}
 
 
@@ -561,11 +559,33 @@ def validate_thread_group_params(kind: str, params: dict[str, Any]) -> None:
         _int('ramp_up', 0, cap)
         _int('hold', 0, cap)
     elif kind == 'UltimateThreadGroup':
-        _int('users', 1, MAX_USERS)
-        _int('initial_delay', 0, MAX_DURATION_SECONDS)
-        _int('ramp_up', 0, MAX_DURATION_SECONDS)
-        _int('hold', 0, MAX_DURATION_SECONDS)
-        _int('shutdown', 0, MAX_DURATION_SECONDS)
+        # 兼容老格式（flat dict）→ 包成 rows
+        if 'rows' not in params and 'users' in params:
+            rows_to_validate = [params]
+        else:
+            rows_to_validate = params.get('rows', [])
+        if not rows_to_validate:
+            raise JmxParseError('峰值场景至少要有一个波峰')
+        for peak_idx, row in enumerate(rows_to_validate, 1):
+            label = f'波峰 {peak_idx}'
+            def _row_int(name: str, min_v: int = 0, max_v: int | None = None,
+                         _row: dict = row, _lbl: str = label) -> int:
+                v = _row.get(name)
+                if not isinstance(v, int):
+                    try:
+                        v = int(v)
+                    except (TypeError, ValueError):
+                        raise JmxParseError(f'{_lbl} 的 {name} 必须是整数')
+                if v < min_v:
+                    raise JmxParseError(f'{_lbl} 的 {name} 不能小于 {min_v}')
+                if max_v is not None and v > max_v:
+                    raise JmxParseError(f'{_lbl} 的 {name} 不能超过 {max_v}')
+                return v
+            _row_int('users', 1, MAX_USERS)
+            _row_int('initial_delay', 0, MAX_DURATION_SECONDS)
+            _row_int('ramp_up', 0, MAX_DURATION_SECONDS)
+            _row_int('hold', 0, MAX_DURATION_SECONDS)
+            _row_int('shutdown', 0, MAX_DURATION_SECONDS)
 
 
 def _build_standard_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree._Element:
@@ -693,14 +713,16 @@ def _build_ultimate_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree.
         'testname': testname,
         'enabled': enabled,
     })
-    # ultimatethreadgroupdata：v1 Ultimate 只写单行（用户想要多行 v1.1 再说）
     data = etree.SubElement(el, 'collectionProp', {'name': 'ultimatethreadgroupdata'})
-    row = etree.SubElement(data, 'collectionProp', {'name': '1234567'})
-    etree.SubElement(row, 'stringProp', {'name': '1'}).text = str(p['users'])
-    etree.SubElement(row, 'stringProp', {'name': '2'}).text = str(p['initial_delay'])
-    etree.SubElement(row, 'stringProp', {'name': '3'}).text = str(p['ramp_up'])
-    etree.SubElement(row, 'stringProp', {'name': '4'}).text = str(p['hold'])
-    etree.SubElement(row, 'stringProp', {'name': '5'}).text = str(p['shutdown'])
+    # 兼容老格式（flat dict）→ 包成 rows
+    rows = p['rows'] if 'rows' in p else [p]
+    for i, row_data in enumerate(rows):
+        row_el = etree.SubElement(data, 'collectionProp', {'name': str(i)})
+        etree.SubElement(row_el, 'stringProp', {'name': '1'}).text = str(row_data.get('users', 100))
+        etree.SubElement(row_el, 'stringProp', {'name': '2'}).text = str(row_data.get('initial_delay', 0))
+        etree.SubElement(row_el, 'stringProp', {'name': '3'}).text = str(row_data.get('ramp_up', 5))
+        etree.SubElement(row_el, 'stringProp', {'name': '4'}).text = str(row_data.get('hold', 60))
+        etree.SubElement(row_el, 'stringProp', {'name': '5'}).text = str(row_data.get('shutdown', 5))
 
     controller = etree.SubElement(el, 'elementProp', {
         'name': 'ThreadGroup.main_controller',
@@ -1277,67 +1299,86 @@ def _inject_dns_cache_manager(
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
-def _inject_backend_listener(xml_bytes: bytes, cfg) -> bytes:
+def _inject_backend_listener(
+    xml_bytes: bytes,
+    *,
+    run_id: str,
+    task_id: int,
+    influxdb_url: str,
+    influxdb_db: str,
+) -> bytes:
     """
-    在 TestPlan 的顶层 hashTree 末尾注入 BackendListener 元素（+ 空 hashTree 配对）。
+    在 TestPlan 顶层 hashTree 注入一个 BackendListener，把全部 sampler 数据推到
+    InfluxDB v1.x 的 `/write?db=<db>` 端点。前端实时图、跑完归档查询都靠这条线。
 
-    cfg: BackendListenerConfig 实例（已验证 enabled=True, influxdb_url 非空）。
+    - 用 JMeter 内置 `org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient`
+    - tag `run_id=<run_id>` `task_id=<task_id>` 让多 run 数据共表也能切片
+    - 不破坏 Step 2 配置：build_run_xml 仅在 inject_backend_listener=True 时调
     """
+    if not (run_id and influxdb_url and influxdb_db):
+        return xml_bytes
+
     tree = _parse_tree(xml_bytes)
     top = _top_hashtree(tree)
 
-    bl = etree.SubElement(top, 'BackendListener', {
+    listener = etree.SubElement(top, 'BackendListener', {
         'guiclass': 'BackendListenerGui',
         'testclass': 'BackendListener',
-        'testname': 'Backend Listener',
+        'testname': f'Falcon BackendListener ({run_id})',
         'enabled': 'true',
     })
-
-    # arguments wrapper
-    args_elem = etree.SubElement(bl, 'elementProp', {
+    args = etree.SubElement(listener, 'elementProp', {
         'name': 'arguments',
         'elementType': 'Arguments',
         'guiclass': 'ArgumentsPanel',
         'testclass': 'Arguments',
         'enabled': 'true',
     })
-    args_coll = etree.SubElement(args_elem, 'collectionProp', {'name': 'Arguments.arguments'})
+    coll = etree.SubElement(args, 'collectionProp', {'name': 'Arguments.arguments'})
 
-    def _add_arg(name: str, value: str) -> None:
-        eprop = etree.SubElement(args_coll, 'elementProp', {
-            'name': name, 'elementType': 'Argument',
+    # 走 v1 协议：URL = http://host:8086/write?db=<bucket>
+    write_url = influxdb_url.rstrip('/') + f'/write?db={influxdb_db}'
+
+    backend_args = [
+        ('influxdbMetricsSender',
+         'org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender'),
+        ('influxdbUrl', write_url),
+        ('application', 'falcon'),
+        ('measurement', 'jmeter'),
+        ('summaryOnly', 'false'),
+        ('samplersRegex', '.*'),
+        ('useRegexForSamplerList', 'true'),
+        ('testTitle', f'Falcon-Run-{run_id}'),
+        # 自定义 tags：JMeter 把 TAG_<key>=<val> 自动加到每条数据点
+        ('TAG_run_id', run_id),
+        ('TAG_task_id', str(task_id)),
+        ('percentiles', '90;95;99'),
+    ]
+    for k, v in backend_args:
+        arg = etree.SubElement(coll, 'elementProp', {
+            'name': k,
+            'elementType': 'Argument',
         })
-        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.name'}).text = name
-        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.value'}).text = value
-        etree.SubElement(eprop, 'stringProp', {'name': 'Argument.metadata'}).text = '='
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.name'}).text = k
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.value'}).text = v
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.metadata'}).text = '='
 
-    _add_arg('influxdbMetricsSender',
-             'org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender')
-    _add_arg('influxdbUrl', cfg.influxdb_url)
-    _add_arg('application', cfg.application or '')
-    _add_arg('measurement', cfg.measurement or 'jmeter')
-    _add_arg('summaryOnly', 'false')
-    _add_arg('samplersRegex', '.*')
-    _add_arg('percentiles', '90;95;99')
-    _add_arg('testTitle', 'Test started')
-    _add_arg('eventTags', '')
+    etree.SubElement(listener, 'stringProp', {
+        'name': 'classname',
+    }).text = 'org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient'
 
-    # extra_args overrides / extends defaults
-    for k, v in (cfg.extra_args or {}).items():
-        _add_arg(str(k), str(v))
-
-    etree.SubElement(bl, 'stringProp', {'name': 'classname'}).text = cfg.classname
-    etree.SubElement(bl, 'intProp', {'name': 'QUEUE_SIZE'}).text = '5000'
-
-    # JMeter hashTree 配对结构要求每个元素后紧跟一个 hashTree
+    # BackendListener 后面紧跟空 hashTree（配对结构要求）
     etree.SubElement(top, 'hashTree')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
 def build_run_xml(
-    task, *,
+    task,
+    *,
     inject_environment_dns: bool = False,
+    inject_backend_listener: bool = False,
+    run_id: str | None = None,
     warnings: list[str] | None = None,
 ) -> bytes:
     """
@@ -1348,11 +1389,14 @@ def build_run_xml(
     - 对 `task.csv_bindings` 中每条把 CSVDataSet 的 filename 改成绝对路径（scripts/ 下）
     - `inject_environment_dns=True` 时把 `task.environment.host_entries` 注入成
       `DNSCacheManager`（v1.1 真跑 JMeter 用，validate 不用）
+    - `inject_backend_listener=True`（必须配 run_id）时注入 InfluxDB BackendListener，
+      Step 3 真跑时用；preview / validate 不传保持纯净
 
-    返回最终 XML bytes。Step 1（脚本结构）+ Step 2（跑法）+ Environment（DNS）
-    三类配置在这里汇合。
+    返回最终 XML bytes。Step 1（脚本结构）+ Step 2（跑法）+ Environment（DNS）+
+    Step 3（指标推送）四类配置在这里汇合。
     """
-    # 局部 import 避免循环依赖（jmx.py 是底层服务，不应依赖 models.py）
+    # 局部 import 避免循环依赖（jmx.py 是底层服务，不应依赖 models.py / settings）
+    from django.conf import settings  # noqa: PLC0415
     from .jmeter import get_scripts_dir  # noqa: PLC0415
 
     xml = task.read_jmx_bytes()
@@ -1384,11 +1428,15 @@ def build_run_xml(
             xml, task.environment.host_entries or [], warnings=warnings,
         )
 
-    # 4) Backend Listener 注入（全局 Admin 配置）
-    from performance.models import BackendListenerConfig  # noqa: PLC0415
-    cfg = BackendListenerConfig.get_config()
-    if cfg.enabled and cfg.influxdb_url:
-        xml = _inject_backend_listener(xml, cfg)
+    # 4) BackendListener → InfluxDB（仅 Step 3 真跑时用，按 run_id 切片）
+    if inject_backend_listener and run_id:
+        xml = _inject_backend_listener(
+            xml,
+            run_id=run_id,
+            task_id=task.id,
+            influxdb_url=getattr(settings, 'INFLUXDB_URL', ''),
+            influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
+        )
 
     return xml
 

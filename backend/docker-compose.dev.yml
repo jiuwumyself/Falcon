@@ -1,0 +1,29 @@
+# Falcon Step 3 本地开发用 InfluxDB v1.8。
+#
+# 用途：JMeter Backend Listener 把每个请求的耗时 / 状态推到 InfluxDB；
+#       后端 performance/services/influxdb.py 只读查询给前端展示。
+#
+# 启停：
+#   docker compose -f backend/docker-compose.dev.yml up -d
+#   docker compose -f backend/docker-compose.dev.yml down
+#
+# 数据持久化在 named volume `falcon-influxdb-data`，重启容器不丢。
+# 想清空数据：docker compose -f backend/docker-compose.dev.yml down -v
+#
+# 启动后必须跑一次 `./venv/bin/python manage.py setup_influxdb` 建库 + 保留策略。
+services:
+  influxdb:
+    image: influxdb:1.8
+    container_name: falcon-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=jmeter
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      - INFLUXDB_REPORTING_DISABLED=true
+    volumes:
+      - falcon-influxdb-data:/var/lib/influxdb
+    restart: unless-stopped
+
+volumes:
+  falcon-influxdb-data:

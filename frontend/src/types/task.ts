@@ -1,10 +1,20 @@
 export type BizCategory = 'shared' | 'ai' | 'kg' | 'custom'
 
-export type RunStatus = 'pending' | 'running' | 'success' | 'fail' | 'cancelled'
+// Step 3 起 RunStatus 跟后端枚举完全对齐（fail 改名 failed，新增 4 个）
+export type RunStatus =
+  | 'pre_checking'
+  | 'pre_check_failed'
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'success'
+  | 'failed'
+  | 'timeout'
+  | 'cancelled'
 
-// 任务在 wizard 流程中的展示态：v1 只有 draft / configured 两态，
-// v1.1 接执行模块后会再加 running / success / failed
-export type TaskStatus = 'draft' | 'configured' | 'running' | 'success' | 'failed'
+// 任务在列表 / wizard 中的展示态：未跑过时 draft/configured，
+// 跑过则直接展示最近 run 的 status（同 RunStatus 枚举）
+export type TaskStatus = 'draft' | 'configured' | RunStatus
 
 export interface TaskCsvBinding {
   component_path: string  // 索引路径，对齐组件树的 path（如 "0.0.3"）
@@ -25,6 +35,7 @@ export interface Task {
   environment: number | null    // Environment id or null
   csv_bindings: TaskCsvBinding[]
   status: TaskStatus
+  active_run_id: string | null  // 后端 Step 3 加：有活跃 run 时直接给前端 run_id
   owner: number | null
   created_at: string
   updated_at: string
@@ -74,12 +85,16 @@ export interface ConcurrencyTGParams {
   unit: 'S' | 'M'
 }
 
-export interface UltimateTGParams {
+export interface UltimatePeakRow {
   users: number
   initial_delay: number
   ramp_up: number
   hold: number
   shutdown: number
+}
+
+export interface UltimateTGParams {
+  rows: UltimatePeakRow[]
 }
 
 export interface ArrivalsTGParams {
@@ -109,7 +124,7 @@ export interface ThreadGroupConfig {
   path: string
   scenario?: ScenarioId   // UI 语义标识，后端直通存盘
   kind: TGKind
-  params: Record<string, number | string>
+  params: Record<string, any>
 }
 
 export interface ThreadGroupsResponse {
@@ -152,6 +167,7 @@ export interface ValidateResponse {
 
 export interface TaskRun {
   id: number
+  run_id: string                // Step 3 起：面向用户的短 uuid，URL / 目录名 / InfluxDB tag 都用它
   task: number
   status: RunStatus
   started_at: string | null
@@ -164,6 +180,30 @@ export interface TaskRun {
   p99_ms: number
   error_rate: number
   error_message: string
+  // Step 3 子进程编排相关
+  pre_check_log: string
+  pid: number | null
+  stop_port: number | null
+  last_heartbeat_at: string | null
+  cancel_requested_at: string | null
+  archived_at: string | null
+}
+
+// Step 3 实时指标 / 归档查询返回结构（GET /runs/:run_id/metrics?since=...）
+export type SeriesPoint = [number, number]   // [ms_epoch, value]
+
+export interface RunMetricsSeries {
+  rps: SeriesPoint[]
+  p99_ms: SeriesPoint[]
+  error_rate: SeriesPoint[]
+  active_users: SeriesPoint[]
+}
+
+export interface RunMetrics {
+  overall: RunMetricsSeries
+  by_tg: Record<string, RunMetricsSeries>   // key = JMeter sample label / TG name
+  last_ts: string                           // 下次轮询的 since 参数
+  run: TaskRun                              // 后端附带最新 run 状态
 }
 
 export interface Paginated<T> {

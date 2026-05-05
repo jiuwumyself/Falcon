@@ -6,6 +6,7 @@ Scope:
   respect JMETER_HOME in Docker/production).
 - Where user-uploaded JMX scripts get stored (<jmeter_home>/scripts/).
 - How to turn a user-facing title into a safe, collision-free .jmx filename.
+- Per-run artifact directory lifecycle (Step 3).
 
 This module does NOT parse JMX XML — that's tasks/services/jmx.py.
 """
@@ -14,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import tarfile
 import tempfile
 import time
 import unicodedata
@@ -85,6 +87,71 @@ def get_runs_dir() -> Path:
     d = get_jmeter_home() / 'runs'
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def get_jmeter_bin() -> Path:
+    """跨平台返回 JMeter CLI 可执行文件路径（jmeter / jmeter.bat）。"""
+    name = 'jmeter.bat' if os.name == 'nt' else 'jmeter'
+    return get_jmeter_home() / 'bin' / name
+
+
+def get_run_dir(run_id: str) -> Path:
+    """单个 run 的产物目录 <jmeter_home>/runs/<run_id>/，按需创建。"""
+    if not run_id or '/' in run_id or '\\' in run_id or '..' in run_id:
+        raise ValueError(f'invalid run_id: {run_id!r}')
+    d = get_runs_dir() / run_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def archive_run_dir(run_id: str) -> Path | None:
+    """把 runs/<run_id>/ 整体打包成 runs/<run_id>.tar.gz 并删原目录。
+
+    已归档（tar.gz 已存在）或目录不存在时是 no-op。失败抛 RuntimeError。
+    返回归档文件路径；no-op 时返 None。
+    """
+    runs = get_runs_dir()
+    src = runs / run_id
+    archive = runs / f'{run_id}.tar.gz'
+    if archive.exists():
+        return archive  # 已归档
+    if not src.is_dir():
+        return None
+    # 写到临时文件再 rename，避免半写归档
+    tmp = runs / f'.{run_id}.tar.gz.tmp'
+    try:
+        with tarfile.open(tmp, 'w:gz') as tf:
+            tf.add(src, arcname=run_id)
+        tmp.replace(archive)
+        shutil.rmtree(src, ignore_errors=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return archive
+
+
+def cleanup_old_runs(keep: int = 20) -> list[str]:
+    """按 mtime 倒序保留最新 keep 个 run 目录，更老的归档为 .tar.gz。
+
+    已归档的 .tar.gz 不计入 keep 配额（永久保留，用户主动删）。
+    返回本次新归档的 run_id 列表（用于日志）。
+    """
+    runs = get_runs_dir()
+    if not runs.exists():
+        return []
+    dirs = sorted(
+        (p for p in runs.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    archived: list[str] = []
+    for old in dirs[keep:]:
+        try:
+            archive_run_dir(old.name)
+            archived.append(old.name)
+        except Exception as e:  # noqa: BLE001
+            print(f'[jmeter] WARN: archive failed for {old.name}: {e}',
+                  file=sys.stderr)
+    return archived
 
 
 # Minimum disk free space required before writing scripts / CSVs / run snapshots.

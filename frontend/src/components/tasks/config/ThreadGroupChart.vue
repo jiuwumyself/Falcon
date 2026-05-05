@@ -92,17 +92,52 @@ const rawPoints = computed<Point[]>(() => {
     return pts
   }
   if (props.kind === 'UltimateThreadGroup') {
-    const users = toNum(p.users, 500)
-    const initDelay = Math.max(0, toNum(p.initial_delay, 0))
-    const ramp = Math.max(0, toNum(p.ramp_up, 5))
-    const hold = toNum(p.hold, 60)
-    const shutdown = Math.max(0, toNum(p.shutdown, 5))
-    const pts: Point[] = [{ t: 0, y: 0 }]
-    if (initDelay > 0) pts.push({ t: initDelay, y: 0 })
-    pts.push({ t: initDelay + ramp, y: users })
-    pts.push({ t: initDelay + ramp + hold, y: users })
-    pts.push({ t: initDelay + ramp + hold + shutdown, y: 0 })
-    return pts
+    // 兼容老格式（flat dict）和新格式（rows 数组）
+    type PeakRow = { users: number; initial_delay: number; ramp_up: number; hold: number; shutdown: number }
+    let rows: PeakRow[]
+    if (Array.isArray(p.rows) && p.rows.length > 0) {
+      rows = (p.rows as any[]).map((r) => ({
+        users: toNum(r.users, 500),
+        initial_delay: Math.max(0, toNum(r.initial_delay, 0)),
+        ramp_up: Math.max(0, toNum(r.ramp_up, 5)),
+        hold: Math.max(0, toNum(r.hold, 60)),
+        shutdown: Math.max(0, toNum(r.shutdown, 5)),
+      }))
+    } else {
+      rows = [{
+        users: toNum(p.users, 500),
+        initial_delay: Math.max(0, toNum(p.initial_delay, 0)),
+        ramp_up: Math.max(0, toNum(p.ramp_up, 5)),
+        hold: Math.max(0, toNum(p.hold, 60)),
+        shutdown: Math.max(0, toNum(p.shutdown, 5)),
+      }]
+    }
+
+    // 每行在时刻 t 的活跃用户数（线性 ramp up/down）
+    function rowAt(r: PeakRow, t: number): number {
+      const t0 = r.initial_delay
+      const t1 = t0 + r.ramp_up
+      const t2 = t1 + r.hold
+      const t3 = t2 + r.shutdown
+      if (t <= t0) return 0
+      if (t <= t1) return r.users * (t - t0) / Math.max(1, r.ramp_up)
+      if (t <= t2) return r.users
+      if (t <= t3) return r.users * (t3 - t) / Math.max(1, r.shutdown)
+      return 0
+    }
+
+    // 收集所有关键时刻点
+    const times = new Set<number>([0])
+    for (const r of rows) {
+      times.add(r.initial_delay)
+      times.add(r.initial_delay + r.ramp_up)
+      times.add(r.initial_delay + r.ramp_up + r.hold)
+      times.add(r.initial_delay + r.ramp_up + r.hold + r.shutdown)
+    }
+    return Array.from(times).sort((a, b) => a - b).map((t) => ({
+      t,
+      y: rows.reduce((sum, r) => sum + rowAt(r, t), 0),
+    }))
   }
   return [{ t: 0, y: 0 }]
 })

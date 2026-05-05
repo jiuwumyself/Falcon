@@ -1,20 +1,28 @@
 import hashlib
 import re
+import secrets
 from pathlib import Path
 
 from django.conf import settings
-from django.http import FileResponse, Http404
+from django.db import IntegrityError, transaction
+from django.http import FileResponse, Http404, HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
-from .models import Environment, Task, TaskCsvBinding
-from .serializers import EnvironmentSerializer, TaskSerializer
+from .models import (
+    ACTIVE_RUN_STATUSES, Environment, RunStatus, Task, TaskCsvBinding, TaskRun,
+)
+from .serializers import (
+    EnvironmentSerializer, TaskRunSerializer, TaskSerializer,
+)
+from .services import executor as executor_svc
+from .services import influxdb as influxdb_svc
 from .services.jmeter import (
     DiskFullError, delete_csv, delete_script, ensure_jmeter_installed,
-    ensure_plugins_installed, get_scripts_dir, rename_script,
-    unique_script_filename, write_csv, write_jar, write_script,
+    ensure_plugins_installed, get_run_dir, get_runs_dir, get_scripts_dir,
+    rename_script, unique_script_filename, write_csv, write_jar, write_script,
 )
 from .services.jmx import (
     JmxParseError, build_run_xml, get_component_detail, list_components,
@@ -651,3 +659,176 @@ class TaskViewSet(viewsets.ModelViewSet):
         instance.save(update_fields=['jmx_hash', 'updated_at'])
         tree_dicts = [c.to_dict() for c in list_components(new_xml)]
         return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
+
+    # ── Step 3：执行任务 ────────────────────────────────────
+
+    @action(detail=True, methods=['post'], url_path='run')
+    def run(self, request, pk=None):
+        """创建 TaskRun 并触发 RunExecutor。同 task 已有非终态 run 时返 409。"""
+        instance = self.get_object()
+        if not instance.thread_groups_config:
+            return Response(
+                {'detail': '请先完成 Step 2 任务配置再执行'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        run_id = secrets.token_hex(8)
+        try:
+            with transaction.atomic():
+                task_run = TaskRun.objects.create(
+                    task=instance,
+                    run_id=run_id,
+                    status=RunStatus.PRE_CHECKING,
+                    virtual_users=instance.virtual_users,
+                    ramp_up_seconds=instance.ramp_up_seconds,
+                    duration_seconds=instance.duration_seconds,
+                )
+        except IntegrityError:
+            active = instance.runs.filter(
+                status__in=[s.value for s in ACTIVE_RUN_STATUSES],
+            ).first()
+            return Response(
+                {
+                    'detail': '该任务已有运行中的 run，请先取消',
+                    'active_run_id': active.run_id if active else None,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # 子线程编排
+        executor_svc.RunExecutor(task_run).start()
+        return Response(
+            TaskRunSerializer(task_run).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['get'], url_path='runs')
+    def runs(self, request, pk=None):
+        """该 task 的全部 run（分页，最新优先）。"""
+        instance = self.get_object()
+        qs = instance.runs.order_by('-id')
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(TaskRunSerializer(page, many=True).data)
+        return Response(TaskRunSerializer(qs, many=True).data)
+
+
+# ── Step 3：RunViewSet（按 run_id 操作单个 run） ──────────────────────────
+
+
+class RunViewSet(viewsets.GenericViewSet):
+    """按 run_id 操作 TaskRun。run_id 是面向用户的短 uuid，不暴露 DB pk。"""
+    queryset = TaskRun.objects.all()
+    serializer_class = TaskRunSerializer
+    lookup_field = 'run_id'
+    lookup_value_regex = r'[0-9a-fA-F]+'
+    pagination_class = None  # cancel/metrics/log 都是 detail action
+
+    def retrieve(self, request, run_id=None):
+        run = self.get_object()
+        return Response(TaskRunSerializer(run).data)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, run_id=None):
+        run = self.get_object()
+        if run.is_terminal:
+            return Response(TaskRunSerializer(run).data)  # 幂等
+        executor = executor_svc.get_executor(run.run_id)
+        if executor is None:
+            # 进程内没找到 executor（web 进程重启后 zombie）→ 直接标 failed
+            TaskRun.objects.filter(pk=run.pk).update(
+                status=RunStatus.FAILED,
+                error_message='Web 进程重启或子线程已丢失，无法 graceful 取消；自动标记为 failed',
+            )
+            run.refresh_from_db()
+            return Response(TaskRunSerializer(run).data)
+        executor.cancel()
+        run.refresh_from_db()
+        return Response(TaskRunSerializer(run).data)
+
+    @action(detail=True, methods=['get'], url_path='metrics')
+    def metrics(self, request, run_id=None):
+        run = self.get_object()
+        since_str = request.query_params.get('since')
+        since = None
+        if since_str:
+            from datetime import datetime
+            try:
+                since = datetime.fromisoformat(since_str.replace('Z', '+00:00'))
+            except ValueError:
+                return Response(
+                    {'since': ['ISO8601 格式']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        data = influxdb_svc.query_run_realtime(run.run_id, since=since)
+        # 顺手附上 run 状态，前端可以一次拿到全部信息
+        data['run'] = TaskRunSerializer(run).data
+        return Response(data)
+
+    @action(detail=True, methods=['get'], url_path='log')
+    def log(self, request, run_id=None):
+        run = self.get_object()
+        tail = request.query_params.get('tail', '200')
+        try:
+            tail_n = max(1, min(int(tail), 5000))
+        except ValueError:
+            tail_n = 200
+        log_path = get_runs_dir() / run.run_id / 'jmeter.log'
+        if not log_path.exists():
+            return Response({'lines': []})
+        try:
+            with log_path.open('r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+            return Response({'lines': lines[-tail_n:]})
+        except OSError as e:
+            return Response(
+                {'detail': f'读 log 失败: {e}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=['get'], url_path='jtl')
+    def jtl(self, request, run_id=None):
+        run = self.get_object()
+        jtl_path = get_runs_dir() / run.run_id / 'results.jtl'
+        if not jtl_path.exists():
+            raise Http404(f'JTL 不存在: {jtl_path}')
+        response = FileResponse(
+            jtl_path.open('rb'),
+            as_attachment=True,
+            filename=f'{run.run_id}.jtl',
+        )
+        response['Content-Type'] = 'text/csv; charset=utf-8'
+        return response
+
+    @action(detail=True, methods=['get'], url_path=r'report(?:/(?P<sub>.+))?')
+    def report(self, request, run_id=None, sub=None):
+        """JMeter -e -o 生成的 HTML 报告。GET /report/ → index.html；
+        子路径（CSS/JS/sbadmin2 资源）通过 sub 透传。"""
+        run = self.get_object()
+        report_dir = get_runs_dir() / run.run_id / 'report'
+        if not report_dir.is_dir():
+            raise Http404('报告尚未生成（仅 success/cancelled/timeout 后可看）')
+
+        rel = sub or 'index.html'
+        # 防路径穿越
+        target = (report_dir / rel).resolve()
+        if not str(target).startswith(str(report_dir.resolve())):
+            raise Http404('非法路径')
+        if not target.exists() or not target.is_file():
+            raise Http404(f'文件不存在: {rel}')
+
+        # 简单 content-type 判定
+        ext = target.suffix.lower()
+        content_types = {
+            '.html': 'text/html; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.js': 'application/javascript; charset=utf-8',
+            '.json': 'application/json; charset=utf-8',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.svg': 'image/svg+xml',
+        }
+        return HttpResponse(
+            target.read_bytes(),
+            content_type=content_types.get(ext, 'application/octet-stream'),
+        )
