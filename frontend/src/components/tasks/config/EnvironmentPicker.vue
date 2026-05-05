@@ -24,9 +24,9 @@ async function load() {
     // EnvironmentViewSet 禁了分页，直接拿数组
     envs.value = await api<Environment[]>('/environments/')
     error.value = ''
-    // 如果还没选 + 有默认环境 → 自动选默认
+    // 如果还没选 → 优先 is_default，没人是默认就退化第一个，避免 admin 漏勾时静默不选
     if (props.modelValue == null) {
-      const dflt = envs.value.find((e) => e.is_default)
+      const dflt = envs.value.find((e) => e.is_default) ?? envs.value[0]
       if (dflt) emit('update:modelValue', dflt.id)
     }
   } catch (e) {

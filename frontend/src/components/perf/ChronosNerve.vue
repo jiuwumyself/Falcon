@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Motion } from 'motion-v'
+import { AnimatePresence, Motion } from 'motion-v'
 import { AlertTriangle, Plus } from 'lucide-vue-next'
 import {
   BIZ, P99_THRESHOLD, parseTime, PEOPLE, SPRING, stColor, type Task,
@@ -19,6 +19,8 @@ const emit = defineEmits<{
   (e: 'focus', id: string | null): void
   (e: 'selectBiz', id: string): void
   (e: 'create'): void
+  (e: 'editTask', id: string): void
+  (e: 'contextTask', id: string, x: number, y: number): void
 }>()
 
 const isLoading = ref(true)
@@ -43,6 +45,19 @@ function bizById(id: string) { return BIZ.find((b) => b.id === id) }
 
 function toggleBiz(id: string) {
   emit('selectBiz', props.activeBiz === id ? 'all' : id)
+}
+
+const bizHint = ref(false)
+let bizHintTimer: ReturnType<typeof setTimeout> | null = null
+
+function onCreateClick() {
+  if (props.activeBiz === 'all') {
+    bizHint.value = true
+    if (bizHintTimer) clearTimeout(bizHintTimer)
+    bizHintTimer = setTimeout(() => { bizHint.value = false }, 2000)
+    return
+  }
+  emit('create')
 }
 </script>
 
@@ -102,12 +117,13 @@ function toggleBiz(id: string) {
           :while-hover="{ scale: 1.15, boxShadow: '0 0 30px rgba(59,130,246,0.4)' }"
           :while-tap="{ scale: 0.9 }"
           class="w-[44px] h-[44px] rounded-full flex items-center justify-center cursor-pointer relative z-10 flex-shrink-0"
-          style="
-            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-            box-shadow: 0 4px 20px rgba(59,130,246,0.35), inset 0 1px 0 rgba(255,255,255,0.2), inset 0 -1px 0 rgba(0,0,0,0.2);
-          "
+          :style="{
+            background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+            boxShadow: '0 4px 20px rgba(59,130,246,0.35), inset 0 1px 0 rgba(255,255,255,0.2), inset 0 -1px 0 rgba(0,0,0,0.2)',
+            opacity: activeBiz === 'all' ? 0.45 : 1,
+          }"
           :transition="{ type: 'spring', ...SPRING }"
-          @click="emit('create')"
+          @click="onCreateClick()"
         >
           <Plus :size="20" color="#fff" />
           <div
@@ -120,10 +136,24 @@ function toggleBiz(id: string) {
             class="text-[14px]"
             :style="{ color: isDark ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.8)' }"
           >创建</p>
-          <p
-            class="text-[10px]"
-            :style="{ color: isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.25)' }"
-          >Genesis Anchor · 生产力起点</p>
+          <AnimatePresence>
+            <Motion
+              v-if="bizHint"
+              key="biz-hint"
+              as="p"
+              :initial="{ opacity: 0, y: -4 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :exit="{ opacity: 0 }"
+              class="text-[10px]"
+              style="color: #fb7185;"
+            >请先选择所属业务</Motion>
+            <p
+              v-else
+              key="biz-sub"
+              class="text-[10px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.25)' }"
+            >Genesis Anchor · 生产力起点</p>
+          </AnimatePresence>
         </div>
       </div>
     </div>
@@ -175,6 +205,8 @@ function toggleBiz(id: string) {
             @hover-end="emit('focus', null)"
             @mouseenter="emit('focus', t.id)"
             @mouseleave="emit('focus', null)"
+            @click="emit('editTask', t.id)"
+            @contextmenu.prevent="(e: MouseEvent) => emit('contextTask', t.id, e.clientX, e.clientY)"
           >
             <!-- Timeline node -->
             <div

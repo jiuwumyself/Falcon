@@ -1,12 +1,13 @@
-import { BookOpen, Atom, GitBranch } from 'lucide-vue-next'
+import { BookOpen, Atom, GitBranch, Wrench } from 'lucide-vue-next'
 
 export const SPRING = { stiffness: 150, damping: 18 }
 export const P99_THRESHOLD = 80
 
 export const BIZ = [
-  { id: 'shared', label: '共享课', sub: 'Shared Courses', icon: BookOpen, color: '#60a5fa' },
-  { id: 'ai', label: 'AI 事业中心', sub: 'AI Center', icon: Atom, color: '#a78bfa' },
-  { id: 'kg', label: 'KG 知识图谱', sub: 'Knowledge Graph', icon: GitBranch, color: '#34d399' },
+  { id: 'shared', label: '共享课',     sub: 'Shared Courses',  icon: BookOpen,  color: '#60a5fa' },
+  { id: 'ai',     label: 'AI 事业中心', sub: 'AI Center',       icon: Atom,      color: '#a78bfa' },
+  { id: 'kg',     label: 'KG 知识图谱', sub: 'Knowledge Graph', icon: GitBranch, color: '#34d399' },
+  { id: 'custom', label: '定制',        sub: 'Custom',          icon: Wrench,    color: '#fb7185' },
 ]
 
 export interface Person {
@@ -26,10 +27,15 @@ export const PEOPLE: Person[] = [
   { name: '赵强', role: 'QA', avatar: 'ZQ', color: '#ec4899', progress: 0.68, status: 'running' },
 ]
 
+// Visual schema for ChronosNerve / MetricsColumn / TemporalColumn.
+// Both mock data and real API tasks (mapped) feed this shape.
+export type StreamTaskStatus = 'success' | 'fail' | 'running' | 'draft' | 'configured'
+
 export interface Task {
-  id: string
+  id: string                      // 显示用编号 "TSK-001"
+  dbId?: number                   // 真实数据库 id（mock 数据没有）
   title: string
-  status: 'success' | 'fail' | 'running'
+  status: StreamTaskStatus
   time: string
   date: number
   duration: string
@@ -75,7 +81,11 @@ export function getCalendarDays(year: number, month: number) {
 }
 
 export function stColor(s: string) {
-  return s === 'success' ? '#22c55e' : s === 'fail' ? '#f97316' : '#3b82f6'
+  if (s === 'success') return '#22c55e'
+  if (s === 'fail') return '#f97316'
+  if (s === 'configured') return '#8b5cf6'   // 紫：已配置可运行
+  if (s === 'draft') return '#94a3b8'        // 灰：仅上传未配置
+  return '#3b82f6'                            // 蓝：running / 默认
 }
 
 export function parseTime(t: string): number {

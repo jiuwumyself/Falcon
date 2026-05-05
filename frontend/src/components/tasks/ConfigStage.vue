@@ -2,12 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import {
-  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info,
+  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info, FileCode2,
 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import type {
   Task, ThreadGroupInfo, ThreadGroupConfig, ThreadGroupsResponse,
-  ValidateResult, ScenarioId,
+  ValidateResult, ValidateResponse, ExecutedTg, ScenarioId,
 } from '@/types/task'
 import ScenarioTabs from './config/ScenarioTabs.vue'
 import ThreadGroupPicker from './config/ThreadGroupPicker.vue'
@@ -15,6 +15,7 @@ import TgParamsForm from './config/TgParamsForm.vue'
 import ThreadGroupChart from './config/ThreadGroupChart.vue'
 import EnvironmentPicker from './config/EnvironmentPicker.vue'
 import ValidateResultTable from './config/ValidateResultTable.vue'
+import PreviewRunXmlModal from './config/PreviewRunXmlModal.vue'
 import { scenarioById, inferScenarioFromKind, SCENARIOS } from './configStageCtx'
 
 const props = defineProps<{
@@ -40,7 +41,10 @@ const configs = ref<ThreadGroupConfig[]>([])       // 各 TG 的当前配置（�
 const currentPath = ref<string>('')                // 当前在编辑哪个 TG
 const environmentId = ref<number | null>(null)
 const validateResults = ref<ValidateResult[]>([])
+const validateWarnings = ref<string[]>([])
+const validateExecutedTgs = ref<ExecutedTg[]>([])
 const validateTriggered = ref(false)
+const showPreviewXml = ref(false)
 
 // 当前 TG 的配置 (双向绑定代理)
 const currentConfig = computed<ThreadGroupConfig | null>(() => {
@@ -155,13 +159,16 @@ async function validate() {
   validateError.value = ''
   validateTriggered.value = true
   try {
-    validateResults.value = await api<ValidateResult[]>(
+    const r = await api<ValidateResponse>(
       `/tasks/${props.task.id}/validate/`,
       {
         method: 'POST',
         body: JSON.stringify({ environment_id: environmentId.value }),
       },
     )
+    validateResults.value = r.results
+    validateWarnings.value = r.warnings || []
+    validateExecutedTgs.value = r.executed_tgs || []
   } catch (e) {
     validateError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
@@ -257,8 +264,16 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
               <AlertCircle :size="11" /> {{ saveError }}
             </div>
             <div v-if="showSaved" class="text-[11px] flex items-center gap-1" style="color: #10b981">
-              <CheckCircle2 :size="11" /> 已保存 · {{ task.run_jmx_filename }}
+              <CheckCircle2 :size="11" /> 已保存 · 跑压测时按当前配置生成
             </div>
+            <button
+              class="self-start flex items-center gap-1 text-[11px] cursor-pointer hover:underline"
+              :style="{ color: isDark ? 'rgba(167,139,250,0.85)' : '#7c3aed' }"
+              @click="showPreviewXml = true"
+            >
+              <FileCode2 :size="11" />
+              预览跑压测用 XML
+            </button>
             <div class="flex gap-2">
               <button
                 class="flex-1 px-3 py-2 rounded-lg text-[12px] flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -280,7 +295,7 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
                   <Loader :size="12" />
                 </Motion>
                 <PlayCircle v-else :size="12" />
-                {{ validating ? '校验中…' : '1 并发校验' }}
+                {{ validating ? '试跑中…' : '试跑' }}
               </button>
               <button
                 class="flex-1 px-3 py-2 rounded-lg text-[12px] text-white flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -323,6 +338,8 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
           <div v-if="validateTriggered && !validateError" class="flex-1 min-h-0 overflow-y-auto">
             <ValidateResultTable
               :results="validateResults"
+              :warnings="validateWarnings"
+              :executed-tgs="validateExecutedTgs"
               :is-dark="isDark"
             />
           </div>
@@ -335,5 +352,12 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
       >该 JMX 里没有启用的线程组</p>
     </template>
+
+    <PreviewRunXmlModal
+      :visible="showPreviewXml"
+      :task-id="props.task.id"
+      :is-dark="isDark"
+      @close="showPreviewXml = false"
+    />
   </div>
 </template>

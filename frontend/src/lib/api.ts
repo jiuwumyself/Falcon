@@ -1,3 +1,5 @@
+import type { Paginated, Task } from '@/types/task'
+
 // /api/performance/ is the current backend module prefix. When other modules
 // (ui, apitest, ...) ship we'll split this into per-module helpers — for now a
 // single constant covers every call we have.
@@ -76,4 +78,28 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
 export function apiForm<T = unknown>(path: string, form: FormData, method = 'POST'): Promise<T> {
   // Don't set Content-Type — browser sets multipart boundary automatically.
   return api<T>(path, { method, body: form })
+}
+
+// ─── Tasks API ─────────────────────────────────────────────────────────
+// 集中常用的 task 操作，避免组件里散落 fetch 字符串。
+export const tasksApi = {
+  list: () => api<Paginated<Task>>('/tasks/'),
+  get: (id: number) => api<Task>(`/tasks/${id}/`),
+  delete: (id: number) =>
+    api<void>(`/tasks/${id}/`, { method: 'DELETE' }),
+  uploadComponentCsv: (id: number, componentPath: string, file: File) => {
+    const fd = new FormData()
+    fd.append('path', componentPath)
+    fd.append('csv_file', file)
+    return apiForm<Task>(`/tasks/${id}/components/upload-csv/`, fd)
+  },
+  deleteComponentCsv: (id: number, componentPath: string) =>
+    api<Task>(`/tasks/${id}/components/delete-csv/`, {
+      method: 'POST',
+      body: JSON.stringify({ path: componentPath }),
+    }),
+  // 跑压测前在内存里组装的可执行 XML（套 Step 2 thread_groups + CSV 绝对路径
+  // + Environment DNSCacheManager 注入 + BackendListener 注入）。仅预览，不写盘。
+  previewRunXml: (id: number) =>
+    api<{ xml: string }>(`/tasks/${id}/preview-run-xml/`),
 }

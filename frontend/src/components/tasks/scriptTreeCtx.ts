@@ -12,12 +12,13 @@ export interface ScriptTreeCtx {
   // mounts (e.g. the ancestors of any <CSVDataSet> node so the inline "upload
   // CSV" button is always visible regardless of default 3-level limit).
   forceExpandPaths: Ref<Set<string>>
-  // Current task — needed by CSVDataSet inline upload button (calls
-  // /tasks/:id/upload-csv/) and potentially other intra-row actions.
+  // Current task — needed by CSVDataSet inline upload button (binding lookup).
   task: Ref<Task>
-  // Intra-row action: upload a CSV for this task. Returns the updated Task
-  // (so the header bar refreshes csv_filename).
-  uploadCsv: (file: File) => Promise<Task>
+  // Intra-row action: upload a CSV for the CSVDataSet at `componentPath`.
+  // Returns the updated Task so the tree can refresh csv_bindings.
+  uploadCsv: (componentPath: string, file: File) => Promise<Task>
+  // Intra-row action: upload a JAR to JMeter lib/ext/ (global, shared).
+  uploadJar: (componentPath: string, file: File) => Promise<void>
 }
 
 export const SCRIPT_TREE_CTX: InjectionKey<ScriptTreeCtx> = Symbol('SCRIPT_TREE_CTX')

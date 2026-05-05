@@ -1,17 +1,28 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { Motion, AnimatePresence } from 'motion-v'
-import { X, Loader, Save, AlertCircle } from 'lucide-vue-next'
+import { X, Loader, Save, AlertCircle, AlertTriangle } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import type { JmxComponent, ComponentDetail } from '@/types/task'
 import HttpSamplerForm from './detail/HttpSamplerForm.vue'
 import HeaderManagerForm from './detail/HeaderManagerForm.vue'
+import HttpDefaultsForm from './detail/HttpDefaultsForm.vue'
+import JSONAssertionForm from './detail/JSONAssertionForm.vue'
+import BeanShellForm from './detail/BeanShellForm.vue'
+import RegexExtractorForm from './detail/RegexExtractorForm.vue'
+import JSONExtractorForm from './detail/JSONExtractorForm.vue'
+import CsvDataSetForm from './detail/CsvDataSetForm.vue'
 
-const props = defineProps<{
-  node: JmxComponent | null
-  taskId: number
-  isDark: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    node: JmxComponent | null
+    taskId: number
+    isDark: boolean
+    // 节点是否在启用的祖先链下；false 时顶部加黄色警告
+    effectiveEnabled?: boolean
+  }>(),
+  { effectiveEnabled: true },
+)
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -121,6 +132,20 @@ const title = computed(() => {
           </button>
         </div>
 
+        <!-- 禁用 TG 警告 (祖先链有禁用时) -->
+        <div
+          v-if="node && !effectiveEnabled"
+          class="flex items-start gap-2 px-5 py-2.5 flex-shrink-0 text-[11px]"
+          :style="{
+            background: isDark ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.08)',
+            borderBottom: `1px solid ${isDark ? 'rgba(245,158,11,0.2)' : 'rgba(245,158,11,0.18)'}`,
+            color: '#b45309',
+          }"
+        >
+          <AlertTriangle :size="12" class="flex-shrink-0 mt-0.5" />
+          <span>当前组件位于<strong>禁用的 ThreadGroup</strong>下，试跑/压测时不会执行。改这里的字段不会影响试跑结果。</span>
+        </div>
+
         <!-- Body -->
         <div class="flex-1 overflow-y-auto px-5 py-5">
           <div
@@ -155,6 +180,42 @@ const title = computed(() => {
             />
             <HeaderManagerForm
               v-else-if="detail.kind === 'HeaderManager'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <HttpDefaultsForm
+              v-else-if="detail.kind === 'HttpDefaults'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <JSONAssertionForm
+              v-else-if="detail.kind === 'JSONPathAssertion'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <BeanShellForm
+              v-else-if="detail.kind === 'BeanShellPostProcessor' || detail.kind === 'BeanShellPreProcessor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <RegexExtractorForm
+              v-else-if="detail.kind === 'RegexExtractor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <JSONExtractorForm
+              v-else-if="detail.kind === 'JSONPathExtractor'"
+              :detail="detail"
+              :is-dark="isDark"
+              @update:detail="detail = $event"
+            />
+            <CsvDataSetForm
+              v-else-if="detail.kind === 'CSVDataSet'"
               :detail="detail"
               :is-dark="isDark"
               @update:detail="detail = $event"

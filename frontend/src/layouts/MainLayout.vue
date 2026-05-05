@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AnimatePresence, Motion } from 'motion-v'
-import { Sun, Moon } from 'lucide-vue-next'
+import { Sun, Moon, Settings } from 'lucide-vue-next'
 import { useTheme } from '@/composables/useTheme'
 import FalconLogo from '@/components/FalconLogo.vue'
 import GlassNav from '@/components/GlassNav.vue'
@@ -124,6 +124,18 @@ watch(activeTabName, () => nextTick(updateSlider))
                   <component :is="isDark ? Moon : Sun" :size="13" :color="isDark ? '#93c5fd' : '#f59e0b'" />
                 </Motion>
               </AnimatePresence>
+            </Motion>
+            <Motion
+              as="a"
+              href="/admin/"
+              target="_blank"
+              rel="noopener"
+              :while-tap="{ scale: 0.9 }"
+              class="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer"
+              :style="{ background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }"
+              title="后台管理"
+            >
+              <Settings :size="13" :color="isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)'" />
             </Motion>
             <div class="relative">
               <Motion

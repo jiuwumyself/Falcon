@@ -2,7 +2,7 @@
 import { ref, watch, computed, provide, toRef } from 'vue'
 import { Motion } from 'motion-v'
 import { Loader, AlertCircle } from 'lucide-vue-next'
-import { api, apiForm, ApiError } from '@/lib/api'
+import { api, ApiError, tasksApi } from '@/lib/api'
 import type { Task, JmxComponent } from '@/types/task'
 import ComponentNode from './ComponentNode.vue'
 import DetailDrawer from './DetailDrawer.vue'
@@ -23,13 +23,49 @@ const collapseTrigger = ref(0)
 const errorFlashPath = ref<string | null>(null)
 const forceExpandPaths = ref<Set<string>>(new Set())
 const editingNode = ref<JmxComponent | null>(null)
+// 编辑节点是否在启用的祖先链下；false 时 DetailDrawer 顶部显示警告条
+const editingNodeEffective = ref(true)
 
-async function uploadCsv(file: File): Promise<Task> {
-  const fd = new FormData()
-  fd.append('csv_file', file)
-  const updated = await apiForm<Task>(`/tasks/${props.task.id}/upload-csv/`, fd)
+/**
+ * 检查 path **祖先链**是否全部 enabled——警告语义是"位于禁用的 TG 下"，
+ * 跟节点自己的 enabled 无关（用户也可能在编辑一个故意禁用的 CSVDataSet）。
+ *
+ * 注意：JmxComponent.path（如 "0.4.4"）是后端**未过滤前**的索引路径，
+ * 而前端 tree 是已过滤掉 BackendListener 等隐藏组件的视图——children
+ * 数组下标跟 path 数字段不一致。这里按 path 字符串前缀在 children
+ * 里 find，绕开下标错位。
+ */
+function effectiveEnabledByPath(path: string): boolean {
+  if (!tree.value.length) return true  // tree 还没加载，给默认值，避免误报警告
+  const segs = path.split('.')
+  if (segs.length <= 1) return true    // 根级节点没有祖先可查
+  let cur: JmxComponent | undefined = tree.value.find((n) => n.path === segs[0])
+  if (!cur || !cur.enabled) return false
+  let prefix = segs[0]
+  // 循环到倒数第二段截止：只检查祖先链，不检查 leaf 自己的 enabled
+  for (let i = 1; i < segs.length - 1; i++) {
+    prefix = `${prefix}.${segs[i]}`
+    cur = cur.children.find((c) => c.path === prefix)
+    if (!cur || !cur.enabled) return false
+  }
+  return true
+}
+
+function handleEdit(node: JmxComponent) {
+  editingNode.value = node
+  editingNodeEffective.value = effectiveEnabledByPath(node.path)
+}
+
+async function uploadCsv(componentPath: string, file: File): Promise<Task> {
+  const updated = await tasksApi.uploadComponentCsv(props.task.id, componentPath, file)
   emit('task-updated', updated)
   return updated
+}
+
+async function uploadJar(_componentPath: string, file: File): Promise<void> {
+  const fd = new FormData()
+  fd.append('jar_file', file)
+  await api(`/tasks/${props.task.id}/components/upload-jar/`, { method: 'POST', body: fd })
 }
 
 const ctx: ScriptTreeCtx = {
@@ -40,6 +76,7 @@ const ctx: ScriptTreeCtx = {
   forceExpandPaths,
   task: toRef(props, 'task'),
   uploadCsv,
+  uploadJar,
 }
 provide(SCRIPT_TREE_CTX, ctx)
 
@@ -184,7 +221,7 @@ const isEmpty = computed(() => !loading.value && tree.value.length === 0)
         :busy-paths="busyPaths"
         @toggle="handleToggle"
         @rename="handleRename"
-        @edit="editingNode = $event"
+        @edit="handleEdit"
       />
     </div>
 
@@ -192,6 +229,7 @@ const isEmpty = computed(() => !loading.value && tree.value.length === 0)
       :node="editingNode"
       :task-id="task.id"
       :is-dark="!!isDark"
+      :effective-enabled="editingNodeEffective"
       @close="editingNode = null"
       @saved="tree = $event"
     />

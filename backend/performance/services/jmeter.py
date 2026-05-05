@@ -80,6 +80,43 @@ def get_scripts_dir() -> Path:
     return d
 
 
+def get_runs_dir() -> Path:
+    """<jmeter_home>/runs/ — 每次跑压测时落 run.jmx 快照 + .jtl 结果（v1.1 才用）。"""
+    d = get_jmeter_home() / 'runs'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Minimum disk free space required before writing scripts / CSVs / run snapshots.
+# Below this, write functions raise to surface a clear error rather than silently
+# failing later when JMeter tries to read a half-written file.
+_MIN_FREE_BYTES = 100 * 1024 * 1024  # 100 MB
+
+
+class DiskFullError(RuntimeError):
+    """Raised when free disk space at the target path is below the threshold."""
+
+
+def _check_free_space(path: Path) -> None:
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return  # If we can't stat, let the actual write fail with its own error
+    if usage.free < _MIN_FREE_BYTES:
+        free_mb = usage.free // (1024 * 1024)
+        raise DiskFullError(
+            f'磁盘空间不足（{free_mb} MB < 100 MB），请清理后重试'
+        )
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write + flush + fsync — guarantees bytes hit the disk before we return."""
+    with path.open('wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _jmeter_binary_exists(home: Path) -> bool:
     name = 'jmeter.bat' if os.name == 'nt' else 'jmeter'
     return (home / 'bin' / name).exists()
@@ -128,6 +165,13 @@ def ensure_jmeter_installed(log=print) -> Path:
             log(f'[jmeter] extracting to {JMETER_BASE_DIR} …')
             with zipfile.ZipFile(tmp_path) as zf:
                 zf.extractall(JMETER_BASE_DIR)
+            # zipfile 不保留 unix +x 位；jmeter / jmeter-server / *.sh 都需要可执行
+            if os.name != 'nt':
+                bin_dir = home / 'bin'
+                if bin_dir.exists():
+                    for f in bin_dir.iterdir():
+                        if f.is_file() and (f.suffix == '' or f.suffix in ('.sh',)):
+                            f.chmod(f.stat().st_mode | 0o111)
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -267,8 +311,10 @@ def unique_script_filename(title: str, exclude: Path | None = None) -> str:
 def write_script(filename: str, data: bytes) -> Path:
     """Write raw bytes to <scripts_dir>/<filename>. Returns full path."""
     ensure_jmeter_installed()
-    path = get_scripts_dir() / filename
-    path.write_bytes(data)
+    scripts = get_scripts_dir()
+    _check_free_space(scripts)
+    path = scripts / filename
+    _atomic_write_bytes(path, data)
     return path
 
 
@@ -319,8 +365,10 @@ def unique_csv_filename(jmx_filename: str, exclude: Path | None = None) -> str:
 def write_csv(filename: str, data: bytes) -> Path:
     """Write raw bytes to <scripts_dir>/<filename>. Returns full path."""
     ensure_jmeter_installed()
-    path = get_scripts_dir() / filename
-    path.write_bytes(data)
+    scripts = get_scripts_dir()
+    _check_free_space(scripts)
+    path = scripts / filename
+    _atomic_write_bytes(path, data)
     return path
 
 
@@ -342,3 +390,24 @@ def rename_csv(old_filename: str, new_filename: str) -> None:
     dst = scripts / new_filename
     if src.exists():
         shutil.move(str(src), str(dst))
+
+
+_MAX_JAR_SIZE = 50 * 1024 * 1024  # 50 MB
+
+
+def write_jar(filename: str, data: bytes) -> Path:
+    """把 JAR 写入 JMeter lib/ext/（全局共享，所有任务公用）。"""
+    if not filename.lower().endswith('.jar'):
+        raise ValueError('只接受 .jar 文件')
+    if len(data) > _MAX_JAR_SIZE:
+        raise ValueError('JAR 文件超过 50 MB 上限')
+    safe_stem = sanitize_script_name(Path(filename).stem) or 'custom'
+    ext_dir = get_jmeter_home() / 'lib' / 'ext'
+    if not ext_dir.exists():
+        raise RuntimeError(
+            f'JMeter lib/ext 目录不存在：{ext_dir}，请先运行 setup_jmeter'
+        )
+    _check_free_space(ext_dir)
+    dest = ext_dir / f'{safe_stem}.jar'
+    _atomic_write_bytes(dest, data)
+    return dest
