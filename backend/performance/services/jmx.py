@@ -1321,7 +1321,30 @@ def _inject_backend_listener(
     tree = _parse_tree(xml_bytes)
     top = _top_hashtree(tree)
 
-    listener = etree.SubElement(top, 'BackendListener', {
+    # 关键：BackendListener 必须放在 TestPlan 的"子 hashTree"里（跟 ThreadGroup
+    # 同级），才能被 sampler 事件触达。放在 root 的 hashTree（跟 TestPlan 平级）
+    # JMeter 不会把 sample 事件分发给它——之前 InfluxDB 只有 transaction=internal
+    # 没有 sampler 数据的根因。
+    #
+    # JMX 结构：
+    #   jmeterTestPlan
+    #     hashTree                    ← top_hashtree 返回这个
+    #       TestPlan
+    #       hashTree                  ← 这里才是 TestPlan 的子节点容器，BackendListener 该进这里
+    #         ThreadGroup
+    #         hashTree
+    #           Sampler...
+    test_plan_subtree = None
+    pairs = list(_hashtree_pairs(top))
+    for el, child_ht, _idx in pairs:
+        if _local(el) == 'TestPlan':
+            test_plan_subtree = child_ht
+            break
+    if test_plan_subtree is None:
+        # 兜底：找不到 TestPlan 就用 top（不会工作但不至于崩，写日志方便定位）
+        test_plan_subtree = top
+
+    listener = etree.SubElement(test_plan_subtree, 'BackendListener', {
         'guiclass': 'BackendListenerGui',
         'testclass': 'BackendListener',
         'testname': f'Falcon BackendListener ({run_id})',
@@ -1375,8 +1398,8 @@ def _inject_backend_listener(
         'name': 'classname',
     }).text = 'org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient'
 
-    # BackendListener 后面紧跟空 hashTree（配对结构要求）
-    etree.SubElement(top, 'hashTree')
+    # BackendListener 后面紧跟空 hashTree（配对结构要求）—— 加到刚才插入的同一容器
+    etree.SubElement(test_plan_subtree, 'hashTree')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
