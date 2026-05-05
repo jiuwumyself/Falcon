@@ -98,4 +98,8 @@ export const tasksApi = {
       method: 'POST',
       body: JSON.stringify({ path: componentPath }),
     }),
+  // 跑压测前在内存里组装的可执行 XML（套 Step 2 thread_groups + CSV 绝对路径
+  // + Environment DNSCacheManager 注入 + BackendListener 注入）。仅预览，不写盘。
+  previewRunXml: (id: number) =>
+    api<{ xml: string }>(`/tasks/${id}/preview-run-xml/`),
 }

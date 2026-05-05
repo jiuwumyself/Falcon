@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import {
-  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info,
+  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info, FileCode2,
 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import type {
@@ -15,6 +15,7 @@ import TgParamsForm from './config/TgParamsForm.vue'
 import ThreadGroupChart from './config/ThreadGroupChart.vue'
 import EnvironmentPicker from './config/EnvironmentPicker.vue'
 import ValidateResultTable from './config/ValidateResultTable.vue'
+import PreviewRunXmlModal from './config/PreviewRunXmlModal.vue'
 import { scenarioById, inferScenarioFromKind, SCENARIOS } from './configStageCtx'
 
 const props = defineProps<{
@@ -42,6 +43,7 @@ const environmentId = ref<number | null>(null)
 const validateResults = ref<ValidateResult[]>([])
 const validateWarnings = ref<string[]>([])
 const validateTriggered = ref(false)
+const showPreviewXml = ref(false)
 
 // 当前 TG 的配置 (双向绑定代理)
 const currentConfig = computed<ThreadGroupConfig | null>(() => {
@@ -262,6 +264,14 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
             <div v-if="showSaved" class="text-[11px] flex items-center gap-1" style="color: #10b981">
               <CheckCircle2 :size="11" /> 已保存 · 跑压测时按当前配置生成
             </div>
+            <button
+              class="self-start flex items-center gap-1 text-[11px] cursor-pointer hover:underline"
+              :style="{ color: isDark ? 'rgba(167,139,250,0.85)' : '#7c3aed' }"
+              @click="showPreviewXml = true"
+            >
+              <FileCode2 :size="11" />
+              预览跑压测用 XML
+            </button>
             <div class="flex gap-2">
               <button
                 class="flex-1 px-3 py-2 rounded-lg text-[12px] flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -339,5 +349,12 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
       >该 JMX 里没有启用的线程组</p>
     </template>
+
+    <PreviewRunXmlModal
+      :visible="showPreviewXml"
+      :task-id="props.task.id"
+      :is-dark="isDark"
+      @close="showPreviewXml = false"
+    />
   </div>
 </template>
