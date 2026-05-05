@@ -253,6 +253,16 @@ await apiForm<Task>('/tasks/', fd)
 - `POST /api/performance/tasks/:id/validate/` body `{environment_id?}` → `ValidateResult[]`（1 并发请求每个启用的 HTTPSampler，内存生成 XML）
 - `GET /api/performance/environments/` → `Environment[]`（不分页；编辑走后台 admin）
 
+**Step 3 端点**（2026-04-30 落地，封装在 `tasksApi.startRun/listRuns` + 新 `runsApi`）：
+- `POST /api/performance/tasks/:id/run/` → 创建 TaskRun + 起 RunExecutor（`tasksApi.startRun(id)`）；同 task 已活跃 run 时收 409 Conflict + `active_run_id`
+- `GET /api/performance/tasks/:id/runs/` → `Paginated<TaskRun>`（`tasksApi.listRuns(id)`）
+- `GET /api/performance/runs/:run_id/` → `runsApi.get(runId)`
+- `POST /api/performance/runs/:run_id/cancel/` → `runsApi.cancel(runId)` graceful 取消（终态时幂等返 200）
+- `GET /api/performance/runs/:run_id/metrics/?since=...` → `RunMetrics { overall, by_tg, last_ts, run }`，`runsApi.metrics(runId, since?)`
+- `GET /api/performance/runs/:run_id/log/?tail=N` → `{lines}`，`runsApi.log(runId, tail)`
+- `GET /api/performance/runs/:run_id/jtl/` → 二进制 jtl 下载 URL = `runsApi.jtlUrl(runId)`
+- `GET /api/performance/runs/:run_id/report/` → JMeter HTML 报告 iframe URL = `runsApi.reportUrl(runId)`
+
 ## 10. 构建 / 类型检查
 
 ```bash
@@ -354,7 +364,8 @@ Wizard 是单一 glass panel：
 ### 12.1 Step 语义（重要，不要搞反）
 - **Step 1 `upload`**：`uploadedTask` 为 null 时 → 居中 dropzone；非 null 时 → 左侧 header + 下方 `<ScriptTree>` 渲染组件树。**不切换到 Step 2**。
 - **Step 2 `config`**（v2 场景驱动）：`<ConfigStage>` 三段式布局。顶部 TG 切换器（单 TG 时隐藏） + 禁用 TG 提示 → 场景 Tab pill（6 选一，**每个 pill 旁有 `?` 图标 hover tooltip：用途 / 典型参数 / 关注指标**）+ 常驻说明条 → 左右分栏（左 35% 参数表单 + 环境下拉 + 校验/保存按钮 / 右 65% echarts 线图 + 校验结果）
-- **Step 3-5 `execute/analyze/report`**：占位 "v1.1 即将推出"，内容在 `TaskCreateWizard.vue` 的 `STEPS` 数组末尾 template 里
+- **Step 3 `execute`**（2026-04-30 落地）：`<ExecuteStage>` 主体 = 左 1/3 控制台（`RunStatusCard` 状态徽章 + 计时器 + 进度条 + 终态总结 + 开始/取消/查看报告按钮）+ `RunHistoryList` 历史 run；右 2/3 `RunMetricsCharts` 按 TG 切 tab、四张 echarts 图（RPS / P99 / 错误率 / 活跃用户数）+ `PreCheckPanel`（pre_check_log 着色多行）。运行中 3s 轮询 `runsApi.metrics(run_id)`，终态自动停。子组件都在 `components/tasks/execute/`
+- **Step 4-5 `analyze/report`**：占位 "v1.2 即将推出"
 
 ### 12.2 状态机
 - `currentStep: ref<number>` —— 0-4 数组索引；初始 0；编辑模式（`initialTask` 非空 + `thread_groups_config` 非空）→ 直接跳到 1

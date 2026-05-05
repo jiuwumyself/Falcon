@@ -9,6 +9,7 @@ import { useTheme } from '@/composables/useTheme'
 import type { Task, BizCategory } from '@/types/task'
 import ScriptTree from './ScriptTree.vue'
 import ConfigStage from './ConfigStage.vue'
+import ExecuteStage from './ExecuteStage.vue'
 
 const props = defineProps<{
   defaultBiz?: BizCategory
@@ -479,7 +480,16 @@ const panelGlass = computed(() => ({
               />
             </template>
 
-            <!-- 03-05 · Placeholders -->
+            <!-- 03 · Execute — JMeter 子进程编排 + 实时指标 -->
+            <template v-else-if="activeStep.id === 'execute'">
+              <ExecuteStage
+                v-if="uploadedTask"
+                :task="uploadedTask"
+                :is-dark="isDark"
+              />
+            </template>
+
+            <!-- 04-05 · Placeholders -->
             <template v-else>
               <div class="h-full flex flex-col items-center justify-center">
                 <div
@@ -491,13 +501,12 @@ const panelGlass = computed(() => ({
                 <p
                   class="text-[14px] mb-1"
                   :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)' }"
-                >v1.1 即将推出</p>
+                >v1.2 即将推出</p>
                 <p
                   class="text-[12px] text-center max-w-[360px]"
                   :style="{ color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.4)' }"
                 >
-                  <template v-if="activeStep.id === 'execute'">触发 JMeter CLI、查看进度、取消运行</template>
-                  <template v-else-if="activeStep.id === 'analyze'">实时 RPS / P99 / 错误率图表与异常定位</template>
+                  <template v-if="activeStep.id === 'analyze'">实时 RPS / P99 / 错误率图表与异常定位</template>
                   <template v-else>AI 根据 run 自动生成分析文字、导出 Word 报告</template>
                 </p>
               </div>

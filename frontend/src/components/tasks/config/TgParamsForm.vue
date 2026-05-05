@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
-import type { TGKind, ThreadGroupConfig } from '@/types/task'
+import { Plus, Trash2 } from 'lucide-vue-next'
+import type { TGKind, ThreadGroupConfig, UltimatePeakRow } from '@/types/task'
 import { MAX_DURATION_SECONDS, MAX_USERS } from '../configStageCtx'
 
 const props = defineProps<{
@@ -12,6 +13,56 @@ const emit = defineEmits<{
   (e: 'update:config', next: ThreadGroupConfig): void
 }>()
 
+const isUltimate = computed(() => props.config.kind === 'UltimateThreadGroup')
+
+// ── Ultimate 多峰行 ──────────────────────────────────────────────────
+
+const defaultPeakRow = (): UltimatePeakRow => ({
+  users: 500, initial_delay: 0, ramp_up: 5, hold: 60, shutdown: 5,
+})
+
+// 兼容老格式（flat dict）→ rows 数组
+const ultimateRows = computed<UltimatePeakRow[]>(() => {
+  const p = props.config.params
+  if (Array.isArray(p.rows)) return p.rows as UltimatePeakRow[]
+  if ('users' in p) {
+    return [{ users: Number(p.users), initial_delay: Number(p.initial_delay ?? 0),
+              ramp_up: Number(p.ramp_up), hold: Number(p.hold), shutdown: Number(p.shutdown) }]
+  }
+  return [defaultPeakRow()]
+})
+
+function emitRows(rows: UltimatePeakRow[]) {
+  emit('update:config', { ...props.config, params: { rows } })
+}
+
+function updateRow(idx: number, field: keyof UltimatePeakRow, rawVal: string) {
+  const val = Math.max(0, Number(rawVal) || 0)
+  const next = ultimateRows.value.map((r, i) => i === idx ? { ...r, [field]: val } : r)
+  emitRows(next)
+}
+
+function addRow() {
+  const last = ultimateRows.value.at(-1)
+  const newDelay = last ? last.initial_delay + last.ramp_up + last.hold + last.shutdown + 10 : 0
+  emitRows([...ultimateRows.value, { ...defaultPeakRow(), initial_delay: newDelay }])
+}
+
+function removeRow(idx: number) {
+  if (ultimateRows.value.length <= 1) return
+  emitRows(ultimateRows.value.filter((_, i) => i !== idx))
+}
+
+const ultimateColDefs: { key: keyof UltimatePeakRow; label: string; max: number }[] = [
+  { key: 'users',         label: '用户数',    max: MAX_USERS },
+  { key: 'initial_delay', label: '延迟(s)',   max: MAX_DURATION_SECONDS },
+  { key: 'ramp_up',       label: '上升(s)',   max: MAX_DURATION_SECONDS },
+  { key: 'hold',          label: '保持(s)',   max: MAX_DURATION_SECONDS },
+  { key: 'shutdown',      label: '下降(s)',   max: MAX_DURATION_SECONDS },
+]
+
+// ── 其他场景 ────────────────────────────────────────────────────────
+
 function defaultsFor(kind: TGKind): Record<string, number | string> {
   if (kind === 'ThreadGroup') return { users: 10, ramp_up: 5, duration: 60 }
   if (kind === 'SteppingThreadGroup') {
@@ -20,9 +71,6 @@ function defaultsFor(kind: TGKind): Record<string, number | string> {
   }
   if (kind === 'ConcurrencyThreadGroup') {
     return { target_concurrency: 100, ramp_up: 10, steps: 5, hold: 60, unit: 'S' }
-  }
-  if (kind === 'UltimateThreadGroup') {
-    return { users: 500, initial_delay: 0, ramp_up: 5, hold: 60, shutdown: 5 }
   }
   return { target_rps: 500, ramp_up: 60, steps: 10, hold: 600, unit: 'M' }
 }
@@ -38,6 +86,17 @@ function setParam(name: string, value: number | string) {
 watch(
   () => [props.config.kind, Object.keys(props.config.params).length] as const,
   () => {
+    if (props.config.kind === 'UltimateThreadGroup') {
+      const p = props.config.params
+      // 老格式迁移：有 users 但没 rows → 包成 rows
+      if ('users' in p && !Array.isArray(p.rows)) {
+        emitRows([{ users: Number(p.users), initial_delay: Number(p.initial_delay ?? 0),
+                    ramp_up: Number(p.ramp_up), hold: Number(p.hold), shutdown: Number(p.shutdown) }])
+      } else if (!Array.isArray(p.rows)) {
+        emitRows([defaultPeakRow()])
+      }
+      return
+    }
     const d = defaultsFor(props.config.kind)
     const p = props.config.params
     let changed = false
@@ -115,38 +174,95 @@ const hasUnit = computed(() =>
       :style="{ color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)' }"
     >参数</p>
 
-    <div class="grid grid-cols-2 gap-3">
-      <div v-for="f in fields" :key="f.name">
-        <label
-          class="block text-[10px] uppercase tracking-wider mb-1 truncate"
-          :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
-          :title="f.hint || ''"
-        >{{ f.label }}</label>
+    <!-- Ultimate ThreadGroup：多峰行编辑器 -->
+    <template v-if="isUltimate">
+      <!-- 列标题 -->
+      <div class="grid gap-1 items-end" style="grid-template-columns: repeat(5, 1fr) 28px">
+        <span
+          v-for="col in ultimateColDefs" :key="col.key"
+          class="text-[9px] uppercase tracking-wider text-center truncate pb-0.5"
+          :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
+        >{{ col.label }}</span>
+        <span />
+      </div>
+
+      <!-- 每个波峰行 -->
+      <div
+        v-for="(row, idx) in ultimateRows" :key="idx"
+        class="grid gap-1 items-center"
+        style="grid-template-columns: repeat(5, 1fr) 28px"
+      >
         <input
-          :value="config.params[f.name]"
+          v-for="col in ultimateColDefs" :key="col.key"
+          :value="row[col.key]"
           type="number"
-          :min="0"
-          :max="f.max"
-          class="w-full px-2.5 py-1.5 rounded-md text-[13px] font-mono outline-none"
+          min="0"
+          :max="col.max"
+          class="w-full px-1.5 py-1.5 rounded-md text-[12px] font-mono outline-none text-center"
           :style="inputStyle"
-          @input="setParam(f.name, Number(($event.target as HTMLInputElement).value))"
+          @input="updateRow(idx, col.key, ($event.target as HTMLInputElement).value)"
         />
-      </div>
-      <div v-if="hasUnit">
-        <label
-          class="block text-[10px] uppercase tracking-wider mb-1"
-          :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
-        >Unit</label>
-        <select
-          :value="config.params.unit"
-          class="w-full px-2.5 py-1.5 rounded-md text-[13px] outline-none"
-          :style="inputStyle"
-          @change="setParam('unit', ($event.target as HTMLSelectElement).value)"
+        <button
+          class="flex items-center justify-center rounded-md h-[30px] w-[28px] transition-opacity"
+          :class="ultimateRows.length <= 1 ? 'opacity-20 cursor-not-allowed' : 'opacity-60 hover:opacity-100 cursor-pointer'"
+          :style="{ color: '#ef4444' }"
+          :disabled="ultimateRows.length <= 1"
+          @click="removeRow(idx)"
         >
-          <option value="S">秒 (S)</option>
-          <option value="M">分 (M)</option>
-        </select>
+          <Trash2 :size="12" />
+        </button>
       </div>
-    </div>
+
+      <!-- 添加波峰按钮 -->
+      <button
+        class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] cursor-pointer transition-opacity hover:opacity-80 self-start"
+        :style="{
+          background: isDark ? 'rgba(239,68,68,0.1)' : 'rgba(239,68,68,0.07)',
+          color: '#ef4444',
+          border: `1px solid ${isDark ? 'rgba(239,68,68,0.25)' : 'rgba(239,68,68,0.2)'}`,
+        }"
+        @click="addRow"
+      >
+        <Plus :size="11" />
+        添加波峰
+      </button>
+    </template>
+
+    <!-- 其他场景：原有网格布局 -->
+    <template v-else>
+      <div class="grid grid-cols-2 gap-3">
+        <div v-for="f in fields" :key="f.name">
+          <label
+            class="block text-[10px] uppercase tracking-wider mb-1 truncate"
+            :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
+            :title="f.hint || ''"
+          >{{ f.label }}</label>
+          <input
+            :value="config.params[f.name]"
+            type="number"
+            :min="0"
+            :max="f.max"
+            class="w-full px-2.5 py-1.5 rounded-md text-[13px] font-mono outline-none"
+            :style="inputStyle"
+            @input="setParam(f.name, Number(($event.target as HTMLInputElement).value))"
+          />
+        </div>
+        <div v-if="hasUnit">
+          <label
+            class="block text-[10px] uppercase tracking-wider mb-1"
+            :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
+          >Unit</label>
+          <select
+            :value="config.params.unit"
+            class="w-full px-2.5 py-1.5 rounded-md text-[13px] outline-none"
+            :style="inputStyle"
+            @change="setParam('unit', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="S">秒 (S)</option>
+            <option value="M">分 (M)</option>
+          </select>
+        </div>
+      </div>
+    </template>
   </div>
 </template>

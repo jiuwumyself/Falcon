@@ -133,7 +133,29 @@ npx vue-tsc --noEmit     # 仅类型检查
 
 ## 5. 当前真实状态（重要）
 
-**v1 已落地**（最近一次更新 2026-04-28，分支 `feat/step1-step2-polish`）：
+**v1.1 Step 3 已落地**（2026-04-30，分支 `feat/step2-polish`）：
+
+### Step 3 执行任务（JMeter 子进程编排 + 实时指标）
+
+- ✅ **`TaskRun` 字段扩展**：加 `run_id`（短 uuid，面向用户）/ `pre_check_log` / `pid` / `stop_port` / `last_heartbeat_at` / `cancel_requested_at` / `archived_at`；状态枚举扩 4 个：`pre_checking` / `pre_check_failed` / `cancelling` / `timeout`（同时 `fail` 改名 `failed`）；DB 唯一约束 `unique_active_run_per_task`（同 task 串行兜底）
+- ✅ **`services/executor.py` RunExecutor**：threading.Thread daemon=False 起子线程编排 pre_check → spawn JMeter → heartbeat + 取消监听 → 解析 .jtl 总结 → 归档。每个 run 独立线程 + 子进程；不限全局并发；同 task 串行（DB 唯一约束 + 409 Conflict）
+- ✅ **取消语义 = graceful 30s + SIGKILL 兜底**：先连 JMeter 的 nongui.port 发 `StopTestNow`；30s 没退升级 SIGTERM → SIGKILL（Mac/Linux 走 `os.killpg(getpgid)`，Windows 走 `proc.terminate/kill`）
+- ✅ **实时指标 = JMeter Backend Listener → InfluxDB v1.8**：JMX 注入 `<BackendListener>` 节点（v1 协议 POST `/write?db=jmeter`）；前端 3s 轮询 `GET /runs/:run_id/metrics/`；按 transaction 切 TG 分组；MetricSample 表保留作降级路径但不再写入
+- ✅ **磁盘归档 + 压缩**：每 run 一个目录 `<jmeter_home>/runs/<run_id>/{run.jmx, results.jtl, jmeter.log, report/}`；保留最新 20 个，更老的整目录 gzip 成 `<run_id>.tar.gz`
+- ✅ **预检 = 5 项**：JMeter 二进制 / JMX + Step 2 配置完整 / `build_run_xml` 试运行 / 磁盘空间 ≥ 100 MB / InfluxDB ping 通过 / Environment hosts TCP 探测（非致命）
+- ✅ **API 端点**：
+  - `POST /api/performance/tasks/:id/run/` → 创建 TaskRun + 起 RunExecutor；同 task 已活跃 run 时返 409 Conflict + active_run_id
+  - `GET /api/performance/tasks/:id/runs/` → 该 task 全部 run（分页）
+  - `GET /api/performance/runs/:run_id/` → 单 run 详情
+  - `POST /api/performance/runs/:run_id/cancel/` → graceful cancel；终态时幂等返 200
+  - `GET /api/performance/runs/:run_id/metrics/?since=...` → `{overall, by_tg, last_ts, run}` 时序点
+  - `GET /api/performance/runs/:run_id/log/?tail=N` → JMeter log 末 N 行
+  - `GET /api/performance/runs/:run_id/jtl/` → 二进制 results.jtl 下载
+  - `GET /api/performance/runs/:run_id/report/[<sub>]` → JMeter `-e -o` 生成的 HTML 报告（iframe 用）
+- ✅ **前端 Step 3 ExecuteStage**：左 1/3 状态卡（状态徽章 + 计时器 + 进度条 + 终态总结 + 开始/取消/查看报告按钮）+ 历史 run 列表；右 2/3 按 TG 切 tab、四张 echarts 图（RPS / P99 / 错误率 / 活跃用户数）+ pre_check_log 面板。运行中 3s 轮询，终态自动停
+- ✅ **InfluxDB 部署**：`backend/docker-compose.dev.yml` 起 InfluxDB v1.8；`manage.py setup_influxdb` 建库 + 30d 保留策略
+
+**v1 已落地**（更新 2026-04-28，分支 `feat/step1-step2-polish`）：
 
 ### 后端
 - ✅ `performance` app：四张表（Task / TaskCsvBinding / TaskRun / MetricSample / Environment）+ DRF ViewSet
@@ -217,16 +239,13 @@ npx vue-tsc --noEmit     # 仅类型检查
 
 ## 6. 下一步路线（按重要性）
 
-1. **JMeter CLI 执行**（v1.1 主菜，Step 3）：
-   - 新增 `performance/services/executor.py`，用 `subprocess.Popen` 调 `jmeter -n -t <run.jmx> -l <results.jtl> -e -o <report-dir>`
-   - run.jmx 由 `build_run_xml(task, inject_environment_dns=True)` 写到 `<jmeter_home>/runs/<run_id>/run.jmx`，跑完保留作"本次实际跑的脚本快照"
-   - 触发：`POST /api/performance/tasks/:id/run` → 创建 `TaskRun(status=running)` + 启子进程；`POST /tasks/:id/runs/:run_id/cancel` → kill 子进程
-   - 跑完：解析 `.jtl`（`csv` 模块读最后一遍）→ 填 `avg_rps` / `p99_ms` / `error_rate` / `total_requests` → `status=success/fail`
-   - 前端 Step 3：状态机视图（待运行 / 运行中带秒数计时 / 成功 / 失败）+ 取消按钮 + 实时 RPS / P99 / 错误率折线（轮询 `runs/:id/metrics?since=<ts>`）
-2. **压力机管理**（v1.1 Step 3 配套）：v1 单机本地跑（master = web 进程同主机）；v1.2 加 `LoadGenerator` 模型（host / port / capacity）+ 远程 JMeter slave（`-R <host:port>`）选择
-3. **异步化**：Celery + Redis（同步 subprocess 会卡死 gunicorn worker；v1 dev 阶段可先用 Python `threading.Thread` 跑通，v1.1 再升级）
-4. **时序采样**：Celery 任务里 tail `.jtl` 增量行，每秒汇总写 `MetricSample`；前端 `ChronosNerve`/`MetricsColumn` 图表此时才接真数据
-5. **报告 / AI 分析**（v1.2+）：Task 选定 service → 跑完拉 Grafana / Pinpoint / Arthus 数据 → 多 run 对比 → AI 文字总结 → 导出 Word；服务未接入时退化为"仅 JTL 总结 + 监控接入提示"
+1. ~~**JMeter CLI 执行**~~ ✅ Step 3 已落地（见 §5）
+2. **压力机管理**（v1.2）：当前 master = web 进程同主机；v1.2 加 `LoadGenerator` 模型（host / port / capacity）+ 远程 JMeter slave（`-R <host:port>`）选择
+3. **Service 模型 + SLA 字段**（v1.2，Step 4 报告前置）：Task 加 `service` FK → Service 模型（grafana_url / pinpoint_app / arthus_endpoint）；Step 2 选 service + 填 SLA → Step 4 跑完拉对应监控
+4. **异步化升级**（v1.2）：Celery + Redis 替代 threading；多 worker 横向扩展、子进程管理跨进程持久化
+5. **真实时刷新**（v1.2）：当前前端 3s 轮询 `metrics`；改 SSE 或 WebSocket 推送，后端 endpoint 形状不变
+6. **Step 4 分析 / Step 5 报告**（v1.2+）：iframe JMeter HTML 报告作为 v1.1 兜底；自画对比页 + AI 总结 + Word 导出留到 v1.2
+7. **TG 高级参数暴露**：Arrivals 的 `ConcurrencyLimit`、Stepping 的"每步内部 ramp"等当前写死兜底
 
 ## 7. 关键约定 & 踩坑点
 
@@ -278,11 +297,17 @@ cd frontend && npx vue-tsc --noEmit
 ./venv/bin/python manage.py makemigrations
 ./venv/bin/python manage.py shell
 ./venv/bin/python manage.py setup_jmeter
+./venv/bin/python manage.py setup_influxdb     # Step 3：建 InfluxDB 库 + 保留策略
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/pip freeze > requirements.txt
 
 # 清掉所有测试 Task（含软删）+ 物理脚本（Mac）
 ./venv/bin/python manage.py shell -c "from performance.models import Task; [t.hard_delete() for t in Task.all_objects.all()]"
+
+# Step 3: 启停 InfluxDB（每台开发机一次性配置）
+docker compose -f backend/docker-compose.dev.yml up -d
+docker compose -f backend/docker-compose.dev.yml down       # 停
+docker compose -f backend/docker-compose.dev.yml down -v    # 停并清数据
 ```
 
 ```bash

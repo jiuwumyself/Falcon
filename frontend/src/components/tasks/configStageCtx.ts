@@ -15,7 +15,9 @@ export interface ScenarioDef {
   color: string
   icon: any
   kind: TGKind
-  defaultParams: Record<string, number | string>
+  // Ultimate 用 rows: UltimatePeakRow[] 嵌套；其余 kind 都是扁平 number/string 映射。
+  defaultParams: Record<string, number | string | object>
+
   // 详细 tooltip：定义 / 典型参数范围 / 关注指标
   tooltip: {
     purpose: string
@@ -79,7 +81,7 @@ export const SCENARIOS: ScenarioDef[] = [
     id: 'spike', label: '峰值', color: '#ef4444', icon: Zap,
     desc: '短时间瞬拉高用户再回落，模拟秒杀 / 直播开播等脉冲流量。底层：Ultimate ThreadGroup。',
     kind: 'UltimateThreadGroup',
-    defaultParams: { users: 500, initial_delay: 0, ramp_up: 5, hold: 60, shutdown: 5 },
+    defaultParams: { rows: [{ users: 500, initial_delay: 0, ramp_up: 5, hold: 60, shutdown: 5 }] },
     tooltip: {
       purpose: '短时间冲到极高并发再回落，模拟秒杀 / 突发流量。',
       typical: '5 秒内冲到 500-2000 人，hold 60 秒，5 秒退出。',

@@ -1,4 +1,4 @@
-import type { Paginated, Task } from '@/types/task'
+import type { Environment, Paginated, RunMetrics, Task, TaskRun } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
 // (ui, apitest, ...) ship we'll split this into per-module helpers — for now a
@@ -102,4 +102,32 @@ export const tasksApi = {
   // + Environment DNSCacheManager 注入 + BackendListener 注入）。仅预览，不写盘。
   previewRunXml: (id: number) =>
     api<{ xml: string }>(`/tasks/${id}/preview-run-xml/`),
+  // Step 3: 触发 run + 拉历史 run 列表
+  startRun: (id: number) =>
+    api<TaskRun>(`/tasks/${id}/run/`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  listRuns: (id: number) => api<Paginated<TaskRun>>(`/tasks/${id}/runs/`),
+  // 只读 Environment 列表（编辑走 admin），给 RunPlanSummary 显示环境名 + hosts 数用
+  environments: () => api<Environment[]>('/environments/'),
+}
+
+// ─── Runs API ──────────────────────────────────────────────────────────
+// 按 run_id 操作单个 run（cancel / 实时指标 / 日志 / 报告 iframe）。
+export const runsApi = {
+  get: (runId: string) => api<TaskRun>(`/runs/${runId}/`),
+  cancel: (runId: string) =>
+    api<TaskRun>(`/runs/${runId}/cancel/`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  metrics: (runId: string, since?: string) => {
+    const qs = since ? `?since=${encodeURIComponent(since)}` : ''
+    return api<RunMetrics>(`/runs/${runId}/metrics/${qs}`)
+  },
+  log: (runId: string, tail = 200) =>
+    api<{ lines: string[] }>(`/runs/${runId}/log/?tail=${tail}`),
+  jtlUrl: (runId: string) => `/api/performance/runs/${runId}/jtl/`,
+  reportUrl: (runId: string) => `/api/performance/runs/${runId}/report/`,
 }
