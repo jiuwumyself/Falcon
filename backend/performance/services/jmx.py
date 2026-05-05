@@ -236,9 +236,18 @@ class JmxComponent:
 
 
 def _compute_kind(tag: str, guiclass: str) -> str:
-    """把 tag + guiclass 映射成前端可用的规范化 kind 字符串。"""
+    """把 tag + guiclass 映射成前端可用的规范化 kind 字符串。
+
+    - ConfigTestElement+HttpDefaultsGui → 'HttpDefaults'
+    - 插件型 ThreadGroup（含包名的 tag）→ 短名（'SteppingThreadGroup' 等），
+      与 _TG_KIND_TO_TAG / 前端 TG_KINDS 集合对齐，避免双方各自维护两套字符串
+    - 其它情况 kind == tag
+    """
     if tag == 'ConfigTestElement' and guiclass == 'HttpDefaultsGui':
         return 'HttpDefaults'
+    tg_kind = _TAG_TO_TG_KIND.get(tag)
+    if tg_kind is not None:
+        return tg_kind
     return tag
 
 
