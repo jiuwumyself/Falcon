@@ -1204,6 +1204,7 @@ def _parse_host_entry(entry: dict | str) -> tuple[str, str] | None:
 
 def _inject_dns_cache_manager(
     xml_bytes: bytes, host_entries: list,
+    *, warnings: list[str] | None = None,
 ) -> bytes:
     """
     在 TestPlan 的 hashTree 顶部注入一个 DNSCacheManager，把指定 hostname 直接
@@ -1212,6 +1213,7 @@ def _inject_dns_cache_manager(
     `host_entries`: dict 列表 `[{"hostname": ..., "ip": ...}]` 或
                     /etc/hosts 风格字符串列表 `["10.0.0.1 api.foo.com"]`，两种格式均支持。
     空列表 / None → 不注入，原样返回。
+    `warnings`: 调用方传入的列表，用于收集"为什么没注入"的人话提示（比如域名对不上）。
     """
     pairs = [r for e in (host_entries or []) if (r := _parse_host_entry(e))]
     if not pairs:
@@ -1228,9 +1230,16 @@ def _inject_dns_cache_manager(
                 d = sp.text.strip()
                 if d:
                     used_domains.add(d)
-    pairs = [(h, i) for h, i in pairs if h in used_domains]
-    if not pairs:
+    matched = [(h, i) for h, i in pairs if h in used_domains]
+    if not matched:
+        if warnings is not None and used_domains:
+            doms = ', '.join(sorted(used_domains))
+            warnings.append(
+                f'环境 hosts 里没有匹配脚本域名的条目（脚本用到：{doms}），'
+                f'DNS 注入跳过；JMeter 将走系统 DNS 解析'
+            )
         return xml_bytes
+    pairs = matched
     top = _top_hashtree(tree)
 
     # TestPlan 的 hashTree 是 top 的第一个 hashTree 子节点（或 top 自己——我们就放在 top 里）
@@ -1317,7 +1326,11 @@ def _inject_backend_listener(xml_bytes: bytes, cfg) -> bytes:
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
-def build_run_xml(task, *, inject_environment_dns: bool = False) -> bytes:
+def build_run_xml(
+    task, *,
+    inject_environment_dns: bool = False,
+    warnings: list[str] | None = None,
+) -> bytes:
     """
     从 Task 原件 + DB 配置在内存里组装出可执行 JMX，**不写盘**。
 
@@ -1358,7 +1371,9 @@ def build_run_xml(task, *, inject_environment_dns: bool = False) -> bytes:
 
     # 3) Environment DNS 注入（仅执行时需要）
     if inject_environment_dns and task.environment_id:
-        xml = _inject_dns_cache_manager(xml, task.environment.host_entries or [])
+        xml = _inject_dns_cache_manager(
+            xml, task.environment.host_entries or [], warnings=warnings,
+        )
 
     # 4) Backend Listener 注入（全局 Admin 配置）
     from performance.models import BackendListenerConfig  # noqa: PLC0415
@@ -1435,11 +1450,15 @@ def replace_tgs_for_validate(xml_bytes: bytes) -> bytes:
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
-def build_validate_xml(task, host_entries: list | None = None) -> bytes:
-    """Step 2 校验用 XML：原件 → 所有启用 TG 降级为 1 线程 1 循环 → 套 CSV 绑定 →
+def build_validate_xml(
+    task, host_entries: list | None = None,
+    *, warnings: list[str] | None = None,
+) -> bytes:
+    """Step 2 试跑用 XML：原件 → 所有启用 TG 降级为 1 线程 1 循环 → 套 CSV 绑定 →
     可选注入 Environment DNS。**不写盘**（runner 自己写到 runs/ 目录）。
 
-    host_entries: 显式覆盖；None 时回落到 task.environment。"""
+    host_entries: 显式覆盖；None 时回落到 task.environment。
+    warnings: 收集生成期间的人话提示（比如 DNS 注入跳过的原因）。"""
     from .jmeter import get_scripts_dir  # noqa: PLC0415
 
     xml = task.read_jmx_bytes()
@@ -1458,6 +1477,6 @@ def build_validate_xml(task, host_entries: list | None = None) -> bytes:
     if host_entries is None and task.environment_id:
         host_entries = list(task.environment.host_entries or [])
     if host_entries:
-        xml = _inject_dns_cache_manager(xml, host_entries)
+        xml = _inject_dns_cache_manager(xml, host_entries, warnings=warnings)
 
     return xml

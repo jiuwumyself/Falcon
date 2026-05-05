@@ -7,7 +7,7 @@ import {
 import { api, ApiError } from '@/lib/api'
 import type {
   Task, ThreadGroupInfo, ThreadGroupConfig, ThreadGroupsResponse,
-  ValidateResult, ScenarioId,
+  ValidateResult, ValidateResponse, ScenarioId,
 } from '@/types/task'
 import ScenarioTabs from './config/ScenarioTabs.vue'
 import ThreadGroupPicker from './config/ThreadGroupPicker.vue'
@@ -40,6 +40,7 @@ const configs = ref<ThreadGroupConfig[]>([])       // 各 TG 的当前配置（�
 const currentPath = ref<string>('')                // 当前在编辑哪个 TG
 const environmentId = ref<number | null>(null)
 const validateResults = ref<ValidateResult[]>([])
+const validateWarnings = ref<string[]>([])
 const validateTriggered = ref(false)
 
 // 当前 TG 的配置 (双向绑定代理)
@@ -155,13 +156,15 @@ async function validate() {
   validateError.value = ''
   validateTriggered.value = true
   try {
-    validateResults.value = await api<ValidateResult[]>(
+    const r = await api<ValidateResponse>(
       `/tasks/${props.task.id}/validate/`,
       {
         method: 'POST',
         body: JSON.stringify({ environment_id: environmentId.value }),
       },
     )
+    validateResults.value = r.results
+    validateWarnings.value = r.warnings || []
   } catch (e) {
     validateError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
@@ -280,7 +283,7 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
                   <Loader :size="12" />
                 </Motion>
                 <PlayCircle v-else :size="12" />
-                {{ validating ? '校验中…' : '1 并发校验' }}
+                {{ validating ? '试跑中…' : '试跑' }}
               </button>
               <button
                 class="flex-1 px-3 py-2 rounded-lg text-[12px] text-white flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -323,6 +326,7 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
           <div v-if="validateTriggered && !validateError" class="flex-1 min-h-0 overflow-y-auto">
             <ValidateResultTable
               :results="validateResults"
+              :warnings="validateWarnings"
               :is-dark="isDark"
             />
           </div>

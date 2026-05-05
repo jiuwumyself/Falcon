@@ -578,7 +578,7 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         return Response(self.get_serializer(instance).data)
 
-    # —— Step 2：1 并发校验（用 Python requests 模拟，不走 JMeter CLI） —— #
+    # —— Step 2：试跑（每接口跑 1 次，走真 JMeter CLI） —— #
     @action(detail=True, methods=['post'], url_path='validate')
     def validate(self, request, pk=None):
         instance = self.get_object()
@@ -602,9 +602,9 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         # JMeter CLI 跑 1 线程 × 1 循环：validator 内部
         # build_validate_xml(task) → 写盘到 runs/_validate_<id>/run.jmx →
-        # subprocess jmeter -n → 解析 JTL → 返回每个 Sampler 的结果
+        # subprocess jmeter -n → 解析 JTL → 返回 (warnings, results)
         try:
-            results = validate_task(instance, host_entries=host_entries)
+            warnings, results = validate_task(instance, host_entries=host_entries)
         except (FileNotFoundError, OSError) as e:
             raise Http404(f'JMX 文件不存在: {e}')
         except JmxParseError as e:
@@ -614,7 +614,10 @@ class TaskViewSet(viewsets.ModelViewSet):
                 {'detail': f'JMeter 执行失败：{e}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        return Response([r.to_dict() for r in results])
+        return Response({
+            'warnings': warnings,
+            'results': [r.to_dict() for r in results],
+        })
 
     @action(detail=True, methods=['post'], url_path='components/toggle')
     def toggle_component(self, request, pk=None):

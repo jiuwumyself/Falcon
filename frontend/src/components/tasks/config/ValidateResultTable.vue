@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { CheckCircle2, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, XCircle, AlertTriangle } from 'lucide-vue-next'
 import type { ValidateResult } from '@/types/task'
 
-defineProps<{
-  results: ValidateResult[]
-  isDark: boolean
-}>()
+withDefaults(
+  defineProps<{
+    results: ValidateResult[]
+    isDark: boolean
+    warnings?: string[]
+  }>(),
+  { warnings: () => [] },
+)
 
 function statusColor(s: number): string {
   if (s >= 500) return '#ef4444'
@@ -20,7 +24,22 @@ function statusColor(s: number): string {
     <p
       class="text-[10px] uppercase tracking-[0.2em] mb-2"
       :style="{ color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)' }"
-    >校验结果 · {{ results.length }} 条</p>
+    >试跑结果 · {{ results.length }} 条</p>
+
+    <!-- 任务级 warnings 横条（DNS 注入跳过等提示） -->
+    <div
+      v-for="(w, i) in warnings"
+      :key="`top-w-${i}`"
+      class="flex items-start gap-2 px-3 py-2 mb-1.5 rounded-md text-[11px]"
+      :style="{
+        background: isDark ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.08)',
+        border: `1px solid ${isDark ? 'rgba(245,158,11,0.25)' : 'rgba(245,158,11,0.22)'}`,
+        color: '#b45309',
+      }"
+    >
+      <AlertTriangle :size="12" class="flex-shrink-0 mt-0.5" />
+      <span>{{ w }}</span>
+    </div>
     <div
       class="rounded-lg overflow-hidden"
       :style="{
@@ -103,7 +122,7 @@ function statusColor(s: number): string {
         v-if="!results.length"
         class="px-3 py-4 text-[11px] text-center"
         :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)' }"
-      >(点上方的「校验」按钮触发 1 并发请求)</p>
+      >(点上方的「试跑」按钮，每个接口跑 1 次)</p>
     </div>
   </div>
 </template>

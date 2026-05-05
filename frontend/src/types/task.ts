@@ -130,6 +130,12 @@ export interface ValidateResult {
   warnings?: string[]
 }
 
+// 试跑响应：任务级 warnings（如 DNS 注入跳过）+ 每接口结果
+export interface ValidateResponse {
+  warnings: string[]
+  results: ValidateResult[]
+}
+
 export interface TaskRun {
   id: number
   task: number

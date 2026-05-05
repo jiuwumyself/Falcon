@@ -167,20 +167,24 @@ def _match_samples_to_paths(
 def validate_task(
     task,
     host_entries: Iterable[dict[str, str]] | None = None,
-) -> list[ValidateResult]:
-    """对 Task 跑 1 线程 × 1 循环的 JMeter 校验，返回每个 Sampler 的执行结果。
+) -> tuple[list[str], list[ValidateResult]]:
+    """对 Task 跑 1 线程 × 1 循环的 JMeter 试跑，返回 (warnings, results)。
 
     host_entries: 显式覆盖 task.environment.host_entries（视图层接收 body
     的 environment_id 时用）。None 则用 task 本身关联的 environment。
+    返回 tuple：
+      warnings: 任务级提示（如 DNS 注入跳过的原因），用于前端表头横条
+      results:  每个 Sampler 的执行结果（含失败信息）
     """
     he_list = list(host_entries) if host_entries is not None else None
-    xml_bytes = build_validate_xml(task, host_entries=he_list)
+    warnings: list[str] = []
+    xml_bytes = build_validate_xml(task, host_entries=he_list, warnings=warnings)
     samplers = _list_sampler_infos(xml_bytes)
 
     work_dir = get_runs_dir() / f'_validate_{task.id}'
     samples = run_jmeter(xml_bytes, work_dir)
 
-    return _match_samples_to_paths(samplers, samples)
+    return warnings, _match_samples_to_paths(samplers, samples)
 
 
 # 兼容用：旧 import 还在引用
