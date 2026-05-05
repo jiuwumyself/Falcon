@@ -50,7 +50,7 @@ main.ts  →  App.vue (RouterView)
 | `src/pages/` | 顶层页面，被路由直接加载 | `LoginPage.vue`、`HomePage.vue`、`PerformancePage.vue`、`TasksPage.vue`、`UIPage.vue`、`APIPage.vue` |
 | `src/layouts/` | 布局壳，包 `<RouterView />` | `AppLayout.vue`（仅 provideTheme）、`MainLayout.vue`（顶栏 nav + 4 个板块 page 容器） |
 | `src/components/` | **跨页共用**的组件 | `FalconLogo.vue`、`GlassNav.vue`、`PerformanceStage.vue` |
-| `src/components/tasks/` | 任务创建/编辑相关 | `TaskCreateWizard.vue`（5 步向导，左竖脊 stepper，**支持 initialTask 编辑模式 + 重新上传 confirm + toast**）、`ScriptTree.vue`/`ComponentNode.vue`（Step 1 组件树，CSVDataSet 行内**按 path 绑定** CSV）、`DetailDrawer.vue` + `detail/*.vue`（Step 1 HTTPSampler/HeaderManager 抽屉编辑）、`ConfigStage.vue` + `config/*.vue`（Step 2 任务配置）、`scriptTreeCtx.ts` / `configStageCtx.ts`（两套独立 InjectionKey） |
+| `src/components/tasks/` | 任务创建/编辑相关 | `TaskCreateWizard.vue`（5 步向导）、`ScriptTree.vue`/`ComponentNode.vue`（Step 1 组件树，CSVDataSet 行内 Paperclip + BeanShellPre 行内 JAR Package 上传）、`DetailDrawer.vue` + `detail/*.vue`（8 种可编辑组件的抽屉表单）、`ConfigStage.vue` + `config/*.vue`（Step 2 任务配置）、`scriptTreeCtx.ts` / `configStageCtx.ts` |
 | `src/components/tasks/config/` | Step 2 子组件（v2 场景驱动） | `ScenarioTabs.vue`（6 个场景 pill + 说明条）、`ThreadGroupPicker.vue`（多 TG 时显示的切换器）、`TgParamsForm.vue`（参数表单，字段随 kind 自适应）、`ThreadGroupChart.vue`（echarts 线图）、`EnvironmentPicker.vue`（环境下拉）、`ValidateResultTable.vue`（校验结果表，含未解析变量警告） |
 | `src/components/home/` | HomePage 专属子组件 | `HeroSection`、`ZoomSection`、`ScrollDots` |
 | `src/components/perf/` | PerformanceStage 专属（**ChronosNerve 已接真任务列表**；其他列暂仍 mock） | `ChronosNerve`、`MetricsColumn`、`TemporalColumn`、`TaskContextMenu`（右键删除浮层）、`data.ts`、`useRimColor.ts` |
@@ -352,7 +352,7 @@ Wizard 是单一 glass panel：
 ```
 
 ### 12.1 Step 语义（重要，不要搞反）
-- **Step 1 `upload`**（序号从 1 起，代码数组里还是 index 0）：**同时承载"上传 + 查看/切换组件 enabled"**。`uploadedTask` 为 null 时 → 居中 dropzone；非 null 时 → 左侧 header（title + filename + 右上 "重新上传" 按钮，**已配置 Step 2 时点重新上传弹 confirm 提示清空**）+ 下方 `<ScriptTree>` 渲染组件树（每行 enabled toggle，CSVDataSet 行内 Paperclip 按 path 上传）。**不切换到 Step 2**。
+- **Step 1 `upload`**：`uploadedTask` 为 null 时 → 居中 dropzone；非 null 时 → 左侧 header + 下方 `<ScriptTree>` 渲染组件树。**不切换到 Step 2**。
 - **Step 2 `config`**（v2 场景驱动）：`<ConfigStage>` 三段式布局。顶部 TG 切换器（单 TG 时隐藏） + 禁用 TG 提示 → 场景 Tab pill（6 选一，**每个 pill 旁有 `?` 图标 hover tooltip：用途 / 典型参数 / 关注指标**）+ 常驻说明条 → 左右分栏（左 35% 参数表单 + 环境下拉 + 校验/保存按钮 / 右 65% echarts 线图 + 校验结果）
 - **Step 3-5 `execute/analyze/report`**：占位 "v1.1 即将推出"，内容在 `TaskCreateWizard.vue` 的 `STEPS` 数组末尾 template 里
 

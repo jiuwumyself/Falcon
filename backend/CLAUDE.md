@@ -24,7 +24,7 @@ backend/
 │   └── __init__.py
 ├── performance/            ✅ v1 已建好的业务 app（压测领域；原名 tasks，2026-04-23 按板块拆分重命名）
 │   ├── apps.py
-│   ├── models.py           Task / TaskRun / MetricSample / Environment 四张表
+│   ├── models.py           Task / TaskRun / MetricSample / Environment / BackendListenerConfig 五张表
 │   ├── serializers.py      Task / TaskRun / MetricSample / Environment Serializer
 │   ├── views.py            TaskViewSet + EnvironmentViewSet
 │   ├── urls.py             DefaultRouter 注册两个 ViewSet（URL 前缀 `/api/performance/`）
@@ -34,12 +34,13 @@ backend/
 │   │   ├── jmeter.py       ★ JMeter 工具 + 插件下载 + 脚本文件存储
 │   │   ├── jmx.py          ★ parse_jmx / patch_jmx / list_components / toggle_component /
 │   │   │                   ★ list_thread_groups / replace_thread_group（lxml 实现）
-│   │   └── validator.py    ★ Step 2 "1 并发校验"：collect_effective_headers + validate_task
+│   │   ├── jmeter_runner.py ★ JMeter 子进程 + JTL 解析（校验 + 跑压测共用）
+│   │   └── validator.py    ★ Step 2 校验：build_validate_xml → run_jmeter -n → JTL → ValidateResult
 │   ├── management/commands/setup_jmeter.py   JMeter + 插件一键安装
 │   ├── tests/
 │   │   ├── __init__.py
 │   │   └── fixtures/sample.jmx    有 ThreadGroup + CSVDataSet + HTTPSampler 的最小 JMX
-│   └── migrations/         0001_initial / 0002_csv_to_scripts / 0003_environment_and_run_jmx
+│   └── migrations/         0001~0004（历史）/ 0005_backend_listener_config（2026-04-29）
 ├── media/                  上传文件：jmx/<task_id>/*.jmx、csv/<task_id>/*.csv（gitignored）
 ├── manage.py
 ├── db.sqlite3              默认数据库（gitignored）
@@ -139,13 +140,18 @@ DB_PORT=5432
 | CSV 附件上传 | ✅ |
 | **管理命令 `setup_jmeter`**（预装 JMeter 5.4.1 + 插件 JAR） | ✅ |
 | **Step 2 任务配置 = 线程组替换**（`list_thread_groups` / `replace_thread_group`，支持 **5 种** TG：标准 / Stepping / Concurrency / Ultimate / Arrivals）| ✅ |
-| **CSV 作用域变量替换**（`validator.py::collect_effective_csv_vars` + `substitute_vars`）| ✅ |
+| **CSV 作用域变量替换** | ✅ JMeter 自己处理（校验走 `jmeter -n` 真跑） |
 | **Environment 模型**（name / is_default / host_entries JSONField）+ admin 编辑 | ✅ |
 | **可执行 JMX = 内存生成**（`build_run_xml(task)` 不再写 `_run.jmx` 物理文件）| ✅（2026-04-28 取消派生）|
 | **CSV 多绑定**（`TaskCsvBinding` 关联表，按 CSVDataSet 组件 path 独立挂 CSV）| ✅（2026-04-28）|
 | **插件自动安装**（ensure_plugins_installed：jmeter-plugins-casutg + cmn-jmeter）| ✅ |
-| **1 并发校验**（`performance/services/validator.py`：HeaderManager 作用域合并 + Python requests）| ✅ |
+| **Step 2 校验 = 真 JMeter 跑（每接口 1 次）**（`services/jmx.py::build_validate_xml` + `services/jmeter_runner.py::run_jmeter` + `validator.py::validate_task`） | ✅ |
 | 任务列表页（性能板块 ChronosNerve）+ 右键删除 | ✅ |
+| **BackendListenerConfig 单例模型**（pk=1，admin 配置，build_run_xml 自动注入）| ✅（2026-04-29）|
+| **组件树 BackendListener 过滤**（`_filter_tree_dicts`，前端不展示）| ✅（2026-04-29）|
+| **JmxComponent.kind 字段**（ConfigTestElement+HttpDefaultsGui → 'HttpDefaults'，其余同 tag）| ✅（2026-04-29）|
+| **8 种可编辑组件**（HTTPSampler/HeaderManager 原有 + HttpDefaults/JSONPathAssertion/BeanShell Pre+Post/RegexExtractor/JSONPathExtractor/CSVDataSet）| ✅（2026-04-29）|
+| **BeanShell Pre JAR 上传**（`write_jar` → lib/ext/，全局共享；`POST upload-jar/`）| ✅（2026-04-29）|
 | 压测执行引擎（调 JMeter CLI） | ❌ v1.1 |
 | MetricSample 时序写入 | ❌ v1.1（表建了，暂无写入） |
 | 异步调度（Celery + Redis） | ❌ v1.1 |
@@ -162,6 +168,7 @@ Task (压测任务定义 + JMX 文件 + Step 2 配置 JSON + environment FK)
  ├─── TaskCsvBinding (按 CSVDataSet 组件 path 绑定 CSV，多个)
  └─── TaskRun (一次执行记录，v1.1 才会有数据)
        └─── MetricSample (时序采样点，v1.1 才会有数据)
+BackendListenerConfig (singleton pk=1, admin 配置，build_run_xml 注入)
 ```
 
 ### `Environment`（Step 2 新增）
@@ -250,16 +257,17 @@ tasks/
 | `GET` | `/api/performance/tasks/:id/raw-xml/` | 返回 `{ xml: "..." }`（原件） |
 | `GET` | `/api/performance/tasks/:id/download/` | 二进制 JMX 下载（原件） |
 | `GET` | `/api/performance/tasks/:id/preview-run-xml/` | 返回 `{ xml }`（内存中由 `build_run_xml(task)` 组装的可执行版，调试 / 用户预览用，不写盘） |
-| `GET` | `/api/performance/tasks/:id/components/` | 组件树 `[JmxComponent]`（按 `<hashTree>` 配对结构递归；每项 `path/tag/testname/enabled/children`） |
-| `POST` | `/api/performance/tasks/:id/components/toggle/` | body `{path, enabled}` → 定位组件改 `enabled` 属性，写盘，返回新树 |
-| `POST` | `/api/performance/tasks/:id/components/rename/` | body `{path, testname}` → 定位组件改 `testname` 属性（允许空串），写盘，返回新树 |
-| `GET` | `/api/performance/tasks/:id/components/detail/?path=...` | 返回该组件的编辑字段结构。HTTPSamplerProxy → `{kind, domain, port, protocol, method, path, bodyMode, params:[{name,value}], body, files:[{path,paramname,mimetype}]}`；HeaderManager → `{kind, headers:[{name,value}]}`；其他 tag 返 400 |
-| `PATCH` | `/api/performance/tasks/:id/components/detail/` | body `{path, kind, fields}` → 按 kind 写回（HTTPSampler 带 bodyMode 时重建 Arguments collection + 切换 `HTTPSampler.postBodyRaw`；带 files 时重建 Files collection；HeaderManager 整条 collectionProp 重建），写盘，返回新树 |
-| `POST` | `/api/performance/tasks/:id/components/upload-csv/` | multipart `path` + `csv_file` → 校验 path 在 JMX 中且 tag=CSVDataSet → 落盘 + upsert `TaskCsvBinding`；返回更新后 Task |
+| `GET` | `/api/performance/tasks/:id/components/` | 组件树 `[JmxComponent]`（每项 `path/tag/kind/testname/enabled/children`；**BackendListener 节点自动过滤不返回**） |
+| `POST` | `/api/performance/tasks/:id/components/toggle/` | body `{path, enabled}` → 定位组件改 `enabled` 属性，写盘，返回新树（已过滤） |
+| `POST` | `/api/performance/tasks/:id/components/rename/` | body `{path, testname}` → 定位组件改 `testname` 属性（允许空串），写盘，返回新树（已过滤） |
+| `GET` | `/api/performance/tasks/:id/components/detail/?path=...` | 返回可编辑组件的字段结构。支持 8 种 kind：HTTPSamplerProxy / HeaderManager / HttpDefaults / JSONPathAssertion / BeanShellPreProcessor / BeanShellPostProcessor / RegexExtractor / JSONPathExtractor / CSVDataSet（**CSVDataSet 不含 filename**）|
+| `PATCH` | `/api/performance/tasks/:id/components/detail/` | body `{path, kind, fields}` → 按 kind 写回字段（同上 8 种），写盘，返回新树（已过滤）|
+| `POST` | `/api/performance/tasks/:id/components/upload-csv/` | multipart `path` + `csv_file` → 落盘 + upsert `TaskCsvBinding`；返回更新后 Task |
 | `POST` | `/api/performance/tasks/:id/components/delete-csv/` | body `{path}` → 删 binding + 物理 CSV；返回更新后 Task |
+| `POST` | `/api/performance/tasks/:id/components/upload-jar/` | multipart `jar_file`（.jar ≤ 50MB）→ 写入 JMeter lib/ext/（全局共享）；返回 `{filename, message}`（含远程机手动安装提示）|
 | `GET` | `/api/performance/tasks/:id/thread-groups/` | 返回 `{thread_groups:[{path,kind,tag,testname,enabled,current_params}], saved_config, environment}`；前端 Step 2 初始化用 |
 | `PATCH` | `/api/performance/tasks/:id/thread-groups/` | body `{thread_groups:[{path,kind,params}], environment_id}`；**仅入库**（`thread_groups_config` + `environment`），不再写 `_run.jmx`；先 dry-run 一次 `replace_thread_group` 校验所有 path/kind/params 合法；Stepping/Concurrency/Ultimate/Arrivals 会按需调 `ensure_plugins_installed()` |
-| `POST` | `/api/performance/tasks/:id/validate/` | body `{environment_id?}`；调 `build_run_xml(task)` 内存生成 XML → 遍历启用的 HTTPSampler 各发一次请求；按 HeaderManager 作用域合并；Environment.host_entries 映射通过 IP 直连 + Host 头；返回 `[{path,testname,url,status,elapsed_ms,ok,error?,unresolved_vars?}]` |
+| `POST` | `/api/performance/tasks/:id/validate/` | body `{environment_id?}`；调 `validate_task(task)`：内存 build_validate_xml（所有启用 TG 降级为 1×1）→ subprocess `jmeter -n -t run.jmx -l result.jtl` → 解析 JTL → 返回 `[{path,testname,url,status,elapsed_ms,ok,error?}]`。冷启 3-5s；JMeter 失败时 500 + 日志尾巴 |
 | `GET` | `/api/performance/environments/` | Environment 列表（不分页），前端 Step 2 下拉用 |
 | `GET` | `/api/performance/environments/:id/` | Environment 详情 |
 
@@ -367,7 +375,9 @@ new_bytes: bytes = patch_jmx(
 
 # 3) Step 1 组件树：按 <hashTree> 配对结构递归遍历
 tree: list[JmxComponent] = list_components(xml_bytes)
-# 每个 JmxComponent 有 path(索引路径如 "0.0.1") / tag / testname / enabled / children
+# 每个 JmxComponent 有 path(索引路径如 "0.0.1") / tag / kind / testname / enabled / children
+# kind 通常 = tag；ConfigTestElement+HttpDefaultsGui 时 kind='HttpDefaults'
+# views.py 的 _filter_tree_dicts 会过滤掉 BackendListener（前端不展示）
 
 # 4) Step 1 切换某个组件的 enabled 属性
 new_bytes: bytes = toggle_component(xml_bytes, path="0.2.1", enabled=False)
@@ -375,12 +385,19 @@ new_bytes: bytes = toggle_component(xml_bytes, path="0.2.1", enabled=False)
 # 5) Step 1 重命名组件（改 testname 属性）
 new_bytes: bytes = rename_component(xml_bytes, path="0.2.1", testname="Login 接口")
 
-# 6) Step 1 抽屉编辑（仅 HTTPSamplerProxy / HeaderManager）
+# 6) Step 1 抽屉编辑（8 种 kind）
 detail = get_component_detail(xml_bytes, path="0.0.1")
-# HTTPSampler 返的字段：
-# {'kind', 'domain', 'port', 'protocol', 'method', 'path',
-#  'bodyMode': 'params'|'raw', 'params': [...], 'body': str,
-#  'files': [{'path','paramname','mimetype'}, ...]}
+# 返回 {kind, ...字段}。kind 取值及字段（2026-04-29 扩展）：
+#   HTTPSamplerProxy → {domain, port, protocol, method, path, bodyMode, params, body, files}
+#   HeaderManager    → {headers: [{name,value},...]}
+#   HttpDefaults     → {domain, port, protocol, path, contentEncoding, connectTimeout,
+#                       responseTimeout, implementation, followRedirects, useKeepAlive}
+#   JSONPathAssertion → {jsonPath, expectedValue, jsonValidation, expectNull, invert, isRegex}
+#   BeanShellPreProcessor / BeanShellPostProcessor → {script, parameters, resetInterpreter}
+#   RegexExtractor   → {refname, regex, template, default, matchNumber, useHeaders}
+#   JSONPathExtractor → {varName, jsonpath, default, matchNo}
+#   CSVDataSet       → {variableNames, delimiter, fileEncoding, ignoreFirstLine, quotedData,
+#                       recycle, stopThread, shareMode}  ← 不含 filename（由 TaskCsvBinding 管）
 new_bytes = update_component_detail(xml_bytes, path="0.0.1", kind='HTTPSamplerProxy',
                                     fields={
                                         'method': 'POST',
@@ -416,8 +433,11 @@ new_bytes = replace_thread_group(xml_bytes, path='0.0', kind='SteppingThreadGrou
 from performance.services.jmx import build_run_xml
 xml = build_run_xml(task)                              # validate / 默认场景
 xml = build_run_xml(task, inject_environment_dns=True) # v1.1 跑 JMeter 时
-# 内部步骤：读原件 → 链式 replace_thread_group → patch CSVDataSet filename
-# 为绝对路径 → 可选注入 DNSCacheManager（按 task.environment.host_entries）
+# 内部步骤（4 步）：
+#   1) 链式 replace_thread_group（按 thread_groups_config）
+#   2) patch CSVDataSet filename 为绝对路径（按 csv_bindings）
+#   3) 可选注入 DNSCacheManager（inject_environment_dns=True + environment.host_entries）
+#   4) 可选注入 BackendListener（BackendListenerConfig.enabled=True + influxdb_url 非空）
 ```
 
 **关键细节**：
@@ -430,45 +450,75 @@ xml = build_run_xml(task, inject_environment_dns=True) # v1.1 跑 JMeter 时
 - `toggle_component` 的 `path` 非法/越界抛 `JmxParseError` → view 层 catch 后返 400
 - **索引路径语义**：`"0.2.1"` = top-level hashTree 第 0 个组件（TestPlan）→ 它的子 hashTree 第 2 个组件（比如 ThreadGroup）→ 该 ThreadGroup 的子 hashTree 第 1 个组件。代码里 `_hashtree_pairs` 负责把 "元素 + 紧跟的 hashTree" 配对起来
 - **`replace_thread_group` 语义**：定位到 path 位置的 ThreadGroup 元素，用 lxml `parent.replace()` 整体替换成新 kind 的元素。**紧跟的 hashTree（装 Samplers/HeaderManager 的那个）保持不动**——这是 Step 2 不破坏原有 Sampler 配置的关键。禁用的 ThreadGroup 前端不展示、PATCH body 也不会包含它们，所以在 JMX 里原样保留（含 enabled=false）。
-- **`build_run_xml`**：纯内存操作，无副作用。默认 `inject_environment_dns=False`（validate 用）；v1.1 跑 JMeter 时传 `True` 让 hosts 通过 JMX 内的 `DNSCacheManager` 生效（不依赖系统 DNS / 不污染压力机 hosts）。
+- **`build_run_xml`**：纯内存操作，无副作用。默认 `inject_environment_dns=False`（validate 用）；v1.1 跑 JMeter 时传 `True` 让 hosts 通过 JMX 内的 `DNSCacheManager` 生效。BackendListener 注入由 `BackendListenerConfig.get_config()` 决定，全局生效，**不需要传参**。
+- **`_compute_kind(tag, guiclass)`**：把 XML tag+guiclass 映射成前端规范化 kind。`ConfigTestElement+HttpDefaultsGui` → `'HttpDefaults'`，其余 kind==tag。
+- **`_set_any_prop(parent, name, value)`**：更新已有 stringProp/intProp（任一）或新建 stringProp，解决 connect_timeout 等以 intProp 存储的字段的写回问题。
+- **`_inject_backend_listener(xml_bytes, cfg)`**：在 TestPlan hashTree 末尾追加完整 BackendListener 元素（含 influxdbMetricsSender / influxdbUrl / application / measurement 等参数 + cfg.extra_args 扩展）。
 
-## 16. Step 2 校验服务 `performance/services/validator.py`
+## 16. Step 2 校验服务（JMeter CLI 版）
 
-```python
-from performance.services.validator import (
-    collect_effective_headers, collect_effective_csv_vars,
-    substitute_vars, validate_task, ValidateResult,
-)
-
-# 按 JMeter 作用域规则计算某 Sampler 的有效 headers
-headers = collect_effective_headers(xml_bytes, sampler_path='0.0.1')
-# 从根到 Sampler 沿路径各层的 HeaderManager 都继承，同名取最近的一个。
-
-# 同一套作用域规则算 CSV 提供的变量字典（读每个 CSVDataSet 的物理文件第一行）
-vars = collect_effective_csv_vars(xml_bytes, sampler_path='0.0.1')
-# {'username': 'alice', 'password': 's3cret', ...}
-
-# 在任何字符串里替换 ${name}
-text, unresolved = substitute_vars('login ${username}', vars)
-# 未命中的名字（含 __BASE64 等函数）收集到 unresolved 返回给调用方
-
-# 对所有启用的 HTTPSampler 各发一次请求
-results: list[ValidateResult] = validate_task(
-    xml_bytes,
-    host_entries=[{'hostname': 'api.foo.com', 'ip': '10.0.0.1'}, ...],
-)
-# 每条 Result 带 unresolved_vars（如果有），前端展示黄色警告。
-# 禁用的 Sampler 跳过；失败不中断，结果带 error。
-# timeout=10 秒/条；verify=False（IP 直连 + Host 头时 cert 必然不匹配）。
+**架构**：
+```
+build_validate_xml(task)            ← jmx.py：原件 → 全部 TG 降级 1×1 → CSV 绑定 → DNS 注入
+        ↓
+run_jmeter(xml, work_dir)           ← jmeter_runner.py：写 run.jmx → subprocess jmeter -n → 解析 JTL
+        ↓
+validate_task(task)                 ← validator.py：上面两步合体 + sampler 路径回填
+        ↓
+list[ValidateResult]                ← 前端表格直接吃
 ```
 
-**关键细节**：
-- 只支持 HTTPSamplerProxy；其他 Sampler 类型忽略
-- Environment.host_entries 映射的实现：URL 里用 IP 替换域名 + 设置 `Host` header —— 这样不依赖系统 DNS，不污染远程机 hosts
-- Body mode 跟随 JMX 的 `HTTPSampler.postBodyRaw`：true → 整条 Argument.value 作 body；false → params 作 query string / form
-- **CSV 作用域**跟 HeaderManager 同规则：TestPlan 级 → 全局；ThreadGroup 级 → 该组 Sampler；Sampler 级 → 仅该 Sampler。近的覆盖远的。物理文件从 `get_scripts_dir()` 下找（只用 basename 防路径穿越）；每个 CSV 读**第一行**模拟 1 并发取值
-- **变量替换范围**：URL domain/port/path、params name/value、body、header name/value；`__xxx` 形式的 JMeter 内置函数（`__BASE64`、`__P`、`__Random` 等）不展开、报为未解析
-- 不做正则提取 / Pre-Post Processors / 断言——这些是 JMeter 执行引擎的活
+```python
+# Step 2 校验入口
+from performance.services.validator import validate_task, ValidateResult
+
+results: list[ValidateResult] = validate_task(
+    task,                                      # ⚠ Task 对象，不是 xml_bytes
+    host_entries=[{'hostname': 'a.com', 'ip': '1.2.3.4'}, ...],   # 可选；None 则用 task.environment
+)
+# 每条 Result：path/testname/url/status/elapsed_ms/ok + 失败时 error
+# 前端 ValidateResultTable 直接吃 to_dict()
+```
+
+```python
+# 内部底层：JMeter 子进程
+from performance.services.jmeter_runner import run_jmeter, JtlSample, JMeterRunError
+samples: list[JtlSample] = run_jmeter(xml_bytes, work_dir, timeout=120)
+
+# 内部底层：构建校验用 XML（不写盘）
+from performance.services.jmx import build_validate_xml, replace_tgs_for_validate
+xml = build_validate_xml(task)              # 完整组装（推荐）
+xml = replace_tgs_for_validate(orig_xml)    # 仅 TG 降级（不带 CSV / DNS）
+```
+
+**关键约定**：
+- **TG 降级规则**：所有**启用**的 TG-like 元素（5 种 kind 都算）→ 替换为标准 ThreadGroup(num_threads=1, ramp_time=0, loops=1, scheduler=false)。**禁用的 TG 原样保留**（JMeter 自然不执行）。紧跟的子 hashTree（装 Samplers/HeaderManager 等）保持不动。
+- **work_dir**：`<jmeter_home>/runs/_validate_<task_id>/`，每次运行清空重建；存 `run.jmx` + `result.jtl` + `jmeter.log` 供调试
+- **JTL 解析**：`csv.DictReader`，强开 `-Jjmeter.save.saveservice.url=true` 让 URL 列写进去；其他列走 JMeter 默认（label/responseCode/success/elapsed/failureMessage 等）
+- **路径回填**：JMeter 按 document order 跑 → JTL 顺序通常匹配；用 **testname (label) FIFO 匹配**（同名按出现顺序），多 TG 并行时也能对得上
+- **没匹配上的 sampler**（被前面失败 / 控制器跳过）→ 单独一行 `error='未被 JMeter 执行...'`
+- **JMeter 退出码非 0**：抛 `JMeterRunError`，message 含 `stderr` 末尾 + `jmeter.log` 末尾 30 行；views 转 500
+- **Java 兜底**：mac 上 `/opt/homebrew/opt/openjdk@17` 自动塞 PATH + JAVA_HOME（避免被系统 `/usr/bin/java` stub 劫持）；Docker / Linux 期望 `java` 已经在 PATH
+- **chmod +x 兜底**：zipfile 解压不保留 unix 可执行位，`ensure_jmeter_installed` 解压后给 `bin/jmeter` 等加上 0o111
+
+**保真度对比（为什么砍了原来 600 行 Python `requests` 实现）**：
+
+| 能力 | Python requests 实现 | 真 JMeter |
+|---|---|---|
+| HTTP 请求 | ✅ | ✅ |
+| HeaderManager 作用域 | ✅ | ✅ |
+| CSV 变量 | ✅ | ✅ |
+| **CookieManager** | ❌ | ✅ |
+| **AuthManager** | ❌ | ✅ |
+| **PreProcessor** | ❌ | ✅ |
+| **JSONPostProcessor / RegexExtractor 链式提取** | 90%（自写 mini） | ✅ |
+| **`__time` / `__Random` / `__P` 等函数** | ❌ | ✅ |
+| **BeanShell / JSR223 脚本** | ❌ | ✅ |
+| **断言** | ❌ | ✅ |
+| **Synchronizing Timer** | ❌ | ✅ |
+| 冷启时间 | < 100ms | **3-5s** |
+
+3-5s 冷启换 100% 保真度 + Step 3 共用同一执行管线 = 划算。
 
 fixture `performance/tests/fixtures/sample.jmx` 是最简实验模板，有 HTTP Sampler + CSVDataSet，parse/patch/components/thread-groups 测试都拿它。
 
@@ -495,7 +545,7 @@ TaskRun(status=running) + 后台线程/Celery worker tail .jtl
 ```
 
 ### 17.2 关键模块
-1. **`performance/services/executor.py`**：用 `subprocess.Popen` 调 `jmeter -n -t <run.jmx> -l <jtl> -e -o <report_dir>`；维护 `Popen` handle 给 cancel 用
+1. **`performance/services/executor.py`**：基于 `jmeter_runner.py`（已有，Step 2 校验在用）扩展异步版 —— 当前 `run_jmeter()` 是 `subprocess.run`（同步阻塞），Step 3 真压测需要换成 `subprocess.Popen` + 后台线程 / Celery worker，加 `-e -o <report_dir>` 输出 HTML 报告；维护 `Popen` handle 给 cancel 用
 2. **`@action` on TaskViewSet**：
    - `POST /api/performance/tasks/:id/run` → 创建 `TaskRun(status=running)` → 异步起 JMeter → 返回 `{run_id}`
    - `POST /api/performance/runs/:run_id/cancel` → `Popen.terminate()` → status=cancelled

@@ -39,7 +39,8 @@ Falcon/
 │   │   ├── services/
 │   │   │   ├── jmx.py           ★ JMX L1 编辑（parse_jmx / patch_jmx / 组件树 / TG 替换 / build_run_xml）
 │   │   │   ├── jmeter.py        ★ JMeter 工具下载 + 脚本/CSV/runs 目录 + 磁盘检查
-│   │   │   └── validator.py     ★ 1 并发校验（HeaderManager/CSV 作用域、变量替换）
+│   │   │   ├── jmeter_runner.py ★ JMeter 子进程封装 + JTL CSV 解析（Step 2 校验 + Step 3 跑压测共用）
+│   │   │   └── validator.py     ★ Step 2 校验：build_validate_xml → run_jmeter -n → 解析 JTL → ValidateResult[]
 │   │   ├── management/commands/
 │   │   │   └── setup_jmeter.py  手动预装 JMeter（或首次上传时自动下载）
 │   │   ├── tests/fixtures/      sample.jmx（parse/patch 测试用）
@@ -152,13 +153,14 @@ npx vue-tsc --noEmit     # 仅类型检查
   - `GET /api/performance/tasks/:id/raw-xml/` → `{ xml: "..." }`
   - `GET /api/performance/tasks/:id/download/` → 二进制 JMX
   - `GET /api/performance/tasks/:id/preview-run-xml/` → `{ xml }` 把内存生成的可执行版返给前端预览（不写盘）
-  - `GET /api/performance/tasks/:id/components/` → 组件树（JmxComponent[]，嵌套 children）
+  - `GET /api/performance/tasks/:id/components/` → 组件树（JmxComponent[]，每项含 `kind` 字段；**BackendListener 自动过滤**）
   - `POST /api/performance/tasks/:id/components/toggle/` body `{path, enabled}` → 切换单个组件 enabled
   - `POST /api/performance/tasks/:id/components/rename/` body `{path, testname}` → 改 testname
-  - `GET /api/performance/tasks/:id/components/detail/?path=...` → HTTPSampler / HeaderManager 字段
-  - `PATCH /api/performance/tasks/:id/components/detail/` body `{path, kind, fields}` → 写回字段
+  - `GET /api/performance/tasks/:id/components/detail/?path=...` → 8 种可编辑组件字段（HTTPSampler / HeaderManager / HttpDefaults / JSONPathAssertion / BeanShell Pre+Post / RegexExtractor / JSONPathExtractor / CSVDataSet；**CSVDataSet 不含 filename**）
+  - `PATCH /api/performance/tasks/:id/components/detail/` body `{path, kind, fields}` → 写回字段（同上 8 种）
   - `POST /api/performance/tasks/:id/components/upload-csv/`（multipart，body `path` + `csv_file`）→ **按 CSVDataSet 的组件 path 绑定** CSV，落盘命名 `<jmx_stem>__<safe_path>.csv`，写 / 更新 `TaskCsvBinding`
   - `POST /api/performance/tasks/:id/components/delete-csv/` body `{path}` → 解除某 CSVDataSet 的绑定（删行 + 删物理文件）
+  - `POST /api/performance/tasks/:id/components/upload-jar/`（multipart `jar_file`）→ 写入 JMeter lib/ext/（全局共享，≤ 50 MB）；返回 `{filename, message}`（含远程机手动安装提示）
 - ✅ **Step 2 任务配置**（v2 场景驱动 UI；2026-04-28 取消 `_run.jmx` 派生）：
   - `Environment` 模型 + admin（name / is_default / host_entries JSONField）；前端只读下拉，编辑走 `/admin/performance/environment/`
   - Task 字段：`thread_groups_config` (JSONField) / `environment` FK；**已删除 `run_jmx_filename` / `csv_filename`**（前者改为内存生成，后者改为多绑定关联表）
@@ -170,11 +172,10 @@ npx vue-tsc --noEmit     # 仅类型检查
     - 峰值 → `UltimateThreadGroup`
     - 吞吐量 → `ArrivalsThreadGroup`
   - 参数上限 **用户数 ≤ 5000、时长 ≤ 43200 秒（12h）**；`target_rps` 不按用户数限，上限 1,000,000
-  - **单文件模型**：磁盘只存原件 `<title>.jmx`。跑压测前一秒 `services/jmx.py::build_run_xml(task)` 内存里读原件 → 套 thread_groups_config → 套 csv_bindings 的绝对路径 → （v1.1 执行时）注入 `DNSCacheManager`。validate / 未来 run 都吃这份内存 XML
+  - **单文件模型**：磁盘只存原件 `<title>.jmx`。`services/jmx.py::build_run_xml(task)` 内存里读原件 → 套 thread_groups_config → 套 csv_bindings 绝对路径 → 可选注入 DNSCacheManager → 按 BackendListenerConfig 注入 BackendListener。validate / 未来 run 都吃这份内存 XML
   - **多 TG 独立配置**：每个启用的 TG 单独存 `{path, scenario, kind, params}`；前端 TG 切换器让用户逐个配；禁用的 TG 不显示、保存时原样保留
   - **插件自动下载**：`setup_jmeter` 命令装 `jmeter-plugins-casutg` + `cmn-jmeter` 到 `lib/ext/`（Maven Central）。Ultimate/Arrivals 依赖这俩 JAR
-  - **1 并发校验**：`performance/services/validator.py` 用 Python `requests` 模拟；按 JMeter 作用域规则合并 HeaderManager + CSVDataSet 变量；Environment 的 hosts 映射通过 IP 直连 + Host 头实现
-  - **CSV 变量替换**：validator 读作用域内 CSVDataSet 的第一行，按 `variableNames` 建字典替换 Sampler 里的 `${name}`；未解析的 `${}` 保留字面串 + `unresolved_vars` 回给前端展示警告
+  - **校验 = 真 JMeter 跑（每接口跑 1 次）**：`services/jmx.py::build_validate_xml(task)` 把所有启用的 TG 降级为 1 线程 1 循环的标准 ThreadGroup（保留 Sampler 子树原样）→ 套 CSV 绑定（绝对路径）+ 注入 Environment DNSCacheManager → `services/jmeter_runner.py::run_jmeter(xml, work_dir)` 写到 `<jmeter_home>/runs/_validate_<task_id>/run.jmx` → subprocess `jmeter -n -t run.jmx -l result.jtl` → 解析 JTL CSV → 按 testname (label) FIFO 匹配回 sampler `path`，返回 `ValidateResult[]`。冷启 ~3-5s + 实际请求时间。**保真度 = 100%**（JMeter 自带 CookieManager / AuthManager / Pre-Post Processor / `__time` 等函数 / 完整 JSONPath / BeanShell 等，Python 自实现永远会缺东西）。Step 3 真压测共用同一 `run_jmeter()`
   - 前端图表：**echarts + vue-echarts**（LineChart 按需引入）；Step 3 实时监控图表复用
   - 关键端点：
     - `GET /api/performance/environments/` / `/:id/` → 只读，创建编辑走 admin
@@ -190,8 +191,8 @@ npx vue-tsc --noEmit     # 仅类型检查
 - ✅ 创建入口：性能板块 ChronosNerve 顶部"+ 创建"渐变按钮 → `router.push('/performance/tasks')`（无 `?id`）
 - ✅ Wizard 布局：单一玻璃面板，内部左 104px 竖脊 stepper + 右侧内容区
 - ✅ **Step 语义**：
-  - **Step 1 上传脚本**：未上传 → dropzone（自动触发 POST `/tasks/`，title 直接用文件名，**不再加日期前缀**）；已上传 → 头部 + `ScriptTree`（组件树 + enabled toggle + 双击改名 + HTTPSampler/HeaderManager 抽屉编辑 + CSVDataSet 行内 Paperclip 上传）。重新上传按钮：**已配置 Step 2 时弹 confirm 提醒清空**，上传后 toast 反馈
-  - **Step 2 任务配置** = 场景 tab + 参数表单 + echarts 预览 + 1 并发校验。每个场景 pill 旁有 `?` 图标 hover tooltip（用途 / 典型参数 / 关注指标）。多 TG 时顶部 TG 切换器，逐个配
+  - **Step 1 上传脚本**：未上传 → dropzone；已上传 → 头部 + `ScriptTree`（组件树 + enabled toggle + **点名称打开编辑抽屉**（8 种）+ 双击改名 + CSVDataSet 行内 Paperclip 上传 + BeanShellPreProcessor 行内 Package 上传 JAR）。重新上传按钮：**已配置 Step 2 时弹 confirm 提醒清空**，上传后 toast 反馈。BackendListener 组件在 UI 不显示（由 Admin 全局配置 + build_run_xml 注入）
+  - **Step 2 任务配置** = 场景 tab + 参数表单 + echarts 预览 + JMeter CLI 校验（每接口跑 1 次）。每个场景 pill 旁有 `?` 图标 hover tooltip（用途 / 典型参数 / 关注指标）。多 TG 时顶部 TG 切换器，逐个配
   - **Step 3/4/5 执行/分析/报告** = "v1.1 即将推出"占位
   - 列表点行进 wizard 时跳到**最远完成的 Step**（`thread_groups_config` 非空 → Step 2，否则 Step 1）
 - ✅ 只接受 `.jmx`，拖入 / 选择非 jmx 文件会显示"仅支持 .jmx 文件"红字
@@ -237,7 +238,9 @@ npx vue-tsc --noEmit     # 仅类型检查
 - **平台范围**：只做性能压测调度。前端 tabs 里的 "UI 板块 / 接口板块" 是 figma 设计留的占位壳，**不要去做它们**。
 - **跨平台开发**：项目同时支持 Mac 和 Windows。venv 路径不同：**Mac/Linux** 是 `backend/venv/bin/python`，**Windows** 是 `backend/venv/Scripts/python.exe`（注意是 `Scripts` 不是 `bin`）。所有命令在 §4、§9 双形态给出。**Mac 上 JMeter 需要 Java 17**，`./start.sh` 自动把 `/opt/homebrew/opt/openjdk@17/bin` 加到 PATH。
 - **端口**：前端 5173（Vite），后端 8000（Django）。5173 被占时 Vite 自动挪到 5174/5175。
-- **JMX 编辑 = L1**：只碰 `ThreadGroup` 的 `num_threads` / `ramp_time` / `duration`（由 `patch_jmx` 负责，Step 2 v1.1 用），以及所有组件的 `enabled` 属性（由 `toggle_component` 负责，Step 1 当前就用）。其他元素（Samplers、Assertions、Listeners、BeanShell…）一律原样保留。用 `lxml` **patch-in-place**，不要"前端 JSON → 后端重建 JMX"。
+- **JMX 编辑 = L1**：只碰 `ThreadGroup` 的 `num_threads` / `ramp_time` / `duration`（`patch_jmx`，Step 2 v1.1 用）、所有组件的 `enabled`（`toggle_component`）、`testname`（`rename_component`），以及 8 种可编辑组件的业务字段（`update_component_detail`）。用 `lxml` **patch-in-place**，不要"前端 JSON → 后端重建 JMX"。
+- **BackendListener 处理约定**：原 JMX 里的 BackendListener 在 `GET /components/` API 被 `_filter_tree_dicts` 过滤，前端看不到也摸不着。Admin 用 `BackendListenerConfig`（singleton pk=1）全局配置；`build_run_xml` 的 Step 4 按 `enabled + influxdb_url` 决定是否注入。**前端无需感知**。
+- **JmxComponent.kind 字段**：前端应优先用 `kind` 判断组件类型，而非 `tag`。`ConfigTestElement` 当 guiclass=`HttpDefaultsGui` 时 kind=`'HttpDefaults'`，否则 kind==tag。
 - **Step 2 存储模型 = 单文件 + 内存生成**（2026-04-28 改造）：磁盘只存原件 `<title>.jmx`（Step 1 编辑直写），Step 2 配置只入 DB（`thread_groups_config` JSON + `csv_bindings` 关联表 + `environment` FK）。validate / Step 3 跑压测时 `services/jmx.py::build_run_xml(task, inject_environment_dns=...)` 读原件 → 内存中链式 patch（替换 TG + patch CSVDataSet filename + 可选注入 DNSCacheManager）→ 返回 bytes。**不再有 `_run.jmx` 物理文件**——这样 Step 1 后续改动自动反映到下次 run，不存在"派生品过期"。
 - **JMX 宽容解析**：`parse_jmx` 找不到 ThreadGroup 或是插件型（`UltimateThreadGroup` 等）时**不拒绝上传**，用默认值 10/0/60 兜底；但 `patch_jmx` 仍然严格（改不了插件型 TG 的属性就报错）——这是预期行为。
 - **JMX 路径固定项目内**：所有上传的 .jmx 落在 `backend/jmeter/apache-jmeter-<VERSION>/scripts/`，代码**不读 `JMETER_HOME` env**。Docker 部署时在镜像里解压到 `/app/backend/jmeter/apache-jmeter-<VERSION>/` 同路径对齐，详情见 `backend/CLAUDE.md §18.3`。
