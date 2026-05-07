@@ -40,14 +40,24 @@ Falcon/
 │   │   │   ├── jmx.py           ★ JMX L1 编辑（parse_jmx / patch_jmx / 组件树 / TG 替换 / build_run_xml）
 │   │   │   ├── jmeter.py        ★ JMeter 工具下载 + 脚本/CSV/runs 目录 + 磁盘检查
 │   │   │   ├── jmeter_runner.py ★ JMeter 子进程封装 + JTL CSV 解析（Step 2 校验 + Step 3 跑压测共用）
-│   │   │   └── validator.py     ★ Step 2 校验：build_validate_xml → run_jmeter -n → 解析 JTL → ValidateResult[]
+│   │   │   ├── validator.py     ★ Step 2 校验：build_validate_xml → run_jmeter -n → 解析 JTL → ValidateResult[]
+│   │   │   ├── executor.py      ★ Step 3 RunExecutor（v1.1 单机；v1.2 分布式分支共用）
+│   │   │   ├── scheduler.py     ★ v1.2 多机调度（compute_shards / build_shard_jmx / slice_csv_by_offset）
+│   │   │   ├── jtl_merger.py    ★ v1.2 多 jtl 流式 N-way merge by timeStamp
+│   │   │   └── orchestrator/    ★ v1.2 容器编排适配器：DockerComposeAdapter / K8sAdapter（stub）
 │   │   ├── management/commands/
-│   │   │   └── setup_jmeter.py  手动预装 JMeter（或首次上传时自动下载）
+│   │   │   ├── setup_jmeter.py          手动预装 JMeter（或首次上传时自动下载）
+│   │   │   └── release_idle_agents.py   v1.2 周期任务：心跳超时 → scale_down + 标 LOST
 │   │   ├── tests/fixtures/      sample.jmx（parse/patch 测试用）
-│   │   └── migrations/0001_initial.py
+│   │   └── migrations/          0001 ~ 0010（最新：0010_load_generator）
+│   ├── agent/            ★ v1.2 falcon-agent 容器化压力源（FastAPI + 内置 JMeter）
+│   │   ├── main.py       入口 = FastAPI app（startup 自注册 + heartbeat 守护线程 + /runs 等端点）
+│   │   ├── Dockerfile    eclipse-temurin:17-jre-alpine + JMeter 5.6.3 + 插件 + tini
+│   │   └── requirements.txt   fastapi/uvicorn/psutil/requests/python-multipart
 │   ├── jmeter/           **JMeter 工具 + 脚本存储**（apache-jmeter-5.6.3/ gitignored）
 │   │   └── apache-jmeter-5.6.3/scripts/   ★ 所有上传的 .jmx 物理存放在这里
 │   ├── media/            只存 CSV 了（jmx 走 jmeter/scripts，整个 media/ gitignored）
+│   ├── docker-compose.dev.yml   v1.1 InfluxDB v1.8 + v1.2 falcon-agent（默认 1 副本，scale 改副本数）
 │   ├── manage.py
 │   ├── db.sqlite3        默认数据库（gitignored）
 │   ├── .env.example      环境变量模板
@@ -77,9 +87,11 @@ Falcon/
 │   │   │   │   ├── TaskCreateWizard.vue    5 步向导（单面板 + 左竖脊 stepper + 右内容）
 │   │   │   │   ├── ScriptTree.vue          Step 1 已上传后的 JMX 组件树 view（拉 /components/，用 ComponentNode 递归）
 │   │   │   │   ├── ComponentNode.vue       组件树单行（chevron + testname + tag + enabled 开关）
-│   │   │   │   ├── ConfigStage.vue         Step 2 根组件（TG 切换器 + 场景 tabs + 左参数/右图 + 校验结果）
+│   │   │   │   ├── ConfigStage.vue         Step 2 根组件（TG 切换器 + 场景 tabs + 左参数/右图 + 校验结果 + ServicePicker）
+│   │   │   │   ├── ExecuteStage.vue        Step 3 根组件（RunControlBar + RunDashboard + StartRunModal）
 │   │   │   │   ├── configStageCtx.ts       6 个场景定义（SCENARIOS 数组：id / label / color / icon / kind / defaultParams）
-│   │   │   │   └── config/                 Step 2 子组件：ScenarioTabs / ThreadGroupPicker / TgParamsForm / ThreadGroupChart（echarts）/ EnvironmentPicker / ValidateResultTable
+│   │   │   │   ├── config/                 Step 2 子组件：ScenarioTabs / ThreadGroupPicker / TgParamsForm / ThreadGroupChart（echarts）/ EnvironmentPicker / ServicePicker（v1.2）/ ValidateResultTable
+│   │   │   │   └── execute/                Step 3 子组件：RunControlBar / RunDashboard / StartRunModal（多机选）/ LoadGeneratorPicker / SystemMetricsModal / SamplerStatsTable / ErrorDetailList / GrafanaPanelViewer / RuntimeStatusPanel + dashboard/（TrendsTab / SamplersTab / ErrorsTab / TimelineTab / PreCheckTab / ServicePanelsTab / TracePanelsTab）
 │   │   │   ├── home/                HeroSection、ZoomSection、AnimNum、Spark、ScrollDots
 │   │   │   └── perf/                ChronosNerve、MetricsColumn、TemporalColumn、Anim、WaveSpark、
 │   │   │                            GlassSkeleton、data.ts（**mock 仍存在，但新业务走 API**）、
@@ -132,6 +144,55 @@ npx vue-tsc --noEmit     # 仅类型检查
 **前后端连通**：Vite 把 `/api/*` 代理到 `localhost:8000`；Django 的 CORS 放行了 `localhost:5173` / `127.0.0.1:5173`。
 
 ## 5. 当前真实状态（重要）
+
+**v1.2 容器化压力源 + Dashboard 重构 已落地（前/后端骨架，未现场跑通）**（2026-05-07）：
+
+### 容器化压力源（LoadGenerator）+ 多机调度
+
+- ✅ **`LoadGenerator` 模型**（migration 0010）：`pod_name`（unique）/ `ip:port` / `token` / `status`（pending/idle/busy/lost）/ `cpu_cores` / `memory_gb` / `max_vusers`（默认 100）/ `orchestrator_type` / `last_heartbeat_at`。`TaskRun` 加 M2M `load_generators` 记录这次 run 用了哪几台
+- ✅ **`backend/agent/`** = 单进程 FastAPI + 内置 JMeter 5.6.3（含 plugins-casutg / cmn-jmeter）的容器镜像。`agent/main.py` startup 自调主控 `register/`，30s 心跳；端点 `POST /runs` 起 jmeter 子进程 / `POST /runs/:id/cancel` graceful + SIGKILL / `GET /jtl` 给主控合并 / `GET /system-metrics` psutil 实时 CPU/Mem/IO
+- ✅ **`docker-compose.dev.yml` 加 `agent` 服务**：默认 1 副本，扩缩容 `up -d --scale agent=N agent`。`extra_hosts: host.docker.internal:host-gateway` 让 Linux 容器也能回调宿主主控
+- ✅ **`services/orchestrator/`** = OrchestratorAdapter 抽象 + `DockerComposeAdapter`（subprocess 调 docker compose）+ `K8sAdapter`（v1.3 stub）；`factory.get_adapter()` 按 `settings.ORCHESTRATOR_TYPE` 选实现
+- ✅ **`services/scheduler.py`**：`compute_shards`（按 max_vusers 容量分配 vusers）+ `build_shard_jmx`（复用 `build_run_xml` 后逐 TG 改 num_threads + BackendListener 加 `host=pod_name` tag）+ `slice_csv_by_offset`（行偏移切片，留接口位）
+- ✅ **`services/jtl_merger.py`**：多 jtl 流式 N-way merge by timeStamp，O(N) 内存
+- ✅ **`services/executor.py` 加分布式分支**：`_select_load_generators()` 拉 TaskRun.load_generators → 非空走 `_run_distributed`（每台 POST /runs → 1s 轮询所有 agent 终态 → GET /jtl 拉回 → `merge_jtls` 写到 run_dir/results.jtl），空 + `LOCAL_FALLBACK=1` 走原 v1.1 单机流程。`cancel()` 同时广播到所有 agent
+- ✅ **API 端点（`/api/performance/load-generators/`）**：
+  - `GET /` → 列出全部 LoadGenerator（前端 StartRunModal 用）/ `GET /:id/`
+  - `POST /register/` → agent 自注册 upsert（按 pod_name 唯一）
+  - `PUT /:id/heartbeat/` → agent 周期心跳；lost 收到心跳自动复活回 idle
+  - `POST /scale-up/` body `{count}` → 调编排适配器拉副本
+  - `POST /scale-down/` body `{pod_names?}` 或 `{idle_only: true}` → 释放容器 + 标 LOST
+  - `GET /:id/system-metrics/` → 主控代理到 agent `/system-metrics`（5s timeout，不可达 → 503）
+- ✅ **Bearer 共享 token**：`settings.FALCON_AGENT_TOKEN` 配置后 register/heartbeat 走 `Authorization: Bearer …` 校验；空 token = 不强校验（开发态 curl 调试方便）
+- ✅ **`TaskViewSet.run` 加 `load_generator_ids`**：前端从 StartRunModal 选机器 → POST `/tasks/:id/run/` body `{load_generator_ids: [..]}`；空数组 + `LOCAL_FALLBACK=1` → executor 走单机本地兜底
+- ✅ **`manage.py release_idle_agents`**：心跳超 `IDLE_RELEASE_MINUTES`（默认 30）的 idle agent → scale_down + 标 LOST；建议 cron 每 5 min 跑一次
+- ✅ **`settings.py` 新增**：`ORCHESTRATOR_TYPE` / `AGENT_COMPOSE_*` / `AGENT_K8S_*` / `MAX_VUSERS_PER_AGENT` / `IDLE_RELEASE_MINUTES` / `FALCON_AGENT_TOKEN` / `LOCAL_FALLBACK`
+
+### Step 2：被压测服务（service_names 多选）
+
+- ✅ **`Task.service_names`**（JSONField default=list；migration 0008 加 `service_name` → 0009 数据搬到 `service_names` + 删旧字段）：服务库目前是**前端 mock**（`frontend/src/lib/servicesMock.ts`），v1.3 接后端 Service 表后改 M2M
+- ✅ **前端 `ServicePicker.vue`**：多选下拉，PATCH `/tasks/:id/` body `{service_names}` 单字段轻改（与 thread-groups 端点解耦）
+- ✅ **`tasksApi.update()`** 通用 PATCH 助手
+
+### Step 3：真端点替代 mock + Dashboard 重构
+
+- ✅ **三个新只读端点**：
+  - `GET /runs/:run_id/sampler-stats/` → 优先读 JMeter HTML 报告 `statistics.json`，没有时流式扫 jtl 自聚合（avg/min/max/p50/p90/p99/RPS/bytes/top errors）
+  - `GET /runs/:run_id/error-samples/?limit=&sampler=&code_bucket=` → 流式扫 jtl `success=false` 行；按 sampler / code_bucket（4xx/5xx/assertion/timeout/all）过滤
+  - `GET /runs/:run_id/timeline/` → 阶段轴：`pre_check / ramp_up / steady / cool_down`
+- ✅ **`build_run_xml` + `_inject_backend_listener` 加 `extra_backend_tags`**：分布式时给每片 jmx 加 `host=pod_name` tag
+- ✅ **前端 ExecuteStage 重构**：原来"竖直堆叠 6 块"换成 `RunControlBar`（单行紧凑控制条）+ `RunDashboard`（占满剩余高度的 7 个 tab：Trends / Samplers / Errors / Timeline / PreCheck / ServicePanels / TracePanels）+ `StartRunModal`（必选压力源）
+- ✅ **`StartRunModal`**：列出 idle agent + 容量校验（合计 max_vusers ≥ task.virtual_users）+ 「+ 扩容」按钮（调 `loadGeneratorsApi.scaleUp`）
+- ✅ **`SystemMetricsModal`**：弹窗轮询 agent psutil 实时 CPU/Mem/Net/Disk IO
+
+### v1.2 仍待验证 / 收尾
+
+- ❓ 整套未做端到端联调（仍承接 v1.1 bookmark：Step 3 BackendListener 修复后未验证图表，又叠了 v1.2 改动）
+- ❓ `_run_distributed` 当前 CSV 用全量副本（每台 agent 一份完整 CSV），`scheduler.slice_csv_by_offset` 已实现接口位但未在 executor 串接
+- ❓ 多 agent 的 InfluxDB host tag 已注入，但前端 `RunMetricsCharts` / dashboard `TrendsTab` 是否正确按 host 切分图未验证
+- ❓ Service 模型仍是前端 mock（`servicesMock.ts`）；v1.3 接真表
+
+---
 
 **v1.1 Step 3 已落地**（2026-04-30，分支 `feat/step2-polish`）：
 
@@ -240,12 +301,14 @@ npx vue-tsc --noEmit     # 仅类型检查
 ## 6. 下一步路线（按重要性）
 
 1. ~~**JMeter CLI 执行**~~ ✅ Step 3 已落地（见 §5）
-2. **压力机管理**（v1.2）：当前 master = web 进程同主机；v1.2 加 `LoadGenerator` 模型（host / port / capacity）+ 远程 JMeter slave（`-R <host:port>`）选择
-3. **Service 模型 + SLA 字段**（v1.2，Step 4 报告前置）：Task 加 `service` FK → Service 模型（grafana_url / pinpoint_app / arthus_endpoint）；Step 2 选 service + 填 SLA → Step 4 跑完拉对应监控
-4. **异步化升级**（v1.2）：Celery + Redis 替代 threading；多 worker 横向扩展、子进程管理跨进程持久化
-5. **真实时刷新**（v1.2）：当前前端 3s 轮询 `metrics`；改 SSE 或 WebSocket 推送，后端 endpoint 形状不变
-6. **Step 4 分析 / Step 5 报告**（v1.2+）：iframe JMeter HTML 报告作为 v1.1 兜底；自画对比页 + AI 总结 + Word 导出留到 v1.2
-7. **TG 高级参数暴露**：Arrivals 的 `ConcurrencyLimit`、Stepping 的"每步内部 ramp"等当前写死兜底
+2. ~~**压力机管理**（v1.2）：容器化压力源（FastAPI agent + DockerComposeAdapter）+ 多机调度~~ ✅ 骨架已落地（见 §5 v1.2），**端到端联调 + 多机指标切分图待验证**
+3. **Service 模型 + SLA 字段**（v1.3，Step 4 报告前置）：当前 `Task.service_names` 是字符串数组 + 前端 `servicesMock.ts`；v1.3 接后端 Service 表（grafana_url / pinpoint_app / arthus_endpoint / SLA）+ Task 改 M2M
+4. **K8sAdapter 实现**（v1.3）：当前 `services/orchestrator/k8s.py` 是 stub，靠 `kubectl scale deployment`；生产部署前需要补
+5. **异步化升级**（v1.3）：Celery + Redis 替代 threading；多 worker 横向扩展、子进程管理跨进程持久化
+6. **真实时刷新**（v1.3）：当前前端 3s 轮询 `metrics`；改 SSE 或 WebSocket 推送，后端 endpoint 形状不变
+7. **Step 4 分析 / Step 5 报告**（v1.3+）：iframe JMeter HTML 报告作为 v1.1 兜底；自画对比页 + AI 总结 + Word 导出留到 v1.3
+8. **TG 高级参数暴露**：Arrivals 的 `ConcurrencyLimit`、Stepping 的"每步内部 ramp"等当前写死兜底
+9. **CSV 切片落地**：`scheduler.slice_csv_by_offset` 已实现，但 executor 里多机分支当前用全量 CSV 副本；需要决定切片是默认开还是按场景（账号池等）
 
 ## 7. 关键约定 & 踩坑点
 
@@ -268,6 +331,11 @@ npx vue-tsc --noEmit     # 仅类型检查
 - **CSV 存储位置 = JMX 同目录**（scripts/）：每条 `TaskCsvBinding(component_path, filename)` 只存 bare 文件名，物理文件和 .jmx 同在 `backend/jmeter/apache-jmeter-<VERSION>/scripts/` 下。命名 `<jmx_stem>__<safe_path>.csv`（冲突追加 `_2`），其中 `<safe_path>` 是组件 path 把 `.` 换成 `_`（例如 `0.0.3` → `0_0_3`）。`build_run_xml` 把每个绑定的 CSVDataSet `filename` patch 成绝对路径，确保 JMeter 找得到。
 - **磁盘空间检查 + fsync**：`services/jmeter.py::write_script` / `write_csv` 写盘前 `shutil.disk_usage()` 检查 < 100 MB 抛 `DiskFullError`（views 转 503），写盘走 `_atomic_write_bytes` (open + write + flush + fsync)。新建 `get_runs_dir()` 返回 `<jmeter_home>/runs/`，v1.1 跑 JMeter 用。
 - **`TypeScript 6` + `erasableSyntaxOnly`**：前端不能用 constructor parameter properties（`constructor(public foo: string)` 这种语法），要写成先声明 field 再在 constructor 里赋值。见 `frontend/src/lib/api.ts` 的 `ApiError` 类。
+- **v1.2 多机调度走分支判断**：`executor._select_load_generators()` 拉 `TaskRun.load_generators` M2M（前端 StartRunModal 选定后 `tasks/:id/run/` body 传 `load_generator_ids` 写入）；非空 → `_run_distributed`，空 + `LOCAL_FALLBACK=1` → 原 v1.1 单机流程。前端**必走 StartRunModal 选机器**，再调 startRun（即使只选 1 台）。
+- **agent ↔ 主控通信**：agent 在容器里用 `host.docker.internal:8000`（macOS Docker Desktop 内置；Linux 走 `extra_hosts: host-gateway`）回调主控；主控调 agent 用 `LoadGenerator.base_url`（`http://<ip>:<port>`）。Bearer 鉴权 = `settings.FALCON_AGENT_TOKEN`，空 token 不强校验（开发态）。
+- **多机 InfluxDB 切分**：分布式时 `build_shard_jmx` 给每片注入 `host=pod_name` tag，前端图表按 host 切分（实现位于 dashboard/`TrendsTab` 等，**v1.2 未现场验证**）。
+- **agent 自注册不等同于在线可用**：scale-up 拉副本后 agent 还要 5–15s 才会调 `register/`；前端 StartRunModal 用 `loadGeneratorsApi.list()` 轮询刷新，不要在 scale-up 后立即起 run。
+- **idle agent 释放策略**：30 min 无心跳 + status=idle → `release_idle_agents` 命令（cron 每 5 min 跑）调 scale_down 回收容器并标 LOST；lost 后心跳恢复会自动复活回 idle。
 
 ## 8. 用户信息
 
@@ -308,6 +376,14 @@ cd frontend && npx vue-tsc --noEmit
 docker compose -f backend/docker-compose.dev.yml up -d
 docker compose -f backend/docker-compose.dev.yml down       # 停
 docker compose -f backend/docker-compose.dev.yml down -v    # 停并清数据
+
+# v1.2: falcon-agent 容器化压力源（开发态默认 1 副本）
+docker compose -f backend/docker-compose.dev.yml build agent              # 构建镜像
+docker compose -f backend/docker-compose.dev.yml up -d agent              # 起默认 1 副本
+docker compose -f backend/docker-compose.dev.yml up -d --scale agent=3 agent  # 扩到 3 台
+docker compose -f backend/docker-compose.dev.yml up -d --scale agent=0 agent  # 缩到 0
+./venv/bin/python manage.py release_idle_agents                           # 手动跑一次回收
+./venv/bin/python manage.py release_idle_agents --dry-run --minutes 5     # 调试用
 ```
 
 ```bash
