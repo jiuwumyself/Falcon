@@ -1,6 +1,9 @@
 from django.contrib import admin
 
-from .models import BackendListenerConfig, Environment, MetricSample, Task, TaskCsvBinding, TaskRun
+from .models import (
+    BackendListenerConfig, Environment, LoadGenerator, MetricSample,
+    Task, TaskCsvBinding, TaskRun,
+)
 
 
 @admin.register(Environment)
@@ -56,6 +59,20 @@ class TaskRunAdmin(admin.ModelAdmin):
 class MetricSampleAdmin(admin.ModelAdmin):
     list_display = ('id', 'run', 'timestamp', 'rps', 'p99_ms', 'error_rate', 'active_users')
     list_filter = ('run',)
+
+
+@admin.register(LoadGenerator)
+class LoadGeneratorAdmin(admin.ModelAdmin):
+    """容器化压力源（v1.2）。注册由 agent 调 /api/internal/agents/register 完成；
+    admin 主要用于查看状态、手动调整 max_vusers / 释放卡死的 lost 行。"""
+    list_display = (
+        'id', 'pod_name', 'status', 'ip', 'port',
+        'cpu_cores', 'memory_gb', 'max_vusers',
+        'orchestrator_type', 'last_heartbeat_at', 'registered_at',
+    )
+    list_filter = ('status', 'orchestrator_type')
+    search_fields = ('pod_name', 'hostname', 'ip')
+    readonly_fields = ('registered_at', 'last_heartbeat_at', 'released_at')
 
 
 @admin.register(BackendListenerConfig)

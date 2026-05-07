@@ -1306,6 +1306,7 @@ def _inject_backend_listener(
     task_id: int,
     influxdb_url: str,
     influxdb_db: str,
+    extra_tags: dict[str, str] | None = None,
 ) -> bytes:
     """
     在 TestPlan 顶层 hashTree 注入一个 BackendListener，把全部 sampler 数据推到
@@ -1385,6 +1386,11 @@ def _inject_backend_listener(
         ('TAG_task_id', str(task_id)),
         ('percentiles', '90;95;99'),
     ]
+    # v1.2 多机调度：scheduler 通过 extra_tags 加 host=pod_name 等
+    if extra_tags:
+        for k, v in extra_tags.items():
+            tag_key = k if k.startswith('TAG_') else f'TAG_{k}'
+            backend_args.append((tag_key, str(v)))
     for k, v in backend_args:
         arg = etree.SubElement(coll, 'elementProp', {
             'name': k,
@@ -1410,6 +1416,7 @@ def build_run_xml(
     inject_environment_dns: bool = False,
     inject_backend_listener: bool = False,
     run_id: str | None = None,
+    extra_backend_tags: dict[str, str] | None = None,
     warnings: list[str] | None = None,
 ) -> bytes:
     """
@@ -1467,6 +1474,7 @@ def build_run_xml(
             task_id=task.id,
             influxdb_url=getattr(settings, 'INFLUXDB_URL', ''),
             influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
+            extra_tags=extra_backend_tags,
         )
 
     return xml

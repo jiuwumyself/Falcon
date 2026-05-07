@@ -1,4 +1,7 @@
-import type { Environment, Paginated, RunMetrics, Task, TaskRun } from '@/types/task'
+import type {
+  Environment, ErrorSamplesQuery, ErrorSamplesResponse,
+  LoadGenerator, Paginated, RunMetrics, SamplerStat, Task, TaskRun,
+} from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
 // (ui, apitest, ...) ship we'll split this into per-module helpers — for now a
@@ -85,6 +88,12 @@ export function apiForm<T = unknown>(path: string, form: FormData, method = 'POS
 export const tasksApi = {
   list: () => api<Paginated<Task>>('/tasks/'),
   get: (id: number) => api<Task>(`/tasks/${id}/`),
+  // 通用 PATCH：用于 service_name 等 Task 直属字段的轻改动；线程组配置仍走专用 thread-groups 端点
+  update: (id: number, patch: Partial<Task>) =>
+    api<Task>(`/tasks/${id}/`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
   delete: (id: number) =>
     api<void>(`/tasks/${id}/`, { method: 'DELETE' }),
   uploadComponentCsv: (id: number, componentPath: string, file: File) => {
@@ -103,10 +112,11 @@ export const tasksApi = {
   previewRunXml: (id: number) =>
     api<{ xml: string }>(`/tasks/${id}/preview-run-xml/`),
   // Step 3: 触发 run + 拉历史 run 列表
-  startRun: (id: number) =>
+  // v1.2：可选传 load_generator_ids 走多机调度；省略 → 单机本地兜底
+  startRun: (id: number, opts: { load_generator_ids?: number[] } = {}) =>
     api<TaskRun>(`/tasks/${id}/run/`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(opts),
     }),
   listRuns: (id: number) => api<Paginated<TaskRun>>(`/tasks/${id}/runs/`),
   // 只读 Environment 列表（编辑走 admin），给 RunPlanSummary 显示环境名 + hosts 数用
@@ -130,4 +140,47 @@ export const runsApi = {
     api<{ lines: string[] }>(`/runs/${runId}/log/?tail=${tail}`),
   jtlUrl: (runId: string) => `/api/performance/runs/${runId}/jtl/`,
   reportUrl: (runId: string) => `/api/performance/runs/${runId}/report/`,
+  // Step 3 接口级统计 + 错误明细（v1.2 起接真端点，mock 已删）
+  samplerStats: (runId: string): Promise<SamplerStat[]> =>
+    api<SamplerStat[]>(`/runs/${runId}/sampler-stats/`),
+  errorSamples: (runId: string, q: ErrorSamplesQuery = {}): Promise<ErrorSamplesResponse> => {
+    const params = new URLSearchParams()
+    if (q.limit != null) params.set('limit', String(q.limit))
+    if (q.sampler) params.set('sampler', q.sampler)
+    if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    return api<ErrorSamplesResponse>(`/runs/${runId}/error-samples/${qs}`)
+  },
 }
+
+// ─── LoadGenerators API（v1.2 容器化压力源） ────────────────────────────
+// 前端只读列出在线 agent + scaleUp/Down 触发编排；register/heartbeat 是 agent 内部用
+export interface SystemMetrics {
+  cpu_pct: number
+  mem_pct: number
+  mem_used_gb: number
+  mem_total_gb: number
+  net_kbs_in: number
+  net_kbs_out: number
+  disk_iops_read: number
+  disk_iops_write: number
+  timestamp: number
+}
+
+export const loadGeneratorsApi = {
+  list: () => api<LoadGenerator[]>('/load-generators/'),
+  get: (id: number) => api<LoadGenerator>(`/load-generators/${id}/`),
+  scaleUp: (count: number) =>
+    api<{ new_pods: string[]; count: number }>('/load-generators/scale-up/', {
+      method: 'POST',
+      body: JSON.stringify({ count }),
+    }),
+  scaleDown: (opts: { pod_names?: string[]; idle_only?: boolean }) =>
+    api<{ removed: string[] }>('/load-generators/scale-down/', {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    }),
+  systemMetrics: (id: number) =>
+    api<SystemMetrics>(`/load-generators/${id}/system-metrics/`),
+}
+

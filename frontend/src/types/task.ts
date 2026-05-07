@@ -33,6 +33,7 @@ export interface Task {
   duration_seconds: number
   thread_groups_config: ThreadGroupConfig[]
   environment: number | null    // Environment id or null
+  service_names: string[]       // Step 2 选的"被压测服务"名列表（v1.2，前端 mock；多选）
   csv_bindings: TaskCsvBinding[]
   status: TaskStatus
   active_run_id: string | null  // 后端 Step 3 加：有活跃 run 时直接给前端 run_id
@@ -49,6 +50,45 @@ export interface Environment {
   host_entries: { hostname: string; ip: string }[]
   created_at: string
   updated_at: string
+}
+
+// ─── Step 2 被压测服务（v1.2，服务库目前是前端 mock，v1.3 接后端表）───
+export type GrafanaPanelType = 'service' | 'trace'
+
+export interface GrafanaPanel {
+  name: string                // 按钮上展示的名字
+  url: string                 // iframe src，前端会拼 ?from=...&to=... 时间窗
+  type: GrafanaPanelType      // service = 服务情况；trace = 链路情况
+}
+
+export interface Service {
+  id: string                  // 内部稳定 id（mock 数据自管），跟 task.service_name 不强关联
+  name: string                // 用户可见的服务名，写到 Task.service_name
+  base_url: string            // 服务对外地址（仅展示用）
+  grafana_url: string         // 服务对应的 Grafana 仪表板根 URL（兜底，没配 panels 时用）
+  pinpoint_app: string        // Pinpoint application name（v1.3 接入用）
+  arthus_endpoint: string     // Arthus 服务端 endpoint（v1.3 接入用）
+  description: string
+  grafana_panels: GrafanaPanel[]   // Step 3 RuntimeStatusPanel 服务/链路按钮分页用
+}
+
+// 占位：v1.2 LoadGenerator 容器化压力源（Phase A2 实现）
+export type LoadGeneratorStatus = 'pending' | 'idle' | 'busy' | 'lost'
+
+export interface LoadGenerator {
+  id: number
+  pod_name: string
+  hostname: string
+  ip: string
+  port: number
+  status: LoadGeneratorStatus
+  cpu_cores: number
+  memory_gb: number
+  max_vusers: number
+  orchestrator_type: 'k8s' | 'docker' | string
+  registered_at: string
+  last_heartbeat_at: string | null
+  released_at: string | null
 }
 
 // ─── Step 2 线程组配置 ────────────────────────────────────────────────
@@ -211,6 +251,52 @@ export interface Paginated<T> {
   next: string | null
   previous: string | null
   results: T[]
+}
+
+// ─── Step 3 接口级统计 + 错误明细 ───────────────────────────────────
+// 后端来源：sampler_stats 解析 JMeter HTML 报告里的 statistics.json；
+// errors 流式扫 JTL CSV success=false 的行。前端先用 mock 渲染。
+
+export interface SamplerStat {
+  label: string
+  total: number
+  success: number
+  error: number
+  avg_ms: number
+  min_ms: number
+  max_ms: number
+  p50_ms: number
+  p90_ms: number
+  p99_ms: number
+  avg_rps: number
+  avg_bytes: number
+  top_errors: { reason: string; count: number }[]
+}
+
+export type SamplerSortKey = 'error_rate_desc' | 'total_desc' | 'p99_desc'
+
+export interface ErrorSample {
+  timestamp: number       // ms epoch
+  label: string
+  method: string
+  response_code: string   // '500' / 'Non HTTP response code: ...' / 'Assertion failed' 等
+  response_message: string
+  failure_message: string // 优先来源 = assertion msg
+  elapsed_ms: number
+  response_body: string   // 已截断 ≤ 1 KB
+}
+
+export type ErrorCodeBucket = 'all' | '4xx' | '5xx' | 'assertion' | 'timeout'
+
+export interface ErrorSamplesResponse {
+  samples: ErrorSample[]
+  total: number
+}
+
+export interface ErrorSamplesQuery {
+  limit?: number
+  sampler?: string
+  codeBucket?: ErrorCodeBucket
 }
 
 export interface JmxComponent {

@@ -111,6 +111,11 @@ class Task(models.Model):
         null=True, blank=True, related_name='tasks',
     )
 
+    # service_names: Step 2 选的"被压测服务"名列表（v1.2 新增；服务库当前为前端 mock，
+    # 这里只存名字字符串数组。v1.3 接后端 Service 表后改为 M2M）。
+    # 多选语义：一个压测任务可能同时关联上下游多个服务（链路一起测）。
+    service_names = models.JSONField(default=list, blank=True)
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='tasks',
@@ -205,6 +210,59 @@ class TaskCsvBinding(models.Model):
             path.write_bytes(data)
 
 
+class LoadGeneratorStatus(models.TextChoices):
+    """容器化压力源（v1.2）的状态机。"""
+    PENDING = 'pending', 'Pending'           # 容器刚拉起，还没注册成功
+    IDLE = 'idle', 'Idle'                    # 在线、可派活
+    BUSY = 'busy', 'Busy'                    # 正在执行 run
+    LOST = 'lost', 'Lost'                    # 心跳超时（>90s 未上报）
+
+
+class LoadGenerator(models.Model):
+    """容器化压力源（v1.2 新增）。
+    每台 falcon-agent 容器启动时调 POST /api/internal/agents/register 自注册一行；
+    周期性 PUT /api/internal/agents/:id/heartbeat 维持 last_heartbeat_at；
+    心跳超 90s 主控标 LOST，超 5min 物理删除（由后台定时任务负责）。
+    Step 3 调度时由 services/scheduler.py 按 capacity（max_vusers）切片分发。"""
+    pod_name = models.CharField(max_length=120, unique=True, db_index=True)
+    hostname = models.CharField(max_length=120, blank=True)
+    ip = models.CharField(max_length=45)              # 含 IPv6 兼容
+    port = models.PositiveIntegerField(default=9100)  # agent HTTP 监听端口
+    token = models.CharField(max_length=80)           # agent ↔ 主控双向 Bearer
+
+    status = models.CharField(
+        max_length=12, choices=LoadGeneratorStatus.choices,
+        default=LoadGeneratorStatus.PENDING, db_index=True,
+    )
+
+    # 资源元数据（注册时自上报）
+    cpu_cores = models.PositiveSmallIntegerField(default=0)
+    memory_gb = models.FloatField(default=0)
+    max_vusers = models.PositiveIntegerField(
+        default=100,
+        help_text='单台并发上限（plan 决定 100，可在 admin 调）',
+    )
+    jmeter_version = models.CharField(max_length=20, blank=True)
+    orchestrator_type = models.CharField(
+        max_length=12, default='docker',
+        help_text='k8s / docker / 其他',
+    )
+
+    registered_at = models.DateTimeField(auto_now_add=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-registered_at']
+
+    def __str__(self) -> str:
+        return f'{self.pod_name} ({self.status}, {self.ip}:{self.port})'
+
+    @property
+    def base_url(self) -> str:
+        return f'http://{self.ip}:{self.port}'
+
+
 class TaskRun(models.Model):
     """Task 的一次执行记录。Step 3 (v1.1) 起，由 services/executor.py 的 RunExecutor
     在子线程里编排：pre_checking → pending → running → 终态。run_id 是面向用户的
@@ -238,6 +296,11 @@ class TaskRun(models.Model):
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     cancel_requested_at = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+
+    # v1.2 容器化压力源：这次 run 用了哪几台 agent（多机调度后按 host tag 切指标）
+    load_generators = models.ManyToManyField(
+        LoadGenerator, blank=True, related_name='runs',
+    )
 
     class Meta:
         ordering = ['-started_at']

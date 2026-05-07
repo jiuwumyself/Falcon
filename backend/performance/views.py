@@ -11,11 +11,15 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
+from django.utils import timezone
+
 from .models import (
-    ACTIVE_RUN_STATUSES, Environment, RunStatus, Task, TaskCsvBinding, TaskRun,
+    ACTIVE_RUN_STATUSES, Environment, LoadGenerator, LoadGeneratorStatus,
+    RunStatus, Task, TaskCsvBinding, TaskRun,
 )
 from .serializers import (
-    EnvironmentSerializer, TaskRunSerializer, TaskSerializer,
+    EnvironmentSerializer, LoadGeneratorSerializer, TaskRunSerializer,
+    TaskSerializer,
 )
 from .services import executor as executor_svc
 from .services import influxdb as influxdb_svc
@@ -672,6 +676,25 @@ class TaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # v1.2 多机调度：前端可选传 load_generator_ids 指定哪些 agent 来跑
+        # 不传 / 空 → executor 走 LOCAL_FALLBACK 本机执行（开发态友好）
+        lg_ids: list[int] = request.data.get('load_generator_ids') or []
+        if lg_ids and not isinstance(lg_ids, list):
+            return Response(
+                {'detail': 'load_generator_ids must be a list of int'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        selected_lgs = []
+        if lg_ids:
+            selected_lgs = list(LoadGenerator.objects.filter(
+                id__in=lg_ids, status=LoadGeneratorStatus.IDLE,
+            ))
+            if len(selected_lgs) != len(lg_ids):
+                return Response(
+                    {'detail': '部分压力源不存在或非 idle 状态，请刷新列表'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         run_id = secrets.token_hex(8)
         try:
             with transaction.atomic():
@@ -683,6 +706,8 @@ class TaskViewSet(viewsets.ModelViewSet):
                     ramp_up_seconds=instance.ramp_up_seconds,
                     duration_seconds=instance.duration_seconds,
                 )
+                if selected_lgs:
+                    task_run.load_generators.set(selected_lgs)
         except IntegrityError:
             active = instance.runs.filter(
                 status__in=[s.value for s in ACTIVE_RUN_STATUSES],
@@ -832,3 +857,369 @@ class RunViewSet(viewsets.GenericViewSet):
             target.read_bytes(),
             content_type=content_types.get(ext, 'application/octet-stream'),
         )
+
+    # ── v1.2 Step 3 下半部分真端点（取代 mock）──────────────────────────
+
+    @action(detail=True, methods=['get'], url_path='sampler-stats')
+    def sampler_stats(self, request, run_id=None):
+        """
+        每接口聚合统计。优先从 JMeter HTML 报告的 statistics.json 读，没生成时
+        流式扫 jtl 自己聚合（精度较粗，但保证有数据）。
+        """
+        import csv as _csv
+        import json as _json
+        run = self.get_object()
+        run_dir = get_runs_dir() / run.run_id
+
+        # 优先 statistics.json（JMeter -e -o 自动出）
+        stats_json = run_dir / 'report' / 'statistics.json'
+        if stats_json.exists():
+            try:
+                data = _json.loads(stats_json.read_text(encoding='utf-8'))
+            except (OSError, _json.JSONDecodeError):
+                data = {}
+            results = []
+            for label, s in data.items():
+                if label == 'Total':
+                    continue
+                results.append({
+                    'label': label,
+                    'total': int(s.get('sampleCount', 0)),
+                    'success': int(s.get('sampleCount', 0)) - int(s.get('errorCount', 0)),
+                    'error': int(s.get('errorCount', 0)),
+                    'avg_ms': float(s.get('meanResTime', 0)),
+                    'min_ms': float(s.get('minResTime', 0)),
+                    'max_ms': float(s.get('maxResTime', 0)),
+                    'p50_ms': float(s.get('medianResTime', 0)),
+                    'p90_ms': float(s.get('pct1ResTime', 0)),
+                    'p99_ms': float(s.get('pct3ResTime', 0)),
+                    'avg_rps': float(s.get('throughput', 0)),
+                    'avg_bytes': float(s.get('receivedKBytesPerSec', 0)) * 1024 / max(s.get('throughput', 1), 1),
+                    'top_errors': [],  # statistics.json 不分错误类型；要细的看 error-samples
+                })
+            return Response(results)
+
+        # fallback：扫 jtl
+        jtl = run_dir / 'results.jtl'
+        if not jtl.exists() or jtl.stat().st_size == 0:
+            return Response([])
+
+        agg: dict[str, dict] = {}
+        try:
+            with jtl.open('r', encoding='utf-8', errors='replace') as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    label = row.get('label') or ''
+                    rec = agg.setdefault(label, {
+                        'label': label, 'total': 0, 'success': 0, 'error': 0,
+                        'elapsed': [], 'first_ts': None, 'last_ts': None,
+                        'bytes_sum': 0, 'top_errors': {},
+                    })
+                    rec['total'] += 1
+                    if (row.get('success') or '').lower() == 'true':
+                        rec['success'] += 1
+                    else:
+                        rec['error'] += 1
+                        msg = row.get('failureMessage') or row.get('responseMessage') or '(unknown)'
+                        rec['top_errors'][msg] = rec['top_errors'].get(msg, 0) + 1
+                    try:
+                        rec['elapsed'].append(int(row.get('elapsed') or 0))
+                        ts = int(row.get('timeStamp') or 0)
+                        rec['first_ts'] = ts if rec['first_ts'] is None else min(rec['first_ts'], ts)
+                        rec['last_ts'] = ts if rec['last_ts'] is None else max(rec['last_ts'], ts)
+                        rec['bytes_sum'] += int(row.get('bytes') or 0)
+                    except (TypeError, ValueError):
+                        pass
+        except OSError as e:
+            return Response({'detail': f'read jtl: {e}'}, status=500)
+
+        out = []
+        for r in agg.values():
+            elapsed = sorted(r['elapsed'])
+            n = len(elapsed)
+            def pct(p):
+                return float(elapsed[max(0, int(n * p) - 1)]) if n else 0.0
+            span = max((r['last_ts'] - r['first_ts']) / 1000.0, 0.001) if r['first_ts'] else 1
+            top = sorted(r['top_errors'].items(), key=lambda x: -x[1])[:3]
+            out.append({
+                'label': r['label'],
+                'total': r['total'],
+                'success': r['success'],
+                'error': r['error'],
+                'avg_ms': float(sum(elapsed) / n) if n else 0.0,
+                'min_ms': float(elapsed[0]) if n else 0.0,
+                'max_ms': float(elapsed[-1]) if n else 0.0,
+                'p50_ms': pct(0.5),
+                'p90_ms': pct(0.9),
+                'p99_ms': pct(0.99),
+                'avg_rps': r['total'] / span if span > 0 else 0,
+                'avg_bytes': r['bytes_sum'] / r['total'] if r['total'] else 0,
+                'top_errors': [{'reason': k, 'count': v} for k, v in top],
+            })
+        return Response(out)
+
+    @action(detail=True, methods=['get'], url_path='error-samples')
+    def error_samples(self, request, run_id=None):
+        """流式扫 jtl 找 success=false 的行；按 sampler / code_bucket 过滤，limit 截断。"""
+        import csv as _csv
+        run = self.get_object()
+        jtl = get_runs_dir() / run.run_id / 'results.jtl'
+        if not jtl.exists() or jtl.stat().st_size == 0:
+            return Response({'samples': [], 'total': 0})
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 50)), 500))
+        except ValueError:
+            limit = 50
+        sampler = request.query_params.get('sampler') or ''
+        code_bucket = (request.query_params.get('code_bucket') or 'all').lower()
+
+        def bucket_of(code: str, msg: str) -> str:
+            if code.startswith('Non HTTP'):
+                return 'timeout'
+            if (msg or '').startswith('Assertion'):
+                return 'assertion'
+            if code.startswith('5'):
+                return '5xx'
+            if code.startswith('4'):
+                return '4xx'
+            return 'other'
+
+        samples = []
+        total = 0
+        try:
+            with jtl.open('r', encoding='utf-8', errors='replace') as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    if (row.get('success') or '').lower() == 'true':
+                        continue
+                    label = row.get('label') or ''
+                    if sampler and sampler not in label:
+                        continue
+                    code = row.get('responseCode') or ''
+                    msg = row.get('responseMessage') or ''
+                    fmsg = row.get('failureMessage') or ''
+                    bucket = bucket_of(code, fmsg or msg)
+                    if code_bucket != 'all' and bucket != code_bucket:
+                        continue
+                    total += 1
+                    if len(samples) < limit:
+                        samples.append({
+                            'timestamp': int(row.get('timeStamp') or 0),
+                            'label': label,
+                            'method': '',  # JMeter CSV 默认不写 method（要 -Jjmeter.save.saveservice.method=true）
+                            'response_code': code,
+                            'response_message': msg,
+                            'failure_message': fmsg,
+                            'elapsed_ms': int(row.get('elapsed') or 0),
+                            'response_body': '',  # 默认 CSV 不带 body；要真实 body 走 -Jjmeter.save.saveservice.response_data=true 的 XML JTL
+                        })
+        except OSError as e:
+            return Response({'detail': f'read jtl: {e}'}, status=500)
+        return Response({'samples': samples, 'total': total})
+
+    @action(detail=True, methods=['get'], url_path='timeline')
+    def timeline(self, request, run_id=None):
+        """运行时间轴：返回 phases + 各阶段时间戳。RuntimeStatusPanel 子段 1 用。"""
+        run = self.get_object()
+        phases = []
+        if run.started_at:
+            phases.append({
+                'name': 'pre_check',
+                'start': run.created_at.timestamp() * 1000 if hasattr(run, 'created_at') and run.started_at else 0,
+                'end': run.started_at.timestamp() * 1000,
+                'label': '预检',
+            })
+            ramp_end = run.started_at.timestamp() * 1000 + (run.ramp_up_seconds or 0) * 1000
+            phases.append({
+                'name': 'ramp_up',
+                'start': run.started_at.timestamp() * 1000,
+                'end': ramp_end,
+                'label': '加压（ramp）',
+            })
+            steady_end = ramp_end + (run.duration_seconds or 0) * 1000
+            phases.append({
+                'name': 'steady',
+                'start': ramp_end,
+                'end': min(steady_end,
+                           run.finished_at.timestamp() * 1000 if run.finished_at else steady_end),
+                'label': '稳态',
+            })
+            if run.finished_at and run.finished_at.timestamp() * 1000 > steady_end:
+                phases.append({
+                    'name': 'cool_down',
+                    'start': steady_end,
+                    'end': run.finished_at.timestamp() * 1000,
+                    'label': '收尾',
+                })
+        return Response({
+            'run_id': run.run_id,
+            'status': run.status,
+            'started_at': run.started_at.isoformat() if run.started_at else None,
+            'finished_at': run.finished_at.isoformat() if run.finished_at else None,
+            'duration_seconds': run.duration_seconds,
+            'ramp_up_seconds': run.ramp_up_seconds,
+            'phases': phases,
+        })
+
+
+# ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────
+
+def _check_agent_token(request) -> bool:
+    """
+    Agent ↔ 主控用共享 token（settings.FALCON_AGENT_TOKEN）做 Bearer 鉴权。
+    开发期 token 留空 = 不校验（方便本地 curl 联调）；生产期 .env 里设上即可启用。
+    """
+    expected = getattr(settings, 'FALCON_AGENT_TOKEN', '') or ''
+    if not expected:
+        return True  # 未配置 → 不强校验
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        return auth.removeprefix('Bearer ').strip() == expected
+    return False
+
+
+class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
+    """容器化压力源（v1.2）。前端只读列出 + 看详情；写入由 agent 走 register/heartbeat
+    端点。Phase C 会再加 scale-up / scale-down / system-metrics 代理端点。"""
+    queryset = LoadGenerator.objects.all()
+    serializer_class = LoadGeneratorSerializer
+    pagination_class = None  # 单部署内压力源数量有限，全返
+
+    @action(detail=False, methods=['post'], url_path='register')
+    def register(self, request):
+        """
+        Agent 启动时调：POST /api/performance/load-generators/register/
+        body: {pod_name, hostname, ip, port, token, cpu_cores, memory_gb,
+               max_vusers, jmeter_version, orchestrator_type}
+        语义 = upsert（按 pod_name 唯一）：第一次创建，后续重启更新。
+        """
+        if not _check_agent_token(request):
+            return Response({'detail': 'Invalid agent token'}, status=401)
+
+        data = request.data
+        pod_name = data.get('pod_name')
+        if not pod_name:
+            return Response({'detail': 'pod_name required'}, status=400)
+
+        defaults = {
+            'hostname': data.get('hostname', ''),
+            'ip': data.get('ip', ''),
+            'port': int(data.get('port', 9100)),
+            'token': data.get('token', ''),
+            'cpu_cores': int(data.get('cpu_cores', 0) or 0),
+            'memory_gb': float(data.get('memory_gb', 0) or 0),
+            'max_vusers': int(data.get('max_vusers', 100) or 100),
+            'jmeter_version': data.get('jmeter_version', ''),
+            'orchestrator_type': data.get('orchestrator_type', 'docker'),
+            'status': LoadGeneratorStatus.IDLE,
+            'last_heartbeat_at': timezone.now(),
+            'released_at': None,
+        }
+        lg, created = LoadGenerator.objects.update_or_create(
+            pod_name=pod_name, defaults=defaults,
+        )
+        return Response(
+            LoadGeneratorSerializer(lg).data,
+            status=201 if created else 200,
+        )
+
+    @action(detail=False, methods=['post'], url_path='scale-up')
+    def scale_up(self, request):
+        """
+        POST /api/performance/load-generators/scale-up/  body: {count: int}
+        前端「+ 扩容 N 台」按钮调；编排适配器拉起新副本，agent 起来后自调 register。
+        立即返回当前已知 pod_name 列表（不阻塞等 register）。
+        """
+        try:
+            count = int(request.data.get('count', 1))
+        except (TypeError, ValueError):
+            return Response({'detail': 'count must be int'}, status=400)
+        if count < 1 or count > 20:
+            return Response({'detail': 'count must be in [1, 20]'}, status=400)
+
+        from .services.orchestrator import OrchestratorError, get_adapter
+        try:
+            adapter = get_adapter()
+            new_pods = adapter.scale_up(count)
+        except (OrchestratorError, NotImplementedError) as e:
+            return Response({'detail': f'编排适配器: {e}'}, status=503)
+        except Exception as e:  # noqa: BLE001
+            return Response({'detail': f'扩容失败: {e}'}, status=500)
+        return Response({'new_pods': new_pods, 'count': count}, status=202)
+
+    @action(detail=False, methods=['post'], url_path='scale-down')
+    def scale_down(self, request):
+        """
+        POST body: {pod_names?: [str]} 或 {idle_only: true}
+        - pod_names：明确缩这几台
+        - idle_only：把所有 idle 的容器都释放（v1.2 release_idle_agents 命令也调它）
+        """
+        pod_names = request.data.get('pod_names')
+        idle_only = request.data.get('idle_only')
+
+        if idle_only:
+            idle_lgs = LoadGenerator.objects.filter(status=LoadGeneratorStatus.IDLE)
+            pod_names = [lg.pod_name for lg in idle_lgs]
+        if not pod_names:
+            return Response({'detail': '请指定 pod_names 或 idle_only=true'}, status=400)
+
+        from .services.orchestrator import OrchestratorError, get_adapter
+        try:
+            adapter = get_adapter()
+            removed = adapter.scale_down(pod_names)
+        except (OrchestratorError, NotImplementedError) as e:
+            return Response({'detail': f'编排适配器: {e}'}, status=503)
+        # 同步把 DB 行也标记 released（避免心跳超时窗口里前端还看到僵尸 idle）
+        LoadGenerator.objects.filter(pod_name__in=removed).update(
+            status=LoadGeneratorStatus.LOST,
+            released_at=timezone.now(),
+        )
+        return Response({'removed': removed})
+
+    @action(detail=True, methods=['get'], url_path='system-metrics')
+    def system_metrics(self, request, pk=None):
+        """
+        前端弹窗轮询：GET /api/performance/load-generators/:id/system-metrics/
+        主控代理到 agent /system-metrics（5s timeout，agent 不可达 → 503）。
+        """
+        import requests as _requests  # 局部 import 避 view 文件顶部装一堆
+        try:
+            lg = LoadGenerator.objects.get(pk=pk)
+        except LoadGenerator.DoesNotExist:
+            return Response({'detail': 'load generator not found'}, status=404)
+        try:
+            r = _requests.get(f'{lg.base_url}/system-metrics', timeout=5)
+            if r.status_code != 200:
+                return Response({'detail': f'agent returned {r.status_code}'}, status=503)
+            return Response(r.json())
+        except _requests.RequestException as e:
+            return Response({'detail': f'agent unreachable: {e}'}, status=503)
+
+    @action(detail=True, methods=['put'], url_path='heartbeat')
+    def heartbeat(self, request, pk=None):
+        """
+        Agent 周期性调：PUT /api/performance/load-generators/:id/heartbeat/
+        body 可选 {status} 上报当前状态（idle/busy）；默认保留现有 status。
+        """
+        if not _check_agent_token(request):
+            return Response({'detail': 'Invalid agent token'}, status=401)
+
+        try:
+            lg = LoadGenerator.objects.get(pk=pk)
+        except LoadGenerator.DoesNotExist:
+            return Response({'detail': 'load generator not found'}, status=404)
+
+        next_status = request.data.get('status')
+        update_fields = ['last_heartbeat_at']
+        lg.last_heartbeat_at = timezone.now()
+        # lost 状态收到心跳 → 自动复活回 idle
+        if lg.status == LoadGeneratorStatus.LOST:
+            lg.status = LoadGeneratorStatus.IDLE
+            update_fields.append('status')
+        if next_status in {s.value for s in LoadGeneratorStatus}:
+            lg.status = next_status
+            if 'status' not in update_fields:
+                update_fields.append('status')
+        lg.save(update_fields=update_fields)
+        return Response(LoadGeneratorSerializer(lg).data)

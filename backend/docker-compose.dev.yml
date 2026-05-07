@@ -25,5 +25,34 @@ services:
       - falcon-influxdb-data:/var/lib/influxdb
     restart: unless-stopped
 
+  # falcon-agent：v1.2 容器化压力源
+  # 默认启动 1 副本（开发态永远在线）；用户在 Step 3 弹窗里点「+扩容」按钮
+  # 主控调适配器执行 `up -d --scale agent=N` 改副本数。
+  #
+  # 启动（默认 1 台）：docker compose -f backend/docker-compose.dev.yml up -d agent
+  # 手动扩容：       docker compose -f backend/docker-compose.dev.yml up -d --scale agent=3 agent
+  # 缩容到 0：       docker compose -f backend/docker-compose.dev.yml up -d --scale agent=0 agent
+  #
+  # agent 启动时自动调主控 POST /api/performance/load-generators/register/ 自注册。
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: falcon-agent:1.2
+    deploy:
+      # 默认副本数。docker compose v2 的 deploy.replicas 在非 swarm 模式下也被尊重。
+      replicas: 1
+    environment:
+      # host.docker.internal 让 Linux 容器也能回调宿主主控（macOS Docker Desktop 内置）
+      - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
+      - FALCON_AGENT_TOKEN=${FALCON_AGENT_TOKEN:-}
+      - FALCON_AGENT_PORT=9100
+      - FALCON_MAX_VUSERS=100
+      - FALCON_ORCHESTRATOR_TYPE=docker
+    extra_hosts:
+      # Linux Docker 没有 host.docker.internal，手动加；macOS/Windows Docker Desktop 自带
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   falcon-influxdb-data:

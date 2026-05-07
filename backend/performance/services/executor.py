@@ -31,8 +31,12 @@ from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone as dj_timezone
 
+import requests
+
 from . import influxdb as influxdb_svc
 from . import jmx as jmx_svc
+from . import scheduler as scheduler_svc
+from . import jtl_merger
 from .jmeter_runner import _augmented_env
 from .jmeter import (
     archive_run_dir,
@@ -89,6 +93,10 @@ class RunExecutor:
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
         self._cancelled = threading.Event()
+        # v1.2 多机调度状态
+        self._selected_lgs: list = []                          # list[LoadGenerator]
+        self._agent_runs: dict[int, dict] = {}                  # lg_id → {agent_run_id, base_url, jtl_path}
+        self._agent_runs_lock = threading.Lock()
 
     # ── public ─────────────────────────────────────────────
 
@@ -113,9 +121,21 @@ class RunExecutor:
             status=RunStatus.CANCELLING,
             cancel_requested_at=dj_timezone.now(),
         )
-        # 子进程在跑则发 stoptest
+        # 单机：子进程在跑则发 stoptest
         if self._proc and self._proc.poll() is None and self.run.stop_port:
             self._send_stoptest()
+        # 多机：广播 cancel 到所有 agent
+        with self._agent_runs_lock:
+            agent_runs = list(self._agent_runs.items())
+        for lg_id, info in agent_runs:
+            try:
+                requests.post(
+                    f'{info["base_url"]}/runs/{info["agent_run_id"]}/cancel',
+                    timeout=5,
+                    headers=self._agent_headers(),
+                )
+            except requests.RequestException:
+                pass
 
     # ── worker thread main ─────────────────────────────────
 
@@ -142,25 +162,35 @@ class RunExecutor:
                 )
                 return
 
-            # 2) 进 pending → running，组 run.jmx 写盘
+            # 2) 决策走分布式 or 本地
+            self._selected_lgs = self._select_load_generators()
+            distributed = bool(self._selected_lgs)
+
             self._update_run(status=RunStatus.PENDING)
-            run_jmx = self._build_and_write_run_jmx()
-            stop_port = self._allocate_stop_port()
-            self._update_run(
-                status=RunStatus.RUNNING,
-                stop_port=stop_port,
-                started_at=dj_timezone.now(),
-                last_heartbeat_at=dj_timezone.now(),
-            )
 
-            # 3) 起 JMeter 子进程
-            self._proc = self._spawn_jmeter(run_jmx, stop_port)
-            self._update_run(pid=self._proc.pid)
+            if distributed:
+                # 分布式路径（v1.2）：多 agent 并行
+                self._update_run(
+                    status=RunStatus.RUNNING,
+                    started_at=dj_timezone.now(),
+                    last_heartbeat_at=dj_timezone.now(),
+                )
+                exit_code = self._run_distributed()
+            else:
+                # 本地兜底路径：原 v1.1 单机流程
+                run_jmx = self._build_and_write_run_jmx()
+                stop_port = self._allocate_stop_port()
+                self._update_run(
+                    status=RunStatus.RUNNING,
+                    stop_port=stop_port,
+                    started_at=dj_timezone.now(),
+                    last_heartbeat_at=dj_timezone.now(),
+                )
+                self._proc = self._spawn_jmeter(run_jmx, stop_port)
+                self._update_run(pid=self._proc.pid)
+                exit_code = self._heartbeat_loop(self._proc)
 
-            # 4) 心跳 + cancel 监听 + duration 超时兜底
-            exit_code = self._heartbeat_loop(self._proc)
-
-            # 5) 总结 + 归档
+            # 5) 总结 + 归档（两路径共用）
             self._on_finish(exit_code)
         except Exception:  # noqa: BLE001
             from ..models import RunStatus  # noqa: PLC0415
@@ -282,6 +312,165 @@ class RunExecutor:
                 lines.append(f'ℹ️  Environment 还有 {skipped} 条 hosts 跳过探测（>50 条只抽样）')
 
         return ok, '\n'.join(lines)
+
+    # ── v1.2 多机调度 ───────────────────────────────────────
+
+    def _select_load_generators(self) -> list:
+        """从 TaskRun.load_generators M2M 拿用户 Step 3 选的 agent 集合。
+        空 → 走本地兜底（如果 LOCAL_FALLBACK 关了，pre_check 阶段已经拒绝）。"""
+        from ..models import LoadGeneratorStatus  # noqa: PLC0415
+        lgs = list(self.run.load_generators.filter(status=LoadGeneratorStatus.IDLE))
+        return lgs
+
+    def _agent_headers(self) -> dict:
+        token = getattr(settings, 'FALCON_AGENT_TOKEN', '') or ''
+        h = {}
+        if token:
+            h['Authorization'] = f'Bearer {token}'
+        return h
+
+    def _run_distributed(self) -> int:
+        """
+        多 agent 编排：
+          1. compute_shards 算每台 vusers
+          2. 给每台 build_shard_jmx → POST /runs (multipart)
+          3. 心跳轮询每台 agent /runs/:id 状态
+          4. 全部退出后 GET /jtl 拉回各文件 → jtl_merger.merge_jtls 写到 run_dir/results.jtl
+        返 exit_code 兼容 _on_finish 的语义（0=success / 非 0=failed）
+        """
+        from ..models import RunStatus  # noqa: PLC0415
+        run_dir = get_run_dir(self.run.run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        shards = scheduler_svc.compute_shards(self.run.virtual_users, self._selected_lgs)
+        # 每台 agent 起一个分片任务
+        for shard in shards:
+            shard_jmx = scheduler_svc.build_shard_jmx(
+                self.run.task,
+                run_id=self.run.run_id,
+                shard=shard,
+                total_vusers=self.run.virtual_users,
+                influxdb_url=getattr(settings, 'INFLUXDB_URL', ''),
+                influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
+            )
+            files = [('jmx_file', ('run.jmx', shard_jmx, 'application/xml'))]
+            # CSV：暂不切（v1.2 第一版本 plan 列了 CSV 切片，executor 这版先用全量；
+            # scheduler.slice_csv_by_offset 已经实现，留接口位等用户测过反馈再串）
+            try:
+                r = requests.post(
+                    f'{shard.base_url}/runs',
+                    data={'master_run_id': self.run.run_id},
+                    files=files,
+                    timeout=30,
+                    headers=self._agent_headers(),
+                )
+                r.raise_for_status()
+                data = r.json()
+            except (requests.RequestException, ValueError) as e:
+                self._update_run(error_message=f'agent {shard.pod_name} POST /runs 失败: {e}')
+                return 1
+            with self._agent_runs_lock:
+                self._agent_runs[shard.load_generator_id] = {
+                    'agent_run_id': data['run_id'],
+                    'pid': data.get('pid'),
+                    'base_url': shard.base_url,
+                    'pod_name': shard.pod_name,
+                    'jtl_path': run_dir / f'{shard.pod_name}.jtl',
+                    'finished': False,
+                    'exit_code': None,
+                }
+
+        # 心跳轮询：1s 间隔；max_wall 同单机版（ramp + duration + DURATION_OVERRUN）
+        duration = self.run.duration_seconds or 0
+        ramp = self.run.ramp_up_seconds or 0
+        max_wall = ramp + duration + _DURATION_OVERRUN_SEC if duration else 0
+        start_t = time.monotonic()
+        any_failed = False
+
+        while True:
+            self._update_run(last_heartbeat_at=dj_timezone.now())
+
+            with self._agent_runs_lock:
+                pending = [
+                    (lg_id, info) for lg_id, info in self._agent_runs.items()
+                    if not info['finished']
+                ]
+
+            if not pending:
+                break
+
+            if self._cancelled.is_set():
+                # cancel 已经在 cancel() 里广播过了；这里继续等终态
+                pass
+
+            if max_wall and (time.monotonic() - start_t) > max_wall:
+                # duration 超时：广播 cancel，标 timeout
+                self._update_run(status=RunStatus.CANCELLING)
+                for lg_id, info in pending:
+                    try:
+                        requests.post(
+                            f'{info["base_url"]}/runs/{info["agent_run_id"]}/cancel',
+                            timeout=5, headers=self._agent_headers(),
+                        )
+                    except requests.RequestException:
+                        pass
+                self._update_run(status=RunStatus.TIMEOUT)
+
+            for lg_id, info in pending:
+                try:
+                    r = requests.get(
+                        f'{info["base_url"]}/runs/{info["agent_run_id"]}',
+                        timeout=5, headers=self._agent_headers(),
+                    )
+                    if r.status_code != 200:
+                        continue
+                    st = r.json()
+                except (requests.RequestException, ValueError):
+                    continue
+                if not st.get('is_running'):
+                    info['finished'] = True
+                    info['exit_code'] = st.get('exit_code')
+                    if (st.get('exit_code') or 0) != 0:
+                        any_failed = True
+
+            time.sleep(_HEARTBEAT_INTERVAL_SEC)
+
+        # 全部 agent 终态：拉 jtl
+        jtl_paths: list[Path] = []
+        with self._agent_runs_lock:
+            agent_runs = list(self._agent_runs.values())
+        for info in agent_runs:
+            try:
+                r = requests.get(
+                    f'{info["base_url"]}/runs/{info["agent_run_id"]}/jtl',
+                    timeout=60, headers=self._agent_headers(), stream=True,
+                )
+                if r.status_code == 200:
+                    info['jtl_path'].parent.mkdir(parents=True, exist_ok=True)
+                    with info['jtl_path'].open('wb') as f:
+                        for chunk in r.iter_content(8192):
+                            f.write(chunk)
+                    jtl_paths.append(info['jtl_path'])
+            except requests.RequestException:
+                continue
+
+        merged = run_dir / 'results.jtl'
+        try:
+            jtl_merger.merge_jtls(jtl_paths, merged)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: jtl merge failed: {e}', file=sys.stderr)
+
+        # agent 端清理（删 work_dir，避免 disk leak）
+        for info in agent_runs:
+            try:
+                requests.delete(
+                    f'{info["base_url"]}/runs/{info["agent_run_id"]}',
+                    timeout=5, headers=self._agent_headers(),
+                )
+            except requests.RequestException:
+                pass
+
+        return 0 if not any_failed else 1
 
     # ── build + spawn ──────────────────────────────────────
 

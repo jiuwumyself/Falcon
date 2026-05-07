@@ -154,3 +154,19 @@ INFLUXDB_DB = os.getenv('INFLUXDB_DB', 'jmeter')
 INFLUXDB_USER = os.getenv('INFLUXDB_USER', '')
 INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', '')
 INFLUXDB_RETENTION = os.getenv('INFLUXDB_RETENTION', '30d')
+
+# v1.2 容器化压力源（OrchestratorAdapter）
+ORCHESTRATOR_TYPE = os.getenv('ORCHESTRATOR_TYPE', 'docker')   # docker / k8s
+AGENT_COMPOSE_FILE = os.getenv('AGENT_COMPOSE_FILE', '')        # 默认 BASE_DIR/docker-compose.dev.yml
+AGENT_COMPOSE_SERVICE = os.getenv('AGENT_COMPOSE_SERVICE', 'agent')
+AGENT_COMPOSE_PROJECT = os.getenv('AGENT_COMPOSE_PROJECT', None)
+AGENT_K8S_NAMESPACE = os.getenv('AGENT_K8S_NAMESPACE', 'falcon')
+AGENT_K8S_DEPLOYMENT = os.getenv('AGENT_K8S_DEPLOYMENT', 'falcon-agent')
+
+MAX_VUSERS_PER_AGENT = int(os.getenv('MAX_VUSERS_PER_AGENT', '100'))
+IDLE_RELEASE_MINUTES = int(os.getenv('IDLE_RELEASE_MINUTES', '30'))
+FALCON_AGENT_TOKEN = os.getenv('FALCON_AGENT_TOKEN', '')        # 空 = 不强校验（开发态）
+
+# 选了 0 台 agent + LOCAL_FALLBACK=True → executor 走单机本地 jmeter（开发态友好）
+# 生产环境建议 LOCAL_FALLBACK=0 强制走分布式
+LOCAL_FALLBACK = os.getenv('LOCAL_FALLBACK', '1') == '1'

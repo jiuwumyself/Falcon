@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Environment, MetricSample, Task, TaskCsvBinding, TaskRun
+from .models import Environment, LoadGenerator, MetricSample, Task, TaskCsvBinding, TaskRun
 
 
 class EnvironmentSerializer(serializers.ModelSerializer):
@@ -31,7 +31,7 @@ class TaskSerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'biz_category',
             'jmx_filename', 'jmx_hash',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
-            'thread_groups_config', 'environment',
+            'thread_groups_config', 'environment', 'service_names',
             'csv_bindings', 'status', 'active_run_id',
             'owner', 'created_at', 'updated_at',
         ]
@@ -84,3 +84,19 @@ class TaskRunSerializer(serializers.ModelSerializer):
             'cancel_requested_at', 'archived_at',
         ]
         read_only_fields = fields  # 写入由 RunExecutor 控制，不通过 serializer
+
+
+class LoadGeneratorSerializer(serializers.ModelSerializer):
+    """前端只读列出可用压力源；写入由 agent 走内部 register/heartbeat 端点。"""
+    base_url = serializers.ReadOnlyField()
+
+    class Meta:
+        model = LoadGenerator
+        fields = [
+            'id', 'pod_name', 'hostname', 'ip', 'port', 'base_url',
+            'status', 'cpu_cores', 'memory_gb', 'max_vusers',
+            'jmeter_version', 'orchestrator_type',
+            'registered_at', 'last_heartbeat_at', 'released_at',
+            # token 不暴露给前端
+        ]
+        read_only_fields = fields
