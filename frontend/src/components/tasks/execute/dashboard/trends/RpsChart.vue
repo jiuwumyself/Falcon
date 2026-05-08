@@ -15,11 +15,13 @@ import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   overall: RunMetricsSeries | null
   byTg: Record<string, RunMetricsSeries>
   isDark: boolean
-}>()
+  /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
+  compact?: boolean
+}>(), { compact: false })
 
 const chartRef = ref<any>(null)
 
@@ -72,7 +74,7 @@ const option = computed(() => {
     seriesSpecs.value,
     props.isDark,
     'req/s',
-    { showLegend: true, gridBottom: 30 },
+    { showLegend: true, hideXAxisLabel: props.compact },
   )
   return {
     ...base,

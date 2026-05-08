@@ -330,6 +330,14 @@ export interface ErrorSamplesQuery {
   aggregate?: boolean   // true → 走 ErrorAggregatesResponse 形状
 }
 
+// 响应时间拆解：扫 JTL 算 Connect / 服务端处理 / 客户端接收三段时序
+// LatencyChart "拆解" mode 用 —— 看出 RT 高在哪一段
+export interface LatencyBreakdownResponse {
+  connect_ms: SeriesPoint[]   // TCP 握手时间
+  server_ms: SeriesPoint[]    // 服务端处理时间（latency - connect）
+  receive_ms: SeriesPoint[]   // 客户端接收时间（elapsed - latency）
+}
+
 export interface JmxComponent {
   path: string          // 索引路径，如 "0.0.1"
   tag: string           // JMX 元素标签，如 "HTTPSamplerProxy"

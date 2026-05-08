@@ -7,7 +7,8 @@ import {
   GridComponent, TooltipComponent, TitleComponent, LegendComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { RunMetricsSeries } from '@/types/task'
+import type { LatencyBreakdownResponse, RunMetricsSeries } from '@/types/task'
+import { runsApi } from '@/lib/api'
 import {
   buildSeriesOption, CONNECT_GROUP, statsOf, type SeriesSpec,
 } from './chartFactory'
@@ -15,14 +16,50 @@ import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   overall: RunMetricsSeries | null
   byTg: Record<string, RunMetricsSeries>
+  runId: string | null
   isDark: boolean
-}>()
+  /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
+  compact?: boolean
+}>(), { compact: false })
 
 const chartRef = ref<any>(null)
-const mode = ref<'all-percentiles' | 'tx-p95'>('all-percentiles')
+type Mode = 'all-percentiles' | 'tx-p95' | 'breakdown'
+const mode = ref<Mode>('all-percentiles')
+
+// 拆解数据按需 fetch（不进 5s metrics 轮询，避免每 5s 扫一次 JTL 拖累）
+const breakdown = ref<LatencyBreakdownResponse | null>(null)
+const breakdownLoading = ref(false)
+const breakdownRunId = ref<string | null>(null)  // 缓存对应的 runId，run 切换时失效
+
+async function fetchBreakdown() {
+  const id = props.runId
+  if (!id) return
+  if (breakdownLoading.value) return
+  breakdownLoading.value = true
+  try {
+    breakdown.value = await runsApi.latencyBreakdown(id)
+    breakdownRunId.value = id
+  } catch {
+    // 静默失败：JTL 不存在 / 后端 500，保持 breakdown=null
+  } finally {
+    breakdownLoading.value = false
+  }
+}
+
+// 切到 breakdown 且数据未加载或 run 变了 → fetch
+watch(
+  [() => mode.value, () => props.runId],
+  ([m, id]) => {
+    if (m !== 'breakdown') return
+    if (!id) return
+    if (breakdownRunId.value !== id) breakdown.value = null
+    if (breakdown.value === null) void fetchBreakdown()
+  },
+  { immediate: true },
+)
 
 const txList = computed(() => Object.keys(props.byTg).sort())
 
@@ -55,6 +92,17 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
       { name: 'P99', data: props.overall.p99_ms, color: '#ef4444', lineWidth: 2 },
     ]
   }
+  if (mode.value === 'breakdown') {
+    const b = breakdown.value
+    if (!b) return []
+    // 三段堆叠面积 = Connect + Server + Receive；总高 = elapsed
+    // 颜色对应常见瓶颈源：网络（蓝）/ 服务端（红）/ 数据传输（黄）
+    return [
+      { name: 'Connect (网络握手)', data: b.connect_ms, color: '#3b82f6', lineWidth: 0, area: true, stack: 'lat' },
+      { name: 'Server (服务端处理)', data: b.server_ms, color: '#ef4444', lineWidth: 0, area: true, stack: 'lat' },
+      { name: 'Receive (数据接收)', data: b.receive_ms, color: '#f59e0b', lineWidth: 0, area: true, stack: 'lat' },
+    ]
+  }
   // tx-p95 模式
   const specs: SeriesSpec[] = []
   if (props.overall?.p95_ms.length) {
@@ -83,7 +131,7 @@ const option = computed(() => {
     seriesSpecs.value,
     props.isDark,
     'ms',
-    { showLegend: true, gridBottom: 30 },
+    { showLegend: true, hideXAxisLabel: props.compact },
   )
   if (mode.value === 'tx-p95') {
     return {
@@ -184,6 +232,25 @@ watch(chartRef, (v) => {
           @click="mode = 'tx-p95'"
         >
           按接口 P95
+        </button>
+        <button
+          type="button"
+          class="px-2.5 py-0.5 rounded transition-colors cursor-pointer"
+          title="按秒拆 Connect / 服务端处理 / 数据接收 三段堆叠，看 RT 高在哪一段"
+          :style="{
+            background: mode === 'breakdown'
+              ? (isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.95)')
+              : 'transparent',
+            color: mode === 'breakdown'
+              ? (isDark ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.85)')
+              : (isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)'),
+            boxShadow: mode === 'breakdown'
+              ? (isDark ? 'none' : '0 1px 2px rgba(0,0,0,0.06)')
+              : 'none',
+          }"
+          @click="mode = 'breakdown'"
+        >
+          拆解三段
         </button>
       </div>
     </div>

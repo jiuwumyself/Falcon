@@ -51,9 +51,15 @@ export function buildSeriesOption(
   series: SeriesSpec[],
   isDark: boolean,
   unit: string,
-  opts: { showLegend?: boolean; gridBottom?: number } = {},
+  opts: {
+    showLegend?: boolean
+    gridBottom?: number
+    /** small multiples 紧贴布局用：上面的图隐藏 x 轴标签让最底下一张承担 */
+    hideXAxisLabel?: boolean
+  } = {},
 ) {
-  const { showLegend = true, gridBottom = 28 } = opts
+  const { showLegend = true, hideXAxisLabel = false } = opts
+  const gridBottom = opts.gridBottom ?? (hideXAxisLabel ? 8 : 28)
 
   return {
     grid: {
@@ -103,7 +109,9 @@ export function buildSeriesOption(
     xAxis: {
       type: 'time' as const,
       axisLine: { lineStyle: { color: axisColor(isDark) } },
-      axisLabel: { color: labelColor(isDark), fontSize: 10 },
+      axisLabel: hideXAxisLabel
+        ? { show: false }
+        : { color: labelColor(isDark), fontSize: 10 },
       splitLine: { show: false },
     },
     yAxis: {

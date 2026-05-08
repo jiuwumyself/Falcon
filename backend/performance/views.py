@@ -795,6 +795,76 @@ class RunViewSet(viewsets.GenericViewSet):
         data['run'] = TaskRunSerializer(run).data
         return Response(data)
 
+    @action(detail=True, methods=['get'], url_path='latency-breakdown')
+    def latency_breakdown(self, request, run_id=None):
+        """扫 JTL 算 Connect / 服务端处理 / 客户端接收 三段时序，按秒聚合。
+
+        JTL 列含义：
+        - elapsed：整请求耗时
+        - Latency：到首字节时间（含 TCP connect + 服务端处理）
+        - Connect：TCP 握手时间
+
+        三段拆 = Connect + (Latency - Connect) + (elapsed - Latency)
+             = Connect + ServerProcessing + ClientReceive
+
+        前端 LatencyChart "拆解" mode 用 —— 一眼看出 RT 高在哪一段。
+        非高频接口，前端按需调用（不进 5s metrics 轮询）。
+        """
+        import csv as _csv
+        run = self.get_object()
+        jtl = get_runs_dir() / run.run_id / 'results.jtl'
+        empty = {'connect_ms': [], 'server_ms': [], 'receive_ms': []}
+        if not jtl.exists() or jtl.stat().st_size == 0:
+            return Response(empty)
+
+        # 按秒聚合：bucket_ms -> [connect_sum, server_sum, receive_sum, count]
+        buckets: dict[int, list[float]] = {}
+        try:
+            with jtl.open('r', encoding='utf-8', errors='replace') as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    try:
+                        ts = int(row.get('timeStamp') or 0)
+                        elapsed = float(row.get('elapsed') or 0)
+                        latency = float(row.get('Latency') or 0)
+                        connect = float(row.get('Connect') or 0)
+                    except ValueError:
+                        continue
+                    if ts <= 0:
+                        continue
+                    # 异常兜底：latency 不可能 > elapsed，connect 不可能 > latency
+                    if connect > latency:
+                        connect = latency
+                    if latency > elapsed:
+                        latency = elapsed
+                    server = max(0.0, latency - connect)
+                    receive = max(0.0, elapsed - latency)
+                    bucket = (ts // 1000) * 1000
+                    b = buckets.get(bucket)
+                    if b is None:
+                        buckets[bucket] = [connect, server, receive, 1]
+                    else:
+                        b[0] += connect
+                        b[1] += server
+                        b[2] += receive
+                        b[3] += 1
+        except OSError as e:
+            return Response({'detail': f'read jtl: {e}'}, status=500)
+
+        connect_pts: list[list[float]] = []
+        server_pts: list[list[float]] = []
+        receive_pts: list[list[float]] = []
+        for ts in sorted(buckets.keys()):
+            c, s, r, n = buckets[ts]
+            connect_pts.append([ts, round(c / n, 2)])
+            server_pts.append([ts, round(s / n, 2)])
+            receive_pts.append([ts, round(r / n, 2)])
+        return Response({
+            'connect_ms': connect_pts,
+            'server_ms': server_pts,
+            'receive_ms': receive_pts,
+        })
+
     @action(detail=True, methods=['get'], url_path='log')
     def log(self, request, run_id=None):
         run = self.get_object()

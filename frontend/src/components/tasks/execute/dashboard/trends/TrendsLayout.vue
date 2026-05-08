@@ -7,6 +7,7 @@ import ErrorRateGauge from './ErrorRateGauge.vue'
 import ErrorCountChart from './ErrorCountChart.vue'
 import ConcurrencyChart from './ConcurrencyChart.vue'
 import ThroughputPerVuChart from './ThroughputPerVuChart.vue'
+import ConcurrencyRpsChart from './ConcurrencyRpsChart.vue'
 import RpsChart from './RpsChart.vue'
 import LatencyChart from './LatencyChart.vue'
 import NetworkChart from './NetworkChart.vue'
@@ -178,19 +179,36 @@ const heroStyle = computed(() => ({
       </div>
     </div>
 
-    <!-- 3. RPS 大图（hero） -->
-    <div class="rounded-xl p-4 h-[300px]" :style="heroStyle">
-      <RpsChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
+    <!-- 3-5 三大趋势曲线（small multiples 紧贴布局，hover 联动）
+         上两张 compact 隐藏 x 轴标签 + 紧贴最底下 NetworkChart 的 x 轴；
+         共用一个 hero 容器，垂直对比效率提升。 -->
+    <div class="rounded-xl p-4" :style="heroStyle">
+      <div
+        class="text-[11.5px] mb-2 px-1"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
+      >
+        趋势曲线（hover 联动 · 共用时间轴）
+      </div>
+      <div class="space-y-1">
+        <div class="h-[200px]">
+          <RpsChart :overall="overall" :by-tg="byTg" :is-dark="isDark" compact />
+        </div>
+        <div class="h-[260px]">
+          <LatencyChart :overall="overall" :by-tg="byTg" :run-id="activeRunId" :is-dark="isDark" compact />
+        </div>
+        <div class="h-[220px]">
+          <NetworkChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
+        </div>
+      </div>
     </div>
 
-    <!-- 4. 响应时间大图（hero） -->
-    <div class="rounded-xl p-4 h-[300px]" :style="heroStyle">
-      <LatencyChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
-    </div>
-
-    <!-- 5. 网络流量大图（hero） -->
-    <div class="rounded-xl p-4 h-[280px]" :style="heroStyle">
-      <NetworkChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
+    <!-- 5.5 并发-吞吐关系散点：看线性增长 / 平台期 / 性能拐点 -->
+    <div class="rounded-xl p-3 h-[220px]" :style="sectionStyle">
+      <ConcurrencyRpsChart
+        :rps="overall?.rps || []"
+        :vu="overall?.active_users || []"
+        :is-dark="isDark"
+      />
     </div>
 
     <!-- 6. 错误两表 -->

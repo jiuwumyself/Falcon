@@ -1,6 +1,6 @@
 import type {
   Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
-  LoadGenerator, Paginated, RunMetrics, SamplerStat, Task, TaskRun,
+  LatencyBreakdownResponse, LoadGenerator, Paginated, RunMetrics, SamplerStat, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -161,6 +161,9 @@ export const runsApi = {
     if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
     return api<ErrorAggregatesResponse>(`/runs/${runId}/error-samples/?${params.toString()}`)
   },
+  // 响应时间拆解：扫 JTL 算 Connect/Server/Receive 三段时序，前端按需拉一次
+  latencyBreakdown: (runId: string): Promise<LatencyBreakdownResponse> =>
+    api<LatencyBreakdownResponse>(`/runs/${runId}/latency-breakdown/`),
 }
 
 // ─── LoadGenerators API（v1.2 容器化压力源） ────────────────────────────
