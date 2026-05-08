@@ -107,16 +107,47 @@ const option = computed(() => {
   }
 })
 
+// 排除前几秒 ramp-up（VU 从 0 爬到目标）的样本，避免它们扰动"恒定并发"判定
+function steadyStatePoints(pts: ScatterPoint[]): ScatterPoint[] {
+  if (pts.length <= 5) return pts
+  let maxVu = 0
+  for (const p of pts) if (p.vu > maxVu) maxVu = p.vu
+  // 取已经爬到 80% 目标 VU 之后的点
+  const threshold = maxVu * 0.8
+  const steady = pts.filter((p) => p.vu >= threshold)
+  return steady.length >= 5 ? steady : pts
+}
+
 const summary = computed(() => {
-  const pts = points.value
-  if (!pts.length) return null
-  let peakRps = 0
+  const all = points.value
+  if (!all.length) return null
+  const pts = steadyStatePoints(all)
+
+  // VU 抖动：max-min 跟 mean 比，判定"恒定并发"场景（稳定性测试）
+  let vuMin = Infinity
+  let vuMax = 0
+  let vuSum = 0
+  for (const p of pts) {
+    if (p.vu < vuMin) vuMin = p.vu
+    if (p.vu > vuMax) vuMax = p.vu
+    vuSum += p.vu
+  }
+  const vuMean = vuSum / pts.length
+  // 稳定态 VU 变化 < 10% → 视作"恒定并发"
+  const isFlatVu = vuMean > 0 && (vuMax - vuMin) / vuMean < 0.1
+
+  // RPS 统计
+  let rpsSum = 0
+  let rpsMax = 0
   let peakRpsAtVu = 0
   let maxVu = 0
   let rpsAtMaxVu = 0
+  const rpsArr: number[] = []
   for (const p of pts) {
-    if (p.rps > peakRps) {
-      peakRps = p.rps
+    rpsSum += p.rps
+    rpsArr.push(p.rps)
+    if (p.rps > rpsMax) {
+      rpsMax = p.rps
       peakRpsAtVu = p.vu
     }
     if (p.vu > maxVu) {
@@ -124,9 +155,33 @@ const summary = computed(() => {
       rpsAtMaxVu = p.rps
     }
   }
-  // 性能降级判定：峰值 RPS 时 VU < 最大 VU，说明加 VU 后 RPS 反而跌（崩盘信号）
-  const degraded = peakRpsAtVu < maxVu && rpsAtMaxVu < peakRps * 0.9
-  return { peakRps, peakRpsAtVu, maxVu, rpsAtMaxVu, degraded }
+  const rpsMean = rpsSum / pts.length
+  // 标准差
+  let varSum = 0
+  for (const r of rpsArr) varSum += (r - rpsMean) ** 2
+  const rpsStd = Math.sqrt(varSum / pts.length)
+  // 变异系数（CV = std/mean），衡量抖动幅度
+  const rpsCv = rpsMean > 0 ? rpsStd / rpsMean : 0
+  // P95
+  const sortedRps = [...rpsArr].sort((a, b) => a - b)
+  const rpsP95 = sortedRps[Math.floor(sortedRps.length * 0.95)] || rpsMax
+
+  // 降级判定（仅压力梯度场景才有意义；恒定并发时 peakRpsAtVu === maxVu，自然 false）
+  const degraded = peakRpsAtVu < maxVu && rpsAtMaxVu < rpsMax * 0.9
+
+  return {
+    isFlatVu,
+    vuMean,
+    peakRps: rpsMax,
+    peakRpsAtVu,
+    maxVu,
+    rpsAtMaxVu,
+    degraded,
+    rpsMean,
+    rpsStd,
+    rpsCv,
+    rpsP95,
+  }
 })
 </script>
 
@@ -136,9 +191,11 @@ const summary = computed(() => {
       <div
         class="text-[11.5px]"
         :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-        title="散点 = 时间点 (VU, RPS)；颜色越深越靠后；线性增长 → 平台期 → 性能拐点 / 崩盘"
+        :title="summary?.isFlatVu
+          ? `并发恒定 ${Math.round(summary.vuMean)} VU（稳定性测试场景）—— 散点坍缩成竖线，看 RPS 抖动统计；时序看上方 RPS 大图`
+          : '散点 = 时间点 (VU, RPS)；颜色越深越靠后；线性增长 → 平台期 → 性能拐点 / 崩盘'"
       >
-        并发-吞吐关系
+        {{ summary?.isFlatVu ? 'RPS 抖动（并发恒定）' : '并发-吞吐关系' }}
       </div>
       <div
         v-if="summary"
@@ -149,7 +206,12 @@ const summary = computed(() => {
             : (isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)'),
         }"
       >
-        <template v-if="summary.degraded">
+        <template v-if="summary.isFlatVu">
+          {{ Math.round(summary.vuMean) }} VU · 均值 {{ summary.rpsMean.toFixed(0) }} ·
+          抖动 ±{{ summary.rpsStd.toFixed(0) }} ({{ (summary.rpsCv * 100).toFixed(1) }}%) ·
+          P95 {{ summary.rpsP95.toFixed(0) }}
+        </template>
+        <template v-else-if="summary.degraded">
           ⚠ 加 VU 不涨吞吐（峰值 {{ summary.peakRps.toFixed(0) }} @ {{ summary.peakRpsAtVu }} VU）
         </template>
         <template v-else>
