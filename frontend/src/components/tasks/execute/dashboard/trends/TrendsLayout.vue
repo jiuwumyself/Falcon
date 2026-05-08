@@ -133,15 +133,10 @@ const sectionStyle = computed(() => ({
     : '1px solid rgba(0,0,0,0.06)',
 }))
 
-// 主区块（RPS / RT / Net 三大曲线）：背景/边框重一档，视觉权重高
+// 主区块（RPS / RT / Net 三大曲线）：用更亮背景 + 更大内边距表达主次（不加边框/阴影）
+// Tufte 第一原则：用空间和字号表达主次，不用线条（避免 chartjunk）
 const heroStyle = computed(() => ({
-  background: props.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.85)',
-  border: props.isDark
-    ? '1px solid rgba(255,255,255,0.10)'
-    : '1px solid rgba(0,0,0,0.10)',
-  boxShadow: props.isDark
-    ? '0 1px 2px rgba(0,0,0,0.3)'
-    : '0 1px 3px rgba(0,0,0,0.04)',
+  background: props.isDark ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.78)',
 }))
 </script>
 
@@ -184,17 +179,17 @@ const heroStyle = computed(() => ({
     </div>
 
     <!-- 3. RPS 大图（hero） -->
-    <div class="rounded-xl p-3 h-[300px]" :style="heroStyle">
+    <div class="rounded-xl p-4 h-[300px]" :style="heroStyle">
       <RpsChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
     </div>
 
     <!-- 4. 响应时间大图（hero） -->
-    <div class="rounded-xl p-3 h-[300px]" :style="heroStyle">
+    <div class="rounded-xl p-4 h-[300px]" :style="heroStyle">
       <LatencyChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
     </div>
 
     <!-- 5. 网络流量大图（hero） -->
-    <div class="rounded-xl p-3 h-[280px]" :style="heroStyle">
+    <div class="rounded-xl p-4 h-[280px]" :style="heroStyle">
       <NetworkChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
     </div>
 

@@ -42,10 +42,11 @@ function fmtNum(v: number | null, suffix = '', digits = 0): string {
 
 const primary = computed(() => props.isDark ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.85)')
 
-// 颜色策略：失败/错误率 > 0 才红 / = 0 绿；其余指标用主色（避免全卡片染红）
+// 颜色策略：异常态（> 0）才染红，正常态用主色
+// 让红色专属异常 —— 红色一出现立刻劈开视觉，比"绿/红双饱和"更易感知
 function errColor(v: number | null, threshold = 0): string {
   if (v === null) return primary.value
-  return v > threshold ? '#ef4444' : '#10b981'
+  return v > threshold ? '#ef4444' : primary.value
 }
 
 const currentRow = computed(() => {
@@ -70,7 +71,7 @@ const cumulativeRow = computed(() => {
   const sent = t?.total_bytes_sent ?? 0
   return [
     { label: '累计 · 总请求数', value: fmtInt(totalCount), color: primary.value },
-    { label: '累计 · 失败数', value: fmtInt(totalErrors), color: totalErrors > 0 ? '#ef4444' : '#10b981' },
+    { label: '累计 · 失败数', value: fmtInt(totalErrors), color: totalErrors > 0 ? '#ef4444' : primary.value },
     { label: '累计 · 接收字节', value: fmtBytesTotal(recv), color: primary.value },
     { label: '累计 · 发送字节', value: fmtBytesTotal(sent), color: primary.value },
   ]

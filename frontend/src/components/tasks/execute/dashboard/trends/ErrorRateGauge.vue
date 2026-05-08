@@ -2,12 +2,12 @@
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { GaugeChart } from 'echarts/charts'
-import { TitleComponent, TooltipComponent } from 'echarts/components'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { RunMetricsSeries, SeriesPoint } from '@/types/task'
 
-use([GaugeChart, TitleComponent, TooltipComponent, CanvasRenderer])
+use([LineChart, GridComponent, TitleComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{
   totals: { total_count: number; total_errors: number } | null
@@ -15,8 +15,7 @@ const props = defineProps<{
   isDark: boolean
 }>()
 
-// 阶梯压力下累计错误率会"骗人"（前期通过 + 后期崩盘平均后看起来很低）。
-// gauge 改成最近 60s 滑动窗口的实时错误率，累计值降级成下方小字。
+// 中心大数字 = 最近 60s 滚动错误率（与累计区分；阶梯压力下不"骗人"）
 function lastWindowRate(
   errorPts: SeriesPoint[],
   rpsPts: SeriesPoint[],
@@ -55,53 +54,54 @@ function colorFor(pct: number): string {
   return '#ef4444'
 }
 
-const option = computed(() => {
+const themedColor = computed(() => {
   const pct = realtimePct.value
-  const hasData = pct !== null
-  const value = hasData ? pct : 0
-  const color = hasData
-    ? colorFor(pct)
-    : (props.isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)')
-  // 显示范围 0..max(1, ceil(value*1.5))，保证小错误率也能看清半圆变化
-  const max = Math.max(1, Math.ceil(value * 1.5))
+  if (pct === null) return props.isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.4)'
+  return colorFor(pct)
+})
+
+// sparkline 数据：取 series.error_rate 最后 60 个点（每秒瞬时错误率，0-1 比率 → ×100 转 %）
+const sparklineData = computed<SeriesPoint[]>(() => {
+  const pts = props.series?.error_rate || []
+  if (!pts.length) return []
+  return pts.slice(-60).map(([t, v]) => [t, v * 100])
+})
+
+const sparklineOption = computed(() => {
+  const data = sparklineData.value
+  const color = themedColor.value
   return {
+    grid: { left: 0, right: 0, top: 2, bottom: 2 },
+    xAxis: { type: 'time' as const, show: false },
+    yAxis: { type: 'value' as const, show: false, min: 0 },
+    tooltip: {
+      trigger: 'axis' as const,
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params
+        return `${p.value[1].toFixed(2)}%`
+      },
+      backgroundColor: props.isDark ? 'rgba(20,20,22,0.92)' : 'rgba(255,255,255,0.95)',
+      borderColor: props.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
+      textStyle: { color: props.isDark ? '#fff' : '#000', fontSize: 11 },
+      axisPointer: { type: 'line' as const, lineStyle: { color: 'rgba(120,120,120,0.3)' } },
+    },
     series: [
       {
-        type: 'gauge' as const,
-        startAngle: 200,
-        endAngle: -20,
-        center: ['50%', '70%'],
-        radius: '95%',
-        min: 0,
-        max,
-        progress: {
-          show: true,
-          width: 14,
-          itemStyle: { color },
-        },
-        axisLine: {
-          lineStyle: {
-            width: 14,
-            color: [[1, props.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)']],
-          },
-        },
-        pointer: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        axisLabel: { show: false },
-        anchor: { show: false },
-        title: { show: false },
-        detail: {
-          valueAnimation: true,
-          formatter: () => (hasData ? `${value.toFixed(2)}%` : '—'),
-          fontSize: 26,
-          color,
-          offsetCenter: [0, '0%'],
-        },
-        data: [{ value }],
+        type: 'line' as const,
+        data,
+        showSymbol: false,
+        smooth: true,
+        sampling: 'lttb' as const,
+        lineStyle: { width: 1.5, color },
+        areaStyle: { color, opacity: 0.18 },
       },
     ],
   }
+})
+
+const realtimeText = computed(() => {
+  const v = realtimePct.value
+  return v === null ? '—' : `${v.toFixed(2)}%`
 })
 
 const cumulativeText = computed(() => {
@@ -112,20 +112,33 @@ const cumulativeText = computed(() => {
 
 <template>
   <div class="flex flex-col h-full">
-    <div
-      class="text-[11.5px] mb-1 px-1"
-      :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-    >
-      实时错误率（60s 窗口）
+    <div class="flex items-center justify-between px-1 mb-1">
+      <div
+        class="text-[11.5px]"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
+      >
+        实时错误率（60s 窗口）
+      </div>
+      <div
+        class="text-[10.5px] tabular-nums"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
+      >
+        累计 {{ cumulativeText }}
+      </div>
     </div>
-    <div class="flex-1 min-h-0 relative">
-      <VChart :option="option" autoresize style="width: 100%; height: 100%" />
+    <!-- 大数字 -->
+    <div class="flex-1 flex items-center justify-center">
+      <span
+        class="text-[34px] font-semibold leading-none tabular-nums"
+        :style="{ color: themedColor }"
+      >
+        {{ realtimeText }}
+      </span>
     </div>
-    <div
-      class="text-[10.5px] text-center pb-1"
-      :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
-    >
-      累计 {{ cumulativeText }}
+    <!-- sparkline：最近 60s 瞬时错误率，让用户看到"是冲上去的还是稳定的" -->
+    <div v-if="sparklineData.length" class="h-[36px]">
+      <VChart :option="sparklineOption" autoresize style="width: 100%; height: 100%" />
     </div>
+    <div v-else class="h-[36px]" />
   </div>
 </template>
