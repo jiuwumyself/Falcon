@@ -49,6 +49,12 @@ services:
       - FALCON_AGENT_PORT=9100
       - FALCON_MAX_VUSERS=100
       - FALCON_ORCHESTRATOR_TYPE=docker
+      # 单机 dev 形态：让 agent 上报 127.0.0.1（主控走宿主 published port 9100 调进来）。
+      # 多 agent 扩容时这条得改：每个 replica 拿不同 host port，需要别的方案。
+      - FALCON_AGENT_REPORT_IP=${FALCON_AGENT_REPORT_IP:-127.0.0.1}
+    ports:
+      # 单机 dev：发布 9100 供主控反向调用。scale > 1 会端口冲突，阶段 2 解决。
+      - "9100:9100"
     extra_hosts:
       # Linux Docker 没有 host.docker.internal，手动加；macOS/Windows Docker Desktop 自带
       - "host.docker.internal:host-gateway"

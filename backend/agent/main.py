@@ -113,7 +113,14 @@ def _resolve_jmeter_bin() -> Path:
 def _get_local_ip() -> str:
     """容器内自我 IP；compose 默认网络下能拿到 bridge 网段地址。
     本地 venv 调试场景（master_url 含 localhost / 127.0.0.1）直接报 127.0.0.1，
-    避免上报路由出口 IP 主控调不通。"""
+    避免上报路由出口 IP 主控调不通。
+
+    单机 docker dev 形态下宿主→容器只能走 published port，主控调用必须 127.0.0.1:<published>
+    才能命中。这种场景显式设 FALCON_AGENT_REPORT_IP=127.0.0.1 + compose ports 发布 9100:9100。
+    """
+    override = _env('FALCON_AGENT_REPORT_IP')
+    if override:
+        return override
     if 'localhost' in MASTER_URL or '127.0.0.1' in MASTER_URL:
         return '127.0.0.1'
     try:

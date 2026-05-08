@@ -30,7 +30,7 @@ RUN wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMET
 # 装 JMeter 插件（与主控 setup_jmeter 命令对齐）
 RUN cd ${JMETER_HOME}/lib/ext && \
     wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-casutg/2.10/jmeter-plugins-casutg-2.10.jar && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/cmn-jmeter/0.6/cmn-jmeter-0.6.jar
+    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
 
 # 安装 agent 依赖
 COPY agent/requirements.txt /tmp/agent-requirements.txt
