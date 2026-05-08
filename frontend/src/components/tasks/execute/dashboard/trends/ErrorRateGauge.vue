@@ -6,6 +6,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { RunMetricsSeries, SeriesPoint } from '@/types/task'
+import { colorForErrorRate } from './semanticColors'
 
 use([LineChart, GridComponent, TitleComponent, TooltipComponent, CanvasRenderer])
 
@@ -48,16 +49,10 @@ const cumulativePct = computed(() => {
   return (t.total_errors / t.total_count) * 100
 })
 
-function colorFor(pct: number): string {
-  if (pct < 0.5) return '#10b981'
-  if (pct < 5) return '#f59e0b'
-  return '#ef4444'
-}
-
 const themedColor = computed(() => {
   const pct = realtimePct.value
   if (pct === null) return props.isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.4)'
-  return colorFor(pct)
+  return colorForErrorRate(pct)
 })
 
 // sparkline 数据：取 series.error_rate 最后 60 个点（每秒瞬时错误率，0-1 比率 → ×100 转 %）

@@ -9,6 +9,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 import type { SeriesPoint } from '@/types/task'
 import { buildSeriesOption, CONNECT_GROUP, statsOf } from './chartFactory'
+import { SEMANTIC } from './semanticColors'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -25,7 +26,7 @@ const option = computed(() =>
       {
         name: '错误数',
         data: props.data,
-        color: '#ef4444',
+        color: SEMANTIC.errors,
         lineWidth: 1.6,
         area: true,
         formatter: (v: number) => `${Math.round(v)}`,

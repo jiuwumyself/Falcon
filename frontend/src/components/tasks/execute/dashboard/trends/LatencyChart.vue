@@ -13,6 +13,7 @@ import {
   buildSeriesOption, CONNECT_GROUP, statsOf, type SeriesSpec,
 } from './chartFactory'
 import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
+import { LATENCY_BREAKDOWN, SEMANTIC } from './semanticColors'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -87,9 +88,9 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
   if (mode.value === 'all-percentiles') {
     if (!props.overall) return []
     return [
-      { name: 'P50', data: props.overall.p50_ms, color: '#10b981', lineWidth: 2, area: true },
-      { name: 'P95', data: props.overall.p95_ms, color: '#f59e0b', lineWidth: 2 },
-      { name: 'P99', data: props.overall.p99_ms, color: '#ef4444', lineWidth: 2 },
+      { name: 'P50', data: props.overall.p50_ms, color: SEMANTIC.success, lineWidth: 2, area: true },
+      { name: 'P95', data: props.overall.p95_ms, color: SEMANTIC.latency, lineWidth: 2 },
+      { name: 'P99', data: props.overall.p99_ms, color: SEMANTIC.errors, lineWidth: 2 },
     ]
   }
   if (mode.value === 'breakdown') {
@@ -98,9 +99,9 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
     // 三段堆叠面积 = Connect + Server + Receive；总高 = elapsed
     // 颜色对应常见瓶颈源：网络（蓝）/ 服务端（红）/ 数据传输（黄）
     return [
-      { name: 'Connect (网络握手)', data: b.connect_ms, color: '#3b82f6', lineWidth: 0, area: true, stack: 'lat' },
-      { name: 'Server (服务端处理)', data: b.server_ms, color: '#ef4444', lineWidth: 0, area: true, stack: 'lat' },
-      { name: 'Receive (数据接收)', data: b.receive_ms, color: '#f59e0b', lineWidth: 0, area: true, stack: 'lat' },
+      { name: 'Connect (网络握手)', data: b.connect_ms, color: LATENCY_BREAKDOWN.connect, lineWidth: 0, area: true, stack: 'lat' },
+      { name: 'Server (服务端处理)', data: b.server_ms, color: LATENCY_BREAKDOWN.server, lineWidth: 0, area: true, stack: 'lat' },
+      { name: 'Receive (数据接收)', data: b.receive_ms, color: LATENCY_BREAKDOWN.receive, lineWidth: 0, area: true, stack: 'lat' },
     ]
   }
   // tx-p95 模式

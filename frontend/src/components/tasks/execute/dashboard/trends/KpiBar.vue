@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { RunMetricsSeries, RunMetricsTotals, SeriesPoint } from '@/types/task'
 import { fmtBytesTotal, fmtInt } from './chartFactory'
+import { colorForErrorMetric, SEMANTIC } from './semanticColors'
 
 // 双行 KPI：上行"当前"（看一眼现在怎么样）/ 下行"累计"（整 run 沉淀指标）
 const props = defineProps<{
@@ -45,8 +46,7 @@ const primary = computed(() => props.isDark ? 'rgba(255,255,255,0.92)' : 'rgba(0
 // 颜色策略：异常态（> 0）才染红，正常态用主色
 // 让红色专属异常 —— 红色一出现立刻劈开视觉，比"绿/红双饱和"更易感知
 function errColor(v: number | null, threshold = 0): string {
-  if (v === null) return primary.value
-  return v > threshold ? '#ef4444' : primary.value
+  return colorForErrorMetric(v, primary.value, threshold)
 }
 
 const currentRow = computed(() => {
@@ -71,7 +71,7 @@ const cumulativeRow = computed(() => {
   const sent = t?.total_bytes_sent ?? 0
   return [
     { label: '累计 · 总请求数', value: fmtInt(totalCount), color: primary.value },
-    { label: '累计 · 失败数', value: fmtInt(totalErrors), color: totalErrors > 0 ? '#ef4444' : primary.value },
+    { label: '累计 · 失败数', value: fmtInt(totalErrors), color: totalErrors > 0 ? SEMANTIC.errors : primary.value },
     { label: '累计 · 接收字节', value: fmtBytesTotal(recv), color: primary.value },
     { label: '累计 · 发送字节', value: fmtBytesTotal(sent), color: primary.value },
   ]
