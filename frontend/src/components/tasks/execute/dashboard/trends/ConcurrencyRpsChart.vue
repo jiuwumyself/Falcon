@@ -37,15 +37,23 @@ const points = computed<ScatterPoint[]>(() => {
   return out
 })
 
+// 散点图实际渲染用的稳态点（剔除 ramp-up 阶段的 VU<80% 目标 的样本）
+// 否则恒定 VU 场景会出现"X=2 那个孤零零的 ramp 期点"
+const steadyPoints = computed(() => steadyStatePoints(points.value))
+
 const tsRange = computed(() => {
-  const pts = points.value
+  const pts = steadyPoints.value
   if (!pts.length) return [0, 0]
   return [pts[0].ts, pts[pts.length - 1].ts]
 })
 
 const option = computed(() => {
-  const pts = points.value
-  const data = pts.map((p) => [p.vu, p.rps, p.ts])
+  const pts = steadyPoints.value
+  // 恒定并发场景（稳定性 / soak）：X 轴改时间，让点散开成"RPS 时序气泡图"
+  // 否则所有点挤在 X=VU 一条竖线，浪费 80% 水平空间
+  const flat = summary.value?.isFlatVu ?? false
+  // 压力梯度模式：[VU, RPS, ts]；恒定并发模式：[ts, RPS, ts]
+  const data = pts.map((p) => flat ? [p.ts, p.rps, p.ts] : [p.vu, p.rps, p.ts])
   const [tsMin, tsMax] = tsRange.value
   const axisColor = props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'
   const gridLine = props.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'
@@ -54,11 +62,16 @@ const option = computed(() => {
     tooltip: {
       trigger: 'item' as const,
       formatter: (p: any) => {
-        const [vu, rps, ts] = p.value
+        const [, rps, ts] = p.value
         const date = new Date(ts)
         const hh = String(date.getHours()).padStart(2, '0')
         const mm = String(date.getMinutes()).padStart(2, '0')
         const ss = String(date.getSeconds()).padStart(2, '0')
+        // 恒定并发模式不重复 VU；压力梯度模式显示 VU
+        if (flat) {
+          return `${hh}:${mm}:${ss}<br/>RPS ${rps.toFixed(1)} req/s`
+        }
+        const vu = p.value[0]
         return `${hh}:${mm}:${ss}<br/>并发 ${vu} VU<br/>吞吐 ${rps.toFixed(1)} req/s`
       },
       backgroundColor: props.isDark ? 'rgba(20,20,22,0.92)' : 'rgba(255,255,255,0.95)',
@@ -76,16 +89,27 @@ const option = computed(() => {
           : ['rgba(168,85,247,0.20)', 'rgba(124,58,237,0.95)'],
       },
     },
-    xAxis: {
-      type: 'value' as const,
-      name: '并发 VU',
-      nameLocation: 'middle' as const,
-      nameGap: 24,
-      nameTextStyle: { color: axisColor, fontSize: 10 },
-      axisLine: { lineStyle: { color: axisColor } },
-      axisLabel: { color: axisColor, fontSize: 10 },
-      splitLine: { lineStyle: { color: gridLine } },
-    },
+    xAxis: flat
+      ? {
+          type: 'time' as const,
+          name: '时间',
+          nameLocation: 'middle' as const,
+          nameGap: 24,
+          nameTextStyle: { color: axisColor, fontSize: 10 },
+          axisLine: { lineStyle: { color: axisColor } },
+          axisLabel: { color: axisColor, fontSize: 10 },
+          splitLine: { show: false },
+        }
+      : {
+          type: 'value' as const,
+          name: '并发 VU',
+          nameLocation: 'middle' as const,
+          nameGap: 24,
+          nameTextStyle: { color: axisColor, fontSize: 10 },
+          axisLine: { lineStyle: { color: axisColor } },
+          axisLabel: { color: axisColor, fontSize: 10 },
+          splitLine: { lineStyle: { color: gridLine } },
+        },
     yAxis: {
       type: 'value' as const,
       name: 'RPS',
