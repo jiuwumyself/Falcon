@@ -1384,7 +1384,7 @@ def _inject_backend_listener(
         # 自定义 tags：JMeter 把 TAG_<key>=<val> 自动加到每条数据点
         ('TAG_run_id', run_id),
         ('TAG_task_id', str(task_id)),
-        ('percentiles', '90;95;99'),
+        ('percentiles', '50;90;95;99'),
     ]
     # v1.2 多机调度：scheduler 通过 extra_tags 加 host=pod_name 等
     if extra_tags:

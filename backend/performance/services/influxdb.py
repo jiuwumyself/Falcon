@@ -86,9 +86,23 @@ def ping() -> bool:
 def _empty_series() -> dict:
     return {
         'rps': [],
+        'p50_ms': [],
+        'p95_ms': [],
         'p99_ms': [],
         'error_rate': [],
+        'error_count': [],
+        'bytes_recv': [],
+        'bytes_sent': [],
         'active_users': [],
+    }
+
+
+def _empty_totals() -> dict:
+    return {
+        'total_count': 0,
+        'total_errors': 0,
+        'total_bytes_recv': 0,
+        'total_bytes_sent': 0,
     }
 
 
@@ -97,22 +111,32 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     返回结构（全空时各 series 为空 list，表示 InfluxDB 无该 run 数据）：
 
     {
-      'overall': {'rps': [[ts_ms, val], ...], 'p99_ms': [...], 'error_rate': [...], 'active_users': [...]},
-      'by_tg': {'<threadName>': {同上四组}, ...},
+      'overall': {'rps': [[ts_ms, val], ...], 'p50_ms': [...], 'p95_ms': [...],
+                  'p99_ms': [...], 'error_rate': [...], 'error_count': [...],
+                  'bytes_recv': [...], 'bytes_sent': [...], 'active_users': [...]},
+      'by_tg': {'<threadName>': {同上 9 组}, ...},
+      'totals': {'total_count', 'total_errors', 'total_bytes_recv', 'total_bytes_sent'},  # 累计 KPI（不带 since 过滤）
       'last_ts': '2026-04-30T12:00:00Z'  # 前端下次轮询的 since
     }
 
     InfluxDB 测量结构（JMeter Backend Listener 默认）：
       measurement = 'jmeter'
-        fields: count, hit, error, avg, min, max, pct90.0, pct95.0, pct99.0
+        fields: count, hit, error, avg, min, max, pct50.0, pct90.0, pct95.0, pct99.0,
+                rb (receivedBytes), sb (sentBytes), minAT/meanAT/maxAT
         tags: application, statut(all/ok/ko), transaction, run_id, task_id
 
     我们查 statut='ok' + 'ko' 算 RPS / error_rate；查 transaction='all' 拿总分位
     数；分 TG 时按 transaction（实际为 threadName/sample label）切片。
+    bytes 走 statut='all' 拿（每条 sample 都写 rb/sb，all 行已聚合）。
     """
     client = get_client()
     if client is None:
-        return {'overall': _empty_series(), 'by_tg': {}, 'last_ts': ''}
+        return {
+            'overall': _empty_series(),
+            'by_tg': {},
+            'totals': _empty_totals(),
+            'last_ts': '',
+        }
 
     where_time = ''
     if since is not None:
@@ -121,32 +145,49 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
 
     safe_run = run_id.replace("'", "''")
 
-    # 总览：按 transaction='all' 拿全局分位 + 按 statut 切片算 rps/error
+    # 总览：按 transaction='all' 拿全局分位 + 按 statut 切片算 rps/error/bytes
     overall_q = (
-        "SELECT mean(\"count\") AS rps, mean(\"pct99.0\") AS p99_ms, "
+        "SELECT mean(\"count\") AS rps, "
+        "mean(\"pct50.0\") AS p50_ms, "
+        "mean(\"pct95.0\") AS p95_ms, "
+        "mean(\"pct99.0\") AS p99_ms, "
         "mean(\"avg\") AS avg_ms "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s) fill(none)"
     )
-    err_q = (
-        "SELECT sum(\"count\") AS errors "
+    bytes_q = (
+        "SELECT mean(\"rb\") AS rb, mean(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        f"AND \"transaction\"='all' AND \"statut\"='ko'{where_time} "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s) fill(none)"
+    )
+    # 失败数走 CUMULATED 行（transaction='all' AND statut='all'）的 "countError"
+    # 字段。JMeter 5.6.3 InfluxdbBackendListenerClient.addCumulatedMetrics 每秒
+    # 写这条行，包含 count=total / countError=failures。
+    # 不要用 statut='ko' 行的 count：addMetric 在 count<=0 时直接跳过，全部成功
+    # 的 run / 窗口拿不到任何点。
+    err_q = (
+        "SELECT sum(\"countError\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s) fill(0)"
     )
+    # statut='all' 行的 count 字段 = 该窗口总请求数（含失败）。
+    # 不能用 statut!='all'：InfluxDB 1.x 对 tag 的 != 比较在某些索引模式下不可靠。
     total_q = (
         "SELECT sum(\"count\") AS total "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        f"AND \"transaction\"='all' AND \"statut\"!='all'{where_time} "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s) fill(0)"
     )
-    # 活跃用户数 (JMeter Backend Listener 输出 measurement=virtualUsers，但
-    # 不同版本 measurement 名可能不同；用 events 兜底)
+    # 活跃用户数：JMeter Backend Listener 把 minAT/meanAT/maxAT 写在
+    # transaction='internal' 行（不是 sampler 维度），且这些行 statut 字段为空。
+    # 不能用 statut='all' 过滤，要按 transaction='internal' 拿。
     users_q = (
         "SELECT mean(\"maxAT\") AS active_users "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        f"AND \"statut\"='all'{where_time} "
+        f"AND \"transaction\"='internal'{where_time} "
         "GROUP BY time(1s) fill(none)"
     )
 
@@ -154,19 +195,35 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     last_ts = ''
 
     try:
-        # 总览查询
+        # 总览查询（含 P50/P95/P99）
         for r in client.query(overall_q).get_points():
             ts = _ts_to_ms(r['time'])
             if r.get('rps') is not None:
                 overall['rps'].append([ts, float(r['rps'])])
+            if r.get('p50_ms') is not None:
+                overall['p50_ms'].append([ts, float(r['p50_ms'])])
+            if r.get('p95_ms') is not None:
+                overall['p95_ms'].append([ts, float(r['p95_ms'])])
             if r.get('p99_ms') is not None:
                 overall['p99_ms'].append([ts, float(r['p99_ms'])])
             last_ts = r['time']
+
+        # 字节速率
+        for r in client.query(bytes_q).get_points():
+            ts = _ts_to_ms(r['time'])
+            if r.get('rb') is not None:
+                overall['bytes_recv'].append([ts, float(r['rb'])])
+            if r.get('sb') is not None:
+                overall['bytes_sent'].append([ts, float(r['sb'])])
 
         errors_by_ts = {
             _ts_to_ms(r['time']): float(r.get('errors') or 0)
             for r in client.query(err_q).get_points()
         }
+        # 错误时间序列直接出（前端总错误曲线用）
+        for ts, val in sorted(errors_by_ts.items()):
+            overall['error_count'].append([ts, val])
+
         for r in client.query(total_q).get_points():
             ts = _ts_to_ms(r['time'])
             total = float(r.get('total') or 0)
@@ -183,26 +240,127 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     # 按 transaction（=sample label / TG 分组）切片
     by_tg: dict[str, dict] = {}
     by_tg_q = (
-        "SELECT mean(\"count\") AS rps, mean(\"pct99.0\") AS p99_ms "
+        "SELECT mean(\"count\") AS rps, "
+        "mean(\"pct50.0\") AS p50_ms, "
+        "mean(\"pct95.0\") AS p95_ms, "
+        "mean(\"pct99.0\") AS p99_ms, "
+        "mean(\"rb\") AS rb, mean(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        f"AND \"transaction\"!='all' AND \"statut\"='all'{where_time} "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s), \"transaction\" fill(none)"
     )
     try:
         result = client.query(by_tg_q)
-        for (measurement, tags), points in result.items():
+        for (_measurement, tags), points in result.items():
             tx = (tags or {}).get('transaction', 'unknown')
             series = by_tg.setdefault(tx, _empty_series())
             for r in points:
                 ts = _ts_to_ms(r['time'])
                 if r.get('rps') is not None:
                     series['rps'].append([ts, float(r['rps'])])
+                if r.get('p50_ms') is not None:
+                    series['p50_ms'].append([ts, float(r['p50_ms'])])
+                if r.get('p95_ms') is not None:
+                    series['p95_ms'].append([ts, float(r['p95_ms'])])
                 if r.get('p99_ms') is not None:
                     series['p99_ms'].append([ts, float(r['p99_ms'])])
+                if r.get('rb') is not None:
+                    series['bytes_recv'].append([ts, float(r['rb'])])
+                if r.get('sb') is not None:
+                    series['bytes_sent'].append([ts, float(r['sb'])])
     except Exception:  # noqa: BLE001
         pass
 
-    return {'overall': overall, 'by_tg': by_tg, 'last_ts': last_ts}
+    # by_tg 的错误数：用单接口 statut='ko' 行的 count 字段（addMetric 写入；
+    # 该窗口 count<=0 时不写，没失败的接口完全不出现在结果里——前端 fill(0) 也
+    # 补不上，但前端 RunMetricsSeries 默认空数组，等价于 0 错误，可接受）。
+    by_tg_err_q = (
+        "SELECT sum(\"count\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ko'{where_time} "
+        "GROUP BY time(1s), \"transaction\" fill(0)"
+    )
+    by_tg_total_q = (
+        "SELECT sum(\"count\") AS total "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s), \"transaction\" fill(0)"
+    )
+    try:
+        # tx -> ts -> errors
+        err_map: dict[str, dict[int, float]] = {}
+        for (_meas, tags), points in client.query(by_tg_err_q).items():
+            tx = (tags or {}).get('transaction', 'unknown')
+            slot = err_map.setdefault(tx, {})
+            for r in points:
+                slot[_ts_to_ms(r['time'])] = float(r.get('errors') or 0)
+        for (_meas, tags), points in client.query(by_tg_total_q).items():
+            tx = (tags or {}).get('transaction', 'unknown')
+            series = by_tg.setdefault(tx, _empty_series())
+            tx_errs = err_map.get(tx, {})
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                total = float(r.get('total') or 0)
+                errs = tx_errs.get(ts, 0)
+                rate = (errs / total * 100) if total > 0 else 0
+                series['error_rate'].append([ts, rate])
+                series['error_count'].append([ts, errs])
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 累计 KPI（永远全量算，不带 since 过滤）
+    totals = _query_totals(client, safe_run)
+
+    return {
+        'overall': overall,
+        'by_tg': by_tg,
+        'totals': totals,
+        'last_ts': last_ts,
+    }
+
+
+def _query_totals(client, safe_run: str) -> dict:
+    """全 run 累计 KPI：总请求数 / 失败数 / 接收字节 / 发送字节。"""
+    totals = _empty_totals()
+    # JMeter v1 BackendListener 三种 statut 行的 count 字段含义不同：
+    #   statut='all' → 该窗口总样本数
+    #   statut='ok'  → 该窗口成功数
+    #   statut='ko'  → 该窗口失败数
+    # 用 statut='all' 直接拿总数；不能用 statut!='all'，InfluxDB 1.x 对 tag !=
+    # 在某些索引模式下不可靠（用户报告过"总请求数没数据"就是踩这个）。
+    total_q = (
+        "SELECT sum(\"count\") AS total "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        "AND \"transaction\"='all' AND \"statut\"='all'"
+    )
+    err_q = (
+        "SELECT sum(\"countError\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        "AND \"transaction\"='all' AND \"statut\"='all'"
+    )
+    bytes_q = (
+        "SELECT sum(\"rb\") AS rb, sum(\"sb\") AS sb "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        "AND \"transaction\"='all' AND \"statut\"='all'"
+    )
+    try:
+        for r in client.query(total_q).get_points():
+            if r.get('total') is not None:
+                totals['total_count'] = int(r['total'])
+        for r in client.query(err_q).get_points():
+            if r.get('errors') is not None:
+                totals['total_errors'] = int(r['errors'])
+        for r in client.query(bytes_q).get_points():
+            if r.get('rb') is not None:
+                totals['total_bytes_recv'] = int(r['rb'])
+            if r.get('sb') is not None:
+                totals['total_bytes_sent'] = int(r['sb'])
+    except Exception:  # noqa: BLE001
+        pass
+    return totals
 
 
 def query_run_summary(run_id: str) -> dict:
@@ -220,12 +378,7 @@ def query_run_summary(run_id: str) -> dict:
         "AND \"transaction\"='all' AND \"statut\"='all'"
     )
     err_q = (
-        "SELECT sum(\"count\") AS errors "
-        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        "AND \"transaction\"='all' AND \"statut\"='ko'"
-    )
-    elapsed_q = (
-        "SELECT (last(time) - first(time)) AS span "
+        "SELECT sum(\"countError\") AS errors "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         "AND \"transaction\"='all' AND \"statut\"='all'"
     )
@@ -250,7 +403,7 @@ def query_run_summary(run_id: str) -> dict:
         rps_q = (
             "SELECT sum(\"count\") AS rps "
             f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-            "AND \"transaction\"='all' AND \"statut\"!='all' "
+            "AND \"transaction\"='all' AND \"statut\"='all' "
             "GROUP BY time(1s) fill(0)"
         )
         rps_values = [

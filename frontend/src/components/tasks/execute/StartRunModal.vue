@@ -32,7 +32,9 @@ const totalCapacity = computed(() =>
 )
 const recommended = computed(() => Math.max(1, Math.ceil(props.vusers / 100)))
 const capacityOk = computed(() => totalCapacity.value >= props.vusers)
-const canConfirm = computed(() => selected.value.size > 0 && !loading.value && !scaling.value)
+const canConfirm = computed(() => !loading.value && !scaling.value)
+// 0 选 = 主控本机直跑（LOCAL_FALLBACK），用于开发态 / 没拉 agent 容器时
+const localOnly = computed(() => selected.value.size === 0)
 
 async function refresh() {
   loading.value = true
@@ -159,9 +161,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
       <p class="text-[11px] mb-2"
          :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }">
         并发 <span :style="{ color: isDark ? '#fff' : '#1a1a2e' }">{{ vusers }}</span>
-        · 建议 ≥{{ recommended }} 台 · 已选容量
-        <span :style="{ color: capacityOk ? '#10b981' : '#f59e0b' }">{{ totalCapacity }}</span>
-        / {{ vusers }}
+        <template v-if="!localOnly">
+          · 建议 ≥{{ recommended }} 台 · 已选容量
+          <span :style="{ color: capacityOk ? '#10b981' : '#f59e0b' }">{{ totalCapacity }}</span>
+          / {{ vusers }}
+        </template>
+        <template v-else>
+          · <span :style="{ color: '#3b82f6' }">本机直跑</span>（未选 agent，主控本机 spawn JMeter）
+        </template>
       </p>
 
       <p v-if="error" class="text-[11px] text-red-500 flex items-center gap-1 mb-2">
@@ -268,12 +275,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         >取消</button>
         <button
           class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-40"
-          :style="{ background: '#10b981', color: '#fff' }"
+          :style="{ background: localOnly ? '#3b82f6' : '#10b981', color: '#fff' }"
           :disabled="!canConfirm"
           @click="confirm"
         >
           <Play :size="11" />
-          确认并开始
+          {{ localOnly ? '本机直跑' : '确认并开始' }}
         </button>
       </div>
     </div>

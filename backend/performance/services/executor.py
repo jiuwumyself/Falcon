@@ -317,9 +317,17 @@ class RunExecutor:
 
     def _select_load_generators(self) -> list:
         """从 TaskRun.load_generators M2M 拿用户 Step 3 选的 agent 集合。
-        空 → 走本地兜底（如果 LOCAL_FALLBACK 关了，pre_check 阶段已经拒绝）。"""
+        要求：status=idle **且** 心跳新鲜（≤ 3 min）。心跳过老的 idle 是
+        release_idle_agents 还没跑过的"假活"行，POST 给它会 connection refused。
+        全部失效 → 返回空 → 走本地兜底（如果 LOCAL_FALLBACK 关了，pre_check 已经拒绝）。"""
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone as _tz  # noqa: PLC0415
         from ..models import LoadGeneratorStatus  # noqa: PLC0415
-        lgs = list(self.run.load_generators.filter(status=LoadGeneratorStatus.IDLE))
+        cutoff = _tz.now() - timedelta(minutes=3)
+        lgs = list(
+            self.run.load_generators
+                .filter(status=LoadGeneratorStatus.IDLE, last_heartbeat_at__gte=cutoff)
+        )
         return lgs
 
     def _agent_headers(self) -> dict:
@@ -350,7 +358,11 @@ class RunExecutor:
                 run_id=self.run.run_id,
                 shard=shard,
                 total_vusers=self.run.virtual_users,
-                influxdb_url=getattr(settings, 'INFLUXDB_URL', ''),
+                # 分布式：jmx 在 agent 容器里跑，烤进容器可达的 InfluxDB URL
+                # （主控自己读 InfluxDB 仍走 settings.INFLUXDB_URL）
+                influxdb_url=getattr(
+                    settings, 'AGENT_INFLUXDB_URL', getattr(settings, 'INFLUXDB_URL', ''),
+                ),
                 influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
             )
             files = [('jmx_file', ('run.jmx', shard_jmx, 'application/xml'))]
@@ -514,6 +526,14 @@ class RunExecutor:
             f'-Jjmeterengine.nongui.port={stop_port}',
             '-Jjmeterengine.stopfail.system.exit=false',
             '-Jjmeterengine.remote.system.exit=false',
+            # 显式开启 JTL 关键字段保存，避免依赖 jmeter.properties 默认值（不同版本/环境会漂移）。
+            # 影响 ErrorMessageTable / ErrorDetailList 能否拿到 message：
+            #   response_message: HTTP responseMessage（"OK" / "Gateway Time-out" 等）
+            #   assertion_results_failure_message: 断言失败原因（200 + success=false 时唯一信息）
+            #   url: 错误样例下钻看请求 URL
+            '-Jjmeter.save.saveservice.response_message=true',
+            '-Jjmeter.save.saveservice.assertion_results_failure_message=true',
+            '-Jjmeter.save.saveservice.url=true',
         ]
 
         # JMeter 需要 Java 17+。光靠 PATH 不够：JMeter 的 bin/jmeter shell
@@ -641,9 +661,11 @@ class RunExecutor:
             status_update['status'] = RunStatus.SUCCESS
         else:
             status_update['status'] = RunStatus.FAILED
-            status_update['error_message'] = (
-                f'JMeter 子进程异常退出（exit={exit_code}），详情见 jmeter.log'
-            )
+            # 保留具体错误（_run_distributed 等子流程已写入），仅在为空时填通用信息
+            if not run.error_message:
+                status_update['error_message'] = (
+                    f'JMeter 子进程异常退出（exit={exit_code}），详情见 jmeter.log'
+                )
 
         TaskRun.objects.filter(pk=run.pk).update(**status_update)
 

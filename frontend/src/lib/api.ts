@@ -1,5 +1,5 @@
 import type {
-  Environment, ErrorSamplesQuery, ErrorSamplesResponse,
+  Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
   LoadGenerator, Paginated, RunMetrics, SamplerStat, Task, TaskRun,
 } from '@/types/task'
 
@@ -150,6 +150,16 @@ export const runsApi = {
     if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
     const qs = params.toString() ? `?${params.toString()}` : ''
     return api<ErrorSamplesResponse>(`/runs/${runId}/error-samples/${qs}`)
+  },
+  // 服端聚合：按 (code, label) 分组，count 是真实总数（不受 limit 影响）
+  // ErrorMessageTable 用 —— sum 永远 = 真实总错误数
+  errorAggregates: (runId: string, q: Omit<ErrorSamplesQuery, 'aggregate'> = {}): Promise<ErrorAggregatesResponse> => {
+    const params = new URLSearchParams()
+    params.set('aggregate', 'true')
+    if (q.limit != null) params.set('limit', String(q.limit))
+    if (q.sampler) params.set('sampler', q.sampler)
+    if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
+    return api<ErrorAggregatesResponse>(`/runs/${runId}/error-samples/?${params.toString()}`)
   },
 }
 

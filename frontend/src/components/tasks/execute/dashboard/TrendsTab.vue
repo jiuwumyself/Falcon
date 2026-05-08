@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import RunMetricsCharts from '../RunMetricsCharts.vue'
-import type { RunMetrics } from '@/types/task'
+import TrendsLayout from './trends/TrendsLayout.vue'
+import type { RunMetrics, TaskRun } from '@/types/task'
 
 defineProps<{
+  run: TaskRun | null
   metrics: RunMetrics | null
   isDark: boolean
 }>()
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto">
-    <RunMetricsCharts :metrics="metrics" :is-dark="isDark" />
-  </div>
+  <TrendsLayout :run="run" :metrics="metrics" :is-dark="isDark" />
 </template>

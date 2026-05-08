@@ -181,6 +181,19 @@ onUnmounted(stopPolling)
       @select="onSelectRun"
     />
 
+    <!-- 终态失败原因（run.error_message 在终态非空时显示，比 jmeter.log 更直白） -->
+    <div
+      v-if="selectedRun && (['failed','timeout','pre_check_failed'].includes(selectedRun.status)) && selectedRun.error_message"
+      class="rounded-lg px-3 py-2 text-[12px] flex-shrink-0"
+      :style="{
+        background: 'rgba(239,68,68,0.08)',
+        border: '1px solid rgba(239,68,68,0.22)',
+        color: '#ef4444',
+      }"
+    >
+      <span class="font-medium">失败原因：</span>{{ selectedRun.error_message }}
+    </div>
+
     <!-- 数据 dashboard：占满剩余高度，内部 tab 切换数据面板 -->
     <div class="flex-1 min-h-0">
       <RunDashboard

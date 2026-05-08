@@ -234,14 +234,27 @@ export type SeriesPoint = [number, number]   // [ms_epoch, value]
 
 export interface RunMetricsSeries {
   rps: SeriesPoint[]
+  p50_ms: SeriesPoint[]
+  p95_ms: SeriesPoint[]
   p99_ms: SeriesPoint[]
   error_rate: SeriesPoint[]
+  error_count: SeriesPoint[]   // 每秒失败数（总错误曲线 + by_tg 错误明细用）
+  bytes_recv: SeriesPoint[]    // 每秒接收字节
+  bytes_sent: SeriesPoint[]    // 每秒发送字节
   active_users: SeriesPoint[]
+}
+
+export interface RunMetricsTotals {
+  total_count: number          // 整 run 累计请求数（ok + ko）
+  total_errors: number         // 整 run 累计失败数
+  total_bytes_recv: number     // 整 run 累计接收字节
+  total_bytes_sent: number     // 整 run 累计发送字节
 }
 
 export interface RunMetrics {
   overall: RunMetricsSeries
   by_tg: Record<string, RunMetricsSeries>   // key = JMeter sample label / TG name
+  totals: RunMetricsTotals                  // 累计 KPI（KpiBar 用）
   last_ts: string                           // 下次轮询的 since 参数
   run: TaskRun                              // 后端附带最新 run 状态
 }
@@ -282,6 +295,7 @@ export interface ErrorSample {
   response_code: string   // '500' / 'Non HTTP response code: ...' / 'Assertion failed' 等
   response_message: string
   failure_message: string // 优先来源 = assertion msg
+  url: string             // 完整请求 URL，需 -Jjmeter.save.saveservice.url=true
   elapsed_ms: number
   response_body: string   // 已截断 ≤ 1 KB
 }
@@ -293,10 +307,27 @@ export interface ErrorSamplesResponse {
   total: number
 }
 
+// aggregate=true 模式返回：按 (code, label) 服端聚合，count 是真实总数（不受 limit 影响）
+// 用于 ErrorMessageTable —— sum 永远 = 真实总错误数
+export interface ErrorAggregateRow {
+  response_code: string
+  label: string
+  count: number
+  sample_message: string         // 该组首次出现的 responseMessage
+  sample_failure_message: string // 该组首次出现的 failureMessage
+  sample_url: string             // 该组首次出现的 URL
+}
+
+export interface ErrorAggregatesResponse {
+  aggregates: ErrorAggregateRow[]
+  total: number
+}
+
 export interface ErrorSamplesQuery {
   limit?: number
   sampler?: string
   codeBucket?: ErrorCodeBucket
+  aggregate?: boolean   // true → 走 ErrorAggregatesResponse 形状
 }
 
 export interface JmxComponent {

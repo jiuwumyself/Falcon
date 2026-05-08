@@ -686,12 +686,17 @@ class TaskViewSet(viewsets.ModelViewSet):
             )
         selected_lgs = []
         if lg_ids:
+            from datetime import timedelta as _td
+            from django.utils import timezone as _tz
+            cutoff = _tz.now() - _td(minutes=3)
             selected_lgs = list(LoadGenerator.objects.filter(
-                id__in=lg_ids, status=LoadGeneratorStatus.IDLE,
+                id__in=lg_ids,
+                status=LoadGeneratorStatus.IDLE,
+                last_heartbeat_at__gte=cutoff,
             ))
             if len(selected_lgs) != len(lg_ids):
                 return Response(
-                    {'detail': '部分压力源不存在或非 idle 状态，请刷新列表'},
+                    {'detail': '部分压力源不存在 / 非 idle / 心跳超时（≥3min），请刷新列表'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -960,12 +965,19 @@ class RunViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=['get'], url_path='error-samples')
     def error_samples(self, request, run_id=None):
-        """流式扫 jtl 找 success=false 的行；按 sampler / code_bucket 过滤，limit 截断。"""
+        """流式扫 jtl 找 success=false 的行；按 sampler / code_bucket 过滤。
+
+        两种返回模式：
+        - 默认（aggregate=false）：返 samples（被 limit 截，最多 500）+ total（真实总数）
+        - aggregate=true：按 (code, label) 服端聚合，每组带真实 count + 一条代表 message
+          → 用于 ErrorMessageTable，sum 永远 = 真实总错误数（不被 limit 影响）
+        """
         import csv as _csv
         run = self.get_object()
         jtl = get_runs_dir() / run.run_id / 'results.jtl'
+        aggregate = (request.query_params.get('aggregate') or '').lower() in ('1', 'true', 'yes')
         if not jtl.exists() or jtl.stat().st_size == 0:
-            return Response({'samples': [], 'total': 0})
+            return Response({'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0})
 
         try:
             limit = max(1, min(int(request.query_params.get('limit', 50)), 500))
@@ -985,7 +997,8 @@ class RunViewSet(viewsets.GenericViewSet):
                 return '4xx'
             return 'other'
 
-        samples = []
+        samples: list[dict] = []
+        agg: dict[tuple[str, str], dict] = {}
         total = 0
         try:
             with jtl.open('r', encoding='utf-8', errors='replace') as f:
@@ -999,11 +1012,26 @@ class RunViewSet(viewsets.GenericViewSet):
                     code = row.get('responseCode') or ''
                     msg = row.get('responseMessage') or ''
                     fmsg = row.get('failureMessage') or ''
+                    url = row.get('URL') or ''  # 需要 -Jjmeter.save.saveservice.url=true（新版 executor 默认开）
                     bucket = bucket_of(code, fmsg or msg)
                     if code_bucket != 'all' and bucket != code_bucket:
                         continue
                     total += 1
-                    if len(samples) < limit:
+                    if aggregate:
+                        key = (code, label)
+                        existing = agg.get(key)
+                        if existing is None:
+                            agg[key] = {
+                                'response_code': code,
+                                'label': label,
+                                'count': 1,
+                                'sample_message': msg,
+                                'sample_failure_message': fmsg,
+                                'sample_url': url,
+                            }
+                        else:
+                            existing['count'] += 1
+                    elif len(samples) < limit:
                         samples.append({
                             'timestamp': int(row.get('timeStamp') or 0),
                             'label': label,
@@ -1011,11 +1039,16 @@ class RunViewSet(viewsets.GenericViewSet):
                             'response_code': code,
                             'response_message': msg,
                             'failure_message': fmsg,
+                            'url': url,
                             'elapsed_ms': int(row.get('elapsed') or 0),
                             'response_body': '',  # 默认 CSV 不带 body；要真实 body 走 -Jjmeter.save.saveservice.response_data=true 的 XML JTL
                         })
         except OSError as e:
             return Response({'detail': f'read jtl: {e}'}, status=500)
+
+        if aggregate:
+            rows = sorted(agg.values(), key=lambda r: r['count'], reverse=True)[:limit]
+            return Response({'aggregates': rows, 'total': total})
         return Response({'samples': samples, 'total': total})
 
     @action(detail=True, methods=['get'], url_path='timeline')

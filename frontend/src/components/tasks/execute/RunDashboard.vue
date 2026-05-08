@@ -33,33 +33,13 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
 
 const active = ref<TabId>('trends')
 
-// 终态决定是否显示「完成态」KPI 数据
+// SamplersTab 用：终态时定格不再轮询
 const TERMINAL: TaskRun['status'][] = [
   'pre_check_failed', 'success', 'failed', 'timeout', 'cancelled',
 ]
 const isTerminal = computed(() =>
   !!props.run && (TERMINAL as string[]).includes(props.run.status),
 )
-
-function fmtNum(n: number, digits = 0): string {
-  if (n == null || Number.isNaN(n)) return '—'
-  if (n >= 10000) return `${(n / 1000).toFixed(1)}k`
-  return digits ? n.toFixed(digits) : Math.round(n).toString()
-}
-
-const kpis = computed(() => {
-  const r = props.run
-  return [
-    { label: '总请求', value: r ? fmtNum(r.total_requests) : '—', color: '#3b82f6' },
-    { label: '平均 RPS', value: r ? fmtNum(r.avg_rps, 1) : '—', color: '#10b981' },
-    { label: 'P99', value: r ? `${fmtNum(r.p99_ms)} ms` : '—', color: '#a78bfa' },
-    {
-      label: '错误率',
-      value: r ? `${(r.error_rate || 0).toFixed(2)}%` : '—',
-      color: (r?.error_rate || 0) >= 1 ? '#ef4444' : '#10b981',
-    },
-  ]
-})
 </script>
 
 <template>
@@ -68,23 +48,6 @@ const kpis = computed(() => {
          background: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
          border: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
        }">
-    <!-- 顶部 KPI 横条 -->
-    <div class="grid grid-cols-4 gap-2 p-3"
-         :style="{
-           borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
-         }">
-      <div v-for="k in kpis" :key="k.label" class="flex flex-col">
-        <span class="text-[10px] uppercase tracking-wider"
-              :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.5)' }">
-          {{ k.label }}
-        </span>
-        <span class="text-[20px] mt-0.5"
-              :style="{ color: k.color, fontVariantNumeric: 'tabular-nums' }">
-          {{ k.value }}
-        </span>
-      </div>
-    </div>
-
     <!-- Tabs 切换器 -->
     <div class="flex items-center gap-0 px-3 overflow-x-auto"
          :style="{
@@ -110,6 +73,7 @@ const kpis = computed(() => {
     <!-- 当前 tab 内容（占满剩余高度）-->
     <div class="flex-1 min-h-0">
       <TrendsTab v-if="active === 'trends'"
+                 :run="run"
                  :metrics="metrics" :is-dark="isDark" />
       <SamplersTab v-else-if="active === 'samplers'"
                    :run-id="run?.run_id || null"

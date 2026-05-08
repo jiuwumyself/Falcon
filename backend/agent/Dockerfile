@@ -5,17 +5,21 @@
 # 构建：cd backend && docker compose -f docker-compose.dev.yml build agent
 # 启动：docker compose -f docker-compose.dev.yml up -d --scale agent=2 agent
 
-FROM eclipse-temurin:17-jre-alpine
+# eclipse-temurin:17-jre 多架构（amd64 + arm64），Mac Apple Silicon 也能拉
+FROM eclipse-temurin:17-jre
 
 ARG JMETER_VERSION=5.6.3
 ENV JMETER_VERSION=${JMETER_VERSION}
 ENV JMETER_HOME=/opt/apache-jmeter-${JMETER_VERSION}
 ENV PATH="${JMETER_HOME}/bin:${PATH}"
 
-# Python + 工具：alpine 默认无 python3，单独装；curl/unzip 给安装阶段用
-RUN apk add --no-cache python3 py3-pip wget unzip bash tini && \
+# Python + 工具：debian-based，apt 装；--break-system-packages 只在容器里 OK
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
+        wget unzip bash tini ca-certificates && \
     python3 -m venv /opt/agent-venv && \
-    /opt/agent-venv/bin/pip install --no-cache-dir --upgrade pip
+    /opt/agent-venv/bin/pip install --no-cache-dir --upgrade pip && \
+    rm -rf /var/lib/apt/lists/*
 
 # 装 JMeter（无插件主体）
 RUN wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.zip -O /tmp/jmeter.zip && \
@@ -47,5 +51,5 @@ ENV FALCON_AGENT_PORT=9100 \
 EXPOSE 9100
 
 # tini 当 PID 1，正确转发 SIGTERM 给 uvicorn 让 cancel/优雅停机生效
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/opt/agent-venv/bin/python", "-m", "agent.main"]

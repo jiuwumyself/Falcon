@@ -155,6 +155,14 @@ INFLUXDB_USER = os.getenv('INFLUXDB_USER', '')
 INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', '')
 INFLUXDB_RETENTION = os.getenv('INFLUXDB_RETENTION', '30d')
 
+# v1.2 多机调度：JMX 烤进 BackendListener 的 InfluxDB URL 是 agent 容器从内访问宿主
+# InfluxDB 用的，跟主控读 InfluxDB 用的 INFLUXDB_URL 不同。Mac/Win Docker Desktop 自带
+# host.docker.internal；Linux 靠 docker-compose 的 extra_hosts: host-gateway 兜底。
+AGENT_INFLUXDB_URL = os.getenv(
+    'AGENT_INFLUXDB_URL',
+    'http://host.docker.internal:8086',
+)
+
 # v1.2 容器化压力源（OrchestratorAdapter）
 ORCHESTRATOR_TYPE = os.getenv('ORCHESTRATOR_TYPE', 'docker')   # docker / k8s
 AGENT_COMPOSE_FILE = os.getenv('AGENT_COMPOSE_FILE', '')        # 默认 BASE_DIR/docker-compose.dev.yml
