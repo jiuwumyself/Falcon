@@ -1,6 +1,9 @@
 from rest_framework import serializers
 
-from .models import Environment, LoadGenerator, MetricSample, Task, TaskCsvBinding, TaskRun
+from .models import (
+    Environment, LoadGenerator, MetricSample, RunPinpointTrace, Service,
+    Task, TaskCsvBinding, TaskRun,
+)
 
 
 class EnvironmentSerializer(serializers.ModelSerializer):
@@ -11,6 +14,18 @@ class EnvironmentSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = fields  # 前端只读，编辑走 admin
+
+
+class ServiceSerializer(serializers.ModelSerializer):
+    """G2：被压测服务列表（v1.3 Grafana 接入 v0）。前端只读，编辑走 admin。"""
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'name', 'description', 'base_url', 'grafana_url',
+            'pinpoint_app', 'arthus_endpoint', 'grafana_panels',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
 
 
 class TaskCsvBindingSerializer(serializers.ModelSerializer):
@@ -84,6 +99,17 @@ class TaskRunSerializer(serializers.ModelSerializer):
             'cancel_requested_at', 'archived_at',
         ]
         read_only_fields = fields  # 写入由 RunExecutor 控制，不通过 serializer
+
+
+class RunPinpointTraceSerializer(serializers.ModelSerializer):
+    """§ 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据列表。"""
+    class Meta:
+        model = RunPinpointTrace
+        fields = [
+            'id', 'service_name', 'trace_id', 'elapsed_ms', 'start_ts_ms',
+            'exception_type', 'pinpoint_detail_url', 'created_at',
+        ]
+        read_only_fields = fields
 
 
 class LoadGeneratorSerializer(serializers.ModelSerializer):

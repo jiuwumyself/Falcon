@@ -12,6 +12,7 @@ import {
   buildSeriesOption, CONNECT_GROUP, statsOf, type SeriesSpec,
 } from './chartFactory'
 import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
+import { SEMANTIC } from './semanticColors'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -116,11 +117,13 @@ watch(chartRef, (v) => {
 
 <template>
   <div class="flex flex-col h-full min-h-0">
-    <div
-      class="text-center text-[12px] mb-2"
-      :style="{ color: isDark ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.65)' }"
-    >
-      系统处理能力/s
+    <!-- 左侧 ribbon 标识替代居中标题：去 chartjunk + 节省纵向空间 -->
+    <div class="flex items-center gap-1.5 mb-1.5">
+      <span class="w-0.5 h-3.5 rounded-full" :style="{ background: SEMANTIC.traffic }" />
+      <span class="text-[11.5px]"
+            :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
+        RPS · req/s
+      </span>
     </div>
     <div class="flex-1 min-h-0 grid grid-cols-[1fr_220px] gap-3">
       <VChart

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import TrendsLayout from './trends/TrendsLayout.vue'
-import type { RunMetrics, TaskRun } from '@/types/task'
+import type { RunMetrics, Task, TaskRun } from '@/types/task'
 
 defineProps<{
+  task: Task
   run: TaskRun | null
   metrics: RunMetrics | null
   isDark: boolean
@@ -10,5 +11,5 @@ defineProps<{
 </script>
 
 <template>
-  <TrendsLayout :run="run" :metrics="metrics" :is-dark="isDark" />
+  <TrendsLayout :task="task" :run="run" :metrics="metrics" :is-dark="isDark" />
 </template>

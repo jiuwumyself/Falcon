@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, nextTick, onBeforeUnmount } from 'vue'
 import { Server, Plus, X, Search, Info, Check } from 'lucide-vue-next'
-import { getMockServices } from '@/lib/servicesMock'
-import type { Service } from '@/types/task'
+import { useServices } from '@/composables/useServices'
 
 const props = defineProps<{
   modelValue: string[]       // 已选的 service name 列表
@@ -13,7 +12,8 @@ const emit = defineEmits<{
   (e: 'update:modelValue', v: string[]): void
 }>()
 
-const services = ref<Service[]>(getMockServices())
+// G3：mock → 真 API（后端 Service 表）；composable 模块级 cache 共享
+const { services } = useServices()
 const open = ref(false)
 const query = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -221,7 +221,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
       >
         <span class="flex items-center gap-1">
           <Info :size="10" />
-          内置示例数据，v1.3 接入后端
+          数据来自后端 Service 表，编辑走 admin
         </span>
         <span v-if="modelValue.length">已选 {{ modelValue.length }}</span>
       </div>

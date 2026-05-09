@@ -398,3 +398,137 @@ class BackendListenerConfig(models.Model):
     def get_config(cls) -> 'BackendListenerConfig':
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+
+class PinpointConfig(models.Model):
+    """Pinpoint 接入全局配置（v1.3，singleton pk=1）。
+
+    run 终态时 pinpoint_collector 检查 enabled 决定是否调 Pinpoint API；禁用时
+    整个流程 skip，前端 TracePanelsTab 显示"未启用 Pinpoint"占位。
+
+    编辑走 admin（/admin/performance/pinpointconfig/），前端不暴露。
+
+    设计模式参考 BackendListenerConfig（同一项目内 singleton 一致写法）。
+    """
+    enabled = models.BooleanField(
+        default=False,
+        help_text='开关：run 终态时是否调 Pinpoint API 拉慢 trace。'
+                  '关闭时 pinpoint_collector 立即返回，TracePanelsTab 显示占位。',
+    )
+    base_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='Pinpoint Web 服务 URL，例：http://pinpoint.internal.com:8079。'
+                  '留空时即使 enabled=True 也跳过。',
+    )
+    auth_token = models.CharField(
+        max_length=500, blank=True,
+        help_text='Bearer token（按客户实际鉴权方式调整）。客户内网无鉴权时留空。',
+    )
+    request_timeout_sec = models.IntegerField(
+        default=10,
+        help_text='HTTP 请求超时秒数；超时后该次 collect 静默失败，不污染 run 状态。',
+    )
+
+    class Meta:
+        verbose_name = 'Pinpoint 全局配置'
+        verbose_name_plural = 'Pinpoint 全局配置'
+
+    def __str__(self) -> str:
+        status = '已启用' if self.enabled else '已禁用'
+        return f'Pinpoint 全局配置（{status}）'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls) -> 'PinpointConfig':
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class RunPinpointTrace(models.Model):
+    """run 终态拉到的 Pinpoint 慢 trace 元数据（v1.3）。
+
+    span tree 不存（体积太大），只存定位信息——前端表格展示 + 点击外链跳到 Pinpoint
+    原生界面看 span tree。
+
+    采样规则（pinpoint_collector）：elapsed_ms > P99 阈值（来自 InfluxDB）的 trace
+    100% 留；正常 trace 不存。每 service 默认 limit=100。
+
+    生命周期：与 baseline run 90 天保留期对齐（§ 4.4 #7），cleanup 任务一并清。
+    """
+    run = models.ForeignKey('TaskRun', on_delete=models.CASCADE, related_name='pinpoint_traces')
+    service_name = models.CharField(max_length=100, help_text='对应 task.service_names 中的服务名。')
+    trace_id = models.CharField(max_length=200, help_text='Pinpoint transaction ID。')
+    elapsed_ms = models.IntegerField(help_text='整 trace 总耗时（ms）。')
+    start_ts_ms = models.BigIntegerField(help_text='trace 起始时刻（ms epoch）。')
+    exception_type = models.CharField(
+        max_length=200, blank=True,
+        help_text='Pinpoint 标识的异常类型（如 java.net.SocketTimeoutException），无异常留空。',
+    )
+    pinpoint_detail_url = models.CharField(
+        max_length=1000, blank=True,
+        help_text='Pinpoint 原生 transactionInfo 详情页 URL，前端外链跳转看 span tree。',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Pinpoint 慢 trace'
+        verbose_name_plural = 'Pinpoint 慢 trace'
+        ordering = ['-elapsed_ms']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['run', 'trace_id'],
+                name='unique_pinpoint_trace_per_run',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['run', 'service_name']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.service_name} / {self.trace_id} / {self.elapsed_ms}ms'
+
+
+class Service(models.Model):
+    """
+    被压测的服务（v1.3 落地，替代前端 servicesMock.ts）。
+
+    Step 2 的 Task.service_names 多选基于 Service.name 做反查；Step 3 的
+    ServicePanelsTab / TraceTab / JVM tab 拿 Service.grafana_panels 嵌入 iframe。
+
+    grafana_panels 用 JSONField 存 [{name, url, type}, ...]，type ∈
+    'service' / 'trace' / 'jvm'，前端按 type 分到不同 tab 展示。
+
+    创建/编辑走 admin（/admin/performance/service/），前端只读。
+    v1.4 接 Grafana HTTP API 拉 metric 序列时再扩 grafana_url 字段（已预留）。
+    """
+    name = models.CharField(max_length=100, unique=True, help_text='服务名，task.service_names 引用此值。')
+    description = models.TextField(blank=True, help_text='服务说明。')
+    base_url = models.CharField(max_length=500, blank=True, help_text='服务对外地址（仅展示）。')
+    grafana_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='Grafana dashboard 根 URL（兜底，没配 grafana_panels 时用）。'
+                  '后端 v1.4 query Grafana HTTP API 时也用这个根 URL。',
+    )
+    pinpoint_app = models.CharField(max_length=100, blank=True, help_text='Pinpoint application name。')
+    arthus_endpoint = models.CharField(
+        max_length=500, blank=True,
+        help_text='Arthas tunnel endpoint（v1.5 接入用，当前 placeholder）。',
+    )
+    grafana_panels = models.JSONField(
+        default=list, blank=True,
+        help_text='Grafana panel 列表，每项 {"name": ..., "url": ..., "type": "service"|"trace"|"jvm"}。'
+                  'service → 服务面板 tab；trace → 链路面板 tab；jvm → JVM tab（v1 dump 按钮 disabled）。',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '被压测服务'
+        verbose_name_plural = '被压测服务'
+        ordering = ['name']
+
+    def __str__(self) -> str:
+        return self.name

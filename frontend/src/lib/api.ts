@@ -1,6 +1,7 @@
 import type {
   Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
-  LatencyBreakdownResponse, LoadGenerator, Paginated, RunMetrics, SamplerStat, Task, TaskRun,
+  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, RunMetrics,
+  SamplerStat, Service, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -164,6 +165,10 @@ export const runsApi = {
   // 响应时间拆解：扫 JTL 算 Connect/Server/Receive 三段时序，前端按需拉一次
   latencyBreakdown: (runId: string): Promise<LatencyBreakdownResponse> =>
     api<LatencyBreakdownResponse>(`/runs/${runId}/latency-breakdown/`),
+  // § 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据；run 还在跑 / Pinpoint
+  // 未启用 / 无数据时返回空数组
+  pinpointTraces: (runId: string): Promise<PinpointTrace[]> =>
+    api<PinpointTrace[]>(`/runs/${runId}/pinpoint-traces/`),
 }
 
 // ─── LoadGenerators API（v1.2 容器化压力源） ────────────────────────────
@@ -178,6 +183,11 @@ export interface SystemMetrics {
   disk_iops_read: number
   disk_iops_write: number
   timestamp: number
+}
+
+export const servicesApi = {
+  /** G2：被压测服务列表（v1.3 Grafana 接入 v0）。后端 Service 表，不分页 */
+  list: () => api<Service[]>('/services/'),
 }
 
 export const loadGeneratorsApi = {

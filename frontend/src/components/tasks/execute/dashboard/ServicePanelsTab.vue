@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { Server } from 'lucide-vue-next'
 import GrafanaPanelViewer from '../GrafanaPanelViewer.vue'
-import { getMockServiceByName } from '@/lib/servicesMock'
+import { useServices } from '@/composables/useServices'
 import type { GrafanaPanel, Task, TaskRun } from '@/types/task'
 
 const props = defineProps<{
@@ -11,11 +11,14 @@ const props = defineProps<{
   isDark: boolean
 }>()
 
+// G3：mock → 真 API（后端 Service 表）。useServices 模块级 cache，多组件共享
+const { getByName } = useServices()
+
 const allPanels = computed<GrafanaPanel[]>(() => {
   const out: GrafanaPanel[] = []
   const seen = new Set<string>()
   for (const name of props.task.service_names || []) {
-    const svc = getMockServiceByName(name)
+    const svc = getByName(name)
     if (!svc) continue
     for (const p of svc.grafana_panels) {
       const key = `${name}::${p.name}::${p.url}`

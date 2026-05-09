@@ -35,6 +35,7 @@ import requests
 
 from . import influxdb as influxdb_svc
 from . import jmx as jmx_svc
+from . import pinpoint_collector as pinpoint_collector_svc
 from . import scheduler as scheduler_svc
 from . import jtl_merger
 from .jmeter_runner import _augmented_env
@@ -66,6 +67,14 @@ _SIGTERM_TIMEOUT_SEC = 10
 _HEARTBEAT_INTERVAL_SEC = 1.0
 _DURATION_OVERRUN_SEC = 60
 
+# P0 #3 early abort gate：跑足 GRACE_PERIOD 秒后开始检查，每 INTERVAL 秒查一次最近
+# WINDOW 秒错误率，若总样本 ≥ MIN_TOTAL 且 error_rate ≥ THRESHOLD → 自动中止。
+_EARLY_ABORT_GRACE_SEC = 30
+_EARLY_ABORT_CHECK_INTERVAL_SEC = 5
+_EARLY_ABORT_WINDOW_SEC = 30
+_EARLY_ABORT_THRESHOLD = 0.80
+_EARLY_ABORT_MIN_TOTAL = 50
+
 # 保留最新 N 个 run 目录，更老的自动归档为 tar.gz
 _RUN_KEEP_COUNT = 20
 
@@ -93,6 +102,9 @@ class RunExecutor:
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
         self._cancelled = threading.Event()
+        # P0 #3 early abort：平台主动判定无效 run 时打标，_on_finish 据此标 FAILED
+        # 而非 CANCELLED（区分"用户 cancel"vs"平台 abort 无效 run"）
+        self._early_aborted = False
         # v1.2 多机调度状态
         self._selected_lgs: list = []                          # list[LoadGenerator]
         self._agent_runs: dict[int, dict] = {}                  # lg_id → {agent_run_id, base_url, jtl_path}
@@ -412,11 +424,20 @@ class RunExecutor:
                 }
 
         # 心跳轮询：1s 间隔；max_wall 同单机版（ramp + duration + DURATION_OVERRUN）
-        duration = self.run.duration_seconds or 0
-        ramp = self.run.ramp_up_seconds or 0
-        max_wall = ramp + duration + _DURATION_OVERRUN_SEC if duration else 0
+        # P0 #1：max_wall 按 TG kind 算（旧公式 ramp+duration+60 不适配 Stepping/
+        # Concurrency/Ultimate/Arrivals 这些 plugin TG，导致实际 145s 算成 125s 误标
+        # timeout）。estimate_max_wall_sec 会取所有启用 TG 的 max（并行），最少 1 秒。
+        tg_cfg = self.run.task.thread_groups_config or []
+        fallback = self.run.duration_seconds or 0
+        max_wall = (
+            scheduler_svc.estimate_max_wall_sec(tg_cfg, fallback) + _DURATION_OVERRUN_SEC
+            if (tg_cfg or fallback)
+            else 0
+        )
         start_t = time.monotonic()
+        last_abort_check = start_t
         any_failed = False
+        early_aborted = False
 
         while True:
             self._update_run(last_heartbeat_at=dj_timezone.now())
@@ -434,7 +455,39 @@ class RunExecutor:
                 # cancel 已经在 cancel() 里广播过了；这里继续等终态
                 pass
 
-            if max_wall and (time.monotonic() - start_t) > max_wall:
+            now = time.monotonic()
+
+            # P0 #3 early abort gate（与单机版同逻辑）：grace 后查最近 30s 错误率
+            if (
+                not early_aborted
+                and (now - start_t) > _EARLY_ABORT_GRACE_SEC
+                and (now - last_abort_check) > _EARLY_ABORT_CHECK_INTERVAL_SEC
+            ):
+                last_abort_check = now
+                abort_msg = self._check_early_abort()
+                if abort_msg:
+                    early_aborted = True
+                    self._early_aborted = True
+                    self._update_run(
+                        status=RunStatus.CANCELLING,
+                        error_message=abort_msg,
+                    )
+                    # 广播 cancel 给所有 pending agent
+                    for lg_id, info in pending:
+                        try:
+                            requests.post(
+                                f'{info["base_url"]}/runs/{info["agent_run_id"]}/cancel',
+                                timeout=5, headers=self._agent_headers(),
+                            )
+                        except requests.RequestException:
+                            pass
+                    # _on_finish 终态决策时按 status=CANCELLING 走 cancelled 分支会丢
+                    # error_message——这里改预期：循环退出后单独标 failed
+                    # 标 failed 而非 cancelled——平台主动判定无效
+                    # 这里不能立即 break，要等所有 agent 拿到终态；下个循环 cancel
+                    # 完成后 pending 空自然 break
+
+            if max_wall and (now - start_t) > max_wall:
                 # duration 超时：广播 cancel，标 timeout
                 self._update_run(status=RunStatus.CANCELLING)
                 for lg_id, info in pending:
@@ -580,13 +633,18 @@ class RunExecutor:
     # ── heartbeat / cancel / kill ──────────────────────────
 
     def _heartbeat_loop(self, proc: subprocess.Popen) -> int:
-        """每秒更新心跳；监听 cancel；检查 duration 超时。返 exit code。"""
+        """每秒更新心跳；监听 cancel；检查 duration 超时；P0 #3 early abort 检查。"""
         from ..models import RunStatus  # noqa: PLC0415
-        duration = self.run.duration_seconds or 0
-        ramp = self.run.ramp_up_seconds or 0
-        # 整 run 应在 ramp + duration + DURATION_OVERRUN 内结束；超了进 timeout
-        max_wall = ramp + duration + _DURATION_OVERRUN_SEC if duration else 0
+        # P0 #1：max_wall 按 TG kind 算（旧公式 ramp+duration+60 不适配 plugin TG）
+        tg_cfg = self.run.task.thread_groups_config or []
+        fallback = self.run.duration_seconds or 0
+        max_wall = (
+            scheduler_svc.estimate_max_wall_sec(tg_cfg, fallback) + _DURATION_OVERRUN_SEC
+            if (tg_cfg or fallback)
+            else 0
+        )
         start_t = time.monotonic()
+        last_abort_check = start_t
 
         while True:
             ret = proc.poll()
@@ -598,7 +656,28 @@ class RunExecutor:
             if self._cancelled.is_set():
                 return self._wait_or_kill(proc)
 
-            if max_wall and (time.monotonic() - start_t) > max_wall:
+            now = time.monotonic()
+
+            # P0 #3 early abort gate：grace 期后每 INTERVAL 秒查一次，命中即 cancel
+            if (
+                (now - start_t) > _EARLY_ABORT_GRACE_SEC
+                and (now - last_abort_check) > _EARLY_ABORT_CHECK_INTERVAL_SEC
+            ):
+                last_abort_check = now
+                abort_msg = self._check_early_abort()
+                if abort_msg:
+                    self._early_aborted = True
+                    self._update_run(
+                        status=RunStatus.CANCELLING,
+                        error_message=abort_msg,
+                    )
+                    self._send_stoptest()
+                    exit_code = self._wait_or_kill(proc)
+                    # 标 failed 而非 cancelled——这是平台主动判定无效，非用户取消
+                    self._update_run(status=RunStatus.FAILED)
+                    return exit_code
+
+            if max_wall and (now - start_t) > max_wall:
                 # duration 超时兜底：强制 graceful 停
                 self._update_run(status=RunStatus.CANCELLING)
                 self._send_stoptest()
@@ -608,6 +687,26 @@ class RunExecutor:
                 return exit_code
 
             time.sleep(_HEARTBEAT_INTERVAL_SEC)
+
+    def _check_early_abort(self) -> str | None:
+        """P0 #3：查最近 30s 错误率，命中 abort 阈值时返回错误说明字符串，否则 None。"""
+        result = influxdb_svc.query_recent_window_error_rate(
+            self.run.run_id, window_sec=_EARLY_ABORT_WINDOW_SEC,
+        )
+        if not result:
+            return None  # InfluxDB 不可达 / 无数据 → 不 abort
+        total, errors, error_rate = result
+        if total < _EARLY_ABORT_MIN_TOTAL:
+            return None  # 样本量太少不下结论（可能 ramp 还没开始喷流量）
+        if error_rate < _EARLY_ABORT_THRESHOLD:
+            return None
+        pct = error_rate * 100
+        return (
+            f'测试自动中止：最近 {_EARLY_ABORT_WINDOW_SEC}s 错误率 {pct:.1f}%（≥ '
+            f'{int(_EARLY_ABORT_THRESHOLD * 100)}% 阈值），共 {total} 样本 / {errors} 失败。'
+            f'常见原因：CSVDataSet 路径不可达 / 登录变量未注入 / 业务接口路径错。'
+            f'查 jmeter.log 与错误明细 tab 定位根因后重跑。'
+        )
 
     def _send_stoptest(self) -> None:
         """连 JMeter 的 nongui.port 发 'StopTestNow'。失败静默——心跳会兜底升级 KILL。"""
@@ -672,7 +771,11 @@ class RunExecutor:
         }
 
         # 终态决策
-        if run.status == RunStatus.CANCELLING:
+        if self._early_aborted:
+            # P0 #3：平台 early abort（用户没主动按）→ failed 而非 cancelled；
+            # error_message 已经在 _check_early_abort 时写过，保留
+            status_update['status'] = RunStatus.FAILED
+        elif run.status == RunStatus.CANCELLING:
             status_update['status'] = RunStatus.CANCELLED
         elif run.status == RunStatus.TIMEOUT:
             status_update['status'] = RunStatus.TIMEOUT
@@ -705,6 +808,36 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             print(f'[executor] WARN: cleanup_old_runs failed: {e}',
                   file=sys.stderr)
+
+        # P3 § 11：异步触发 Pinpoint slow trace 拉取（v1.3）。
+        # daemon thread + 失败静默——不阻塞 _on_finish 主流程；PinpointConfig
+        # 禁用 / 不可达时 collector 内部 skip。仅 success 终态拉（其他终态业务
+        # 可能没真跑业务请求，trace 也意义不大）。
+        if status_update.get('status') == RunStatus.SUCCESS:
+            try:
+                # 重新读最新 run 对象（_update_run 后内存版才齐全 finished_at 等字段）
+                run_for_pinpoint = TaskRun.objects.get(pk=run.pk)
+                threading.Thread(
+                    target=self._collect_pinpoint_safely,
+                    args=(run_for_pinpoint,),
+                    name=f'pinpoint-collect-{run.run_id}',
+                    daemon=True,
+                ).start()
+            except Exception as e:  # noqa: BLE001
+                print(f'[executor] WARN: pinpoint collect dispatch failed: {e}',
+                      file=sys.stderr)
+
+    def _collect_pinpoint_safely(self, run) -> None:
+        """daemon thread 入口；任何异常都吞掉，pinpoint_collector 自身已 fail-fast。"""
+        close_old_connections()  # 子线程必须自己管 DB 连接
+        try:
+            stat = pinpoint_collector_svc.collect_for_run(run)
+            if stat:
+                print(f'[pinpoint] run={run.run_id} collected: {stat}', file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f'[pinpoint] run={run.run_id} collect error: {e}', file=sys.stderr)
+        finally:
+            close_old_connections()
 
     # ── DB helper ──────────────────────────────────────────
 

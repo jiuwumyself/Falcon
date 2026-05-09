@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import type { ErrorAggregateRow, RunMetrics, SamplerStat, TaskRun } from '@/types/task'
+import type { ErrorAggregateRow, RunMetrics, SamplerStat, Task, TaskRun } from '@/types/task'
 import { runsApi } from '@/lib/api'
 import KpiBar from './KpiBar.vue'
 import ErrorRateGauge from './ErrorRateGauge.vue'
@@ -15,6 +15,7 @@ import ErrorTransactionTable from './ErrorTransactionTable.vue'
 import ErrorMessageTable from './ErrorMessageTable.vue'
 
 const props = defineProps<{
+  task: Task
   run: TaskRun | null
   metrics: RunMetrics | null
   isDark: boolean
@@ -159,7 +160,7 @@ const heroStyle = computed(() => ({
         background: isDark ? 'rgba(10,10,12,0.85)' : 'rgba(245,245,247,0.85)',
       }"
     >
-      <KpiBar :totals="totals" :series="overall" :is-dark="isDark" />
+      <KpiBar :task="task" :totals="totals" :series="overall" :is-dark="isDark" />
     </div>
 
     <!-- 2. 健康度小图：错误率 gauge / 错误数 / 并发 / 人均吞吐 -->

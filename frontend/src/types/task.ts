@@ -53,7 +53,8 @@ export interface Environment {
 }
 
 // ─── Step 2 被压测服务（v1.2，服务库目前是前端 mock，v1.3 接后端表）───
-export type GrafanaPanelType = 'service' | 'trace'
+// v1.3：jvm 加进来，对应 RunDashboard 的 JVM tab（heap/GC/thread iframe）
+export type GrafanaPanelType = 'service' | 'trace' | 'jvm'
 
 export interface GrafanaPanel {
   name: string                // 按钮上展示的名字
@@ -62,14 +63,16 @@ export interface GrafanaPanel {
 }
 
 export interface Service {
-  id: string                  // 内部稳定 id（mock 数据自管），跟 task.service_name 不强关联
-  name: string                // 用户可见的服务名，写到 Task.service_name
+  id: number                  // 后端 Service 表 PK（v1.3 起 mock 改为真表）
+  name: string                // 用户可见的服务名，task.service_names 里存的就是 name
   base_url: string            // 服务对外地址（仅展示用）
   grafana_url: string         // 服务对应的 Grafana 仪表板根 URL（兜底，没配 panels 时用）
   pinpoint_app: string        // Pinpoint application name（v1.3 接入用）
-  arthus_endpoint: string     // Arthus 服务端 endpoint（v1.3 接入用）
+  arthus_endpoint: string     // Arthus 服务端 endpoint（v1.5+ 接入用）
   description: string
-  grafana_panels: GrafanaPanel[]   // Step 3 RuntimeStatusPanel 服务/链路按钮分页用
+  grafana_panels: GrafanaPanel[]   // Step 3 RuntimeStatusPanel + JVM tab 按 type 分配
+  created_at?: string
+  updated_at?: string
 }
 
 // 占位：v1.2 LoadGenerator 容器化压力源（Phase A2 实现）
@@ -229,6 +232,18 @@ export interface TaskRun {
   archived_at: string | null
 }
 
+// § 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据列表
+export interface PinpointTrace {
+  id: number
+  service_name: string
+  trace_id: string
+  elapsed_ms: number
+  start_ts_ms: number
+  exception_type: string         // 无异常时空串
+  pinpoint_detail_url: string    // 点击跳到 Pinpoint 原生 transactionView 页面
+  created_at: string
+}
+
 // Step 3 实时指标 / 归档查询返回结构（GET /runs/:run_id/metrics?since=...）
 export type SeriesPoint = [number, number]   // [ms_epoch, value]
 
@@ -237,6 +252,16 @@ export interface RunMetricsSeries {
   p50_ms: SeriesPoint[]
   p95_ms: SeriesPoint[]
   p99_ms: SeriesPoint[]
+  // P0 #2：OK / KO 拆双轨。overall p99 含 KO 样本（401/403 快速返回拉低真实业务
+  // 延迟分布），AI 分析时要看 OK 单独的分位数；KO 单独看判断"是快速失败还是慢超时"。
+  // 单 host 单 sample 都是 success=true 时 p99_ok_ms === p99_ms。
+  // by_tg / by_host 切片暂不拆 OK/KO（query 数据量翻倍，先在 overall 上线）。
+  p50_ok_ms?: SeriesPoint[]
+  p95_ok_ms?: SeriesPoint[]
+  p99_ok_ms?: SeriesPoint[]
+  p50_ko_ms?: SeriesPoint[]
+  p95_ko_ms?: SeriesPoint[]
+  p99_ko_ms?: SeriesPoint[]
   error_rate: SeriesPoint[]
   error_count: SeriesPoint[]   // 每秒失败数（总错误曲线 + by_tg 错误明细用）
   bytes_recv: SeriesPoint[]    // 每秒接收字节

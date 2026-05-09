@@ -89,6 +89,14 @@ def _empty_series() -> dict:
         'p50_ms': [],
         'p95_ms': [],
         'p99_ms': [],
+        # P0 #2：OK/KO 拆双轨——overall 的分位数包含 KO 样本（401/403 快速返回会把
+        # 业务真实延迟分布拉低）。给 AI 喂数据时要看 OK 单独的分布。
+        'p50_ok_ms': [],
+        'p95_ok_ms': [],
+        'p99_ok_ms': [],
+        'p50_ko_ms': [],
+        'p95_ko_ms': [],
+        'p99_ko_ms': [],
         'error_rate': [],
         'error_count': [],
         'bytes_recv': [],
@@ -201,6 +209,29 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         "GROUP BY time(1s) fill(none)"
     )
 
+    # P0 #2：OK / KO 单独的分位数查询——业务侧 sample（success=true）vs 失败 sample
+    # 各自 P99 分布，AI 分析用 OK 才能看出真实业务延迟分布。
+    # 注意：JMeter BackendListener 只对 statut='all' 写 transaction='all' 的累计行；
+    # statut='ok' / 'ko' 没有 transaction='all' 聚合，每个 sampler 单独写一行。
+    # 故这里去掉 transaction='all' 过滤 + 排除 internal，跨 sampler 取 mean 近似全局
+    # OK / KO p99（不是数学严格的全局 p99，是 JMeter-Influx 的天然限制）。
+    overall_ok_q = (
+        "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
+        "mean(\"pct95.0\") AS p95_ok_ms, "
+        "mean(\"pct99.0\") AS p99_ok_ms "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='internal' AND \"statut\"='ok'{where_time} "
+        "GROUP BY time(1s) fill(none)"
+    )
+    overall_ko_q = (
+        "SELECT mean(\"pct50.0\") AS p50_ko_ms, "
+        "mean(\"pct95.0\") AS p95_ko_ms, "
+        "mean(\"pct99.0\") AS p99_ko_ms "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='internal' AND \"statut\"='ko'{where_time} "
+        "GROUP BY time(1s) fill(none)"
+    )
+
     overall = _empty_series()
     last_ts = ''
 
@@ -217,6 +248,26 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
             if r.get('p99_ms') is not None:
                 overall['p99_ms'].append([ts, float(r['p99_ms'])])
             last_ts = r['time']
+
+        # OK 单独分位数（剔除 KO 样本，给 AI 看真实业务延迟）
+        for r in client.query(overall_ok_q).get_points():
+            ts = _ts_to_ms(r['time'])
+            if r.get('p50_ok_ms') is not None:
+                overall['p50_ok_ms'].append([ts, float(r['p50_ok_ms'])])
+            if r.get('p95_ok_ms') is not None:
+                overall['p95_ok_ms'].append([ts, float(r['p95_ok_ms'])])
+            if r.get('p99_ok_ms') is not None:
+                overall['p99_ok_ms'].append([ts, float(r['p99_ok_ms'])])
+
+        # KO 单独分位数（看错误样本的延迟特征——快速 4xx 还是慢超时）
+        for r in client.query(overall_ko_q).get_points():
+            ts = _ts_to_ms(r['time'])
+            if r.get('p50_ko_ms') is not None:
+                overall['p50_ko_ms'].append([ts, float(r['p50_ko_ms'])])
+            if r.get('p95_ko_ms') is not None:
+                overall['p95_ko_ms'].append([ts, float(r['p95_ko_ms'])])
+            if r.get('p99_ko_ms') is not None:
+                overall['p99_ko_ms'].append([ts, float(r['p99_ko_ms'])])
 
         # 字节速率
         for r in client.query(bytes_q).get_points():
@@ -452,6 +503,45 @@ def _query_totals(client, safe_run: str) -> dict:
     except Exception:  # noqa: BLE001
         pass
     return totals
+
+
+def query_recent_window_error_rate(
+    run_id: str, window_sec: int = 30,
+) -> tuple[int, int, float] | None:
+    """
+    最近 window_sec 秒的 (total, errors, error_rate) 元组；连不上 InfluxDB 返 None。
+
+    P0 #3 early abort gate 用：30s 后每 5s 调一次，error_rate > 80% 且 total > 50
+    时主控自动 cancel 无效 run，避免 100% 错误的脏数据污染 baseline pool。
+    """
+    client = get_client()
+    if client is None:
+        return None
+    safe_run = run_id.replace("'", "''")
+    q_total = (
+        "SELECT sum(\"count\") AS total "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all' "
+        f"AND time > now() - {window_sec}s"
+    )
+    q_err = (
+        "SELECT sum(\"countError\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all' "
+        f"AND time > now() - {window_sec}s"
+    )
+    try:
+        total = 0
+        for r in client.query(q_total).get_points():
+            total = int(r.get('total') or 0)
+        errors = 0
+        for r in client.query(q_err).get_points():
+            errors = int(r.get('errors') or 0)
+        if total <= 0:
+            return (0, 0, 0.0)
+        return (total, errors, errors / total)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def query_run_summary(run_id: str) -> dict:

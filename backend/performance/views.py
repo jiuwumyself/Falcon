@@ -15,11 +15,12 @@ from django.utils import timezone
 
 from .models import (
     ACTIVE_RUN_STATUSES, Environment, LoadGenerator, LoadGeneratorStatus,
-    RunStatus, Task, TaskCsvBinding, TaskRun,
+    RunStatus, Service, Task, TaskCsvBinding, TaskRun,
 )
 from .serializers import (
-    EnvironmentSerializer, LoadGeneratorSerializer, TaskRunSerializer,
-    TaskSerializer,
+    EnvironmentSerializer, LoadGeneratorSerializer,
+    RunPinpointTraceSerializer, ServiceSerializer,
+    TaskRunSerializer, TaskSerializer,
 )
 from .services import executor as executor_svc
 from .services import influxdb as influxdb_svc
@@ -80,6 +81,15 @@ class EnvironmentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Environment.objects.all()
     serializer_class = EnvironmentSerializer
     pagination_class = None  # 环境不会太多，直接全返
+
+
+class ServiceViewSet(viewsets.ReadOnlyModelViewSet):
+    """G2：被压测服务列表（v1.3 Grafana 接入 v0）。前端 Step 2 multi-select +
+    Step 3 ServicePanelsTab / TraceTab / JVM tab 用 grafana_panels 嵌入。
+    创建编辑走 admin。"""
+    queryset = Service.objects.all()
+    serializer_class = ServiceSerializer
+    pagination_class = None  # 服务不会太多
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -1164,6 +1174,19 @@ class RunViewSet(viewsets.GenericViewSet):
             'ramp_up_seconds': run.ramp_up_seconds,
             'phases': phases,
         })
+
+    @action(detail=True, methods=['get'], url_path='pinpoint-traces')
+    def pinpoint_traces(self, request, run_id=None):
+        """§ 11 Pinpoint 接入 v0：返回该 run 的慢 trace 元数据列表（按 service
+        分组 + elapsed desc 排）。
+
+        数据由 _on_finish 异步触发的 pinpoint_collector 写入；PinpointConfig 禁用
+        / 无 Service 配置 / Pinpoint 不可达时返回空列表（前端按 placeholder 渲染）。
+        """
+        from .models import RunPinpointTrace  # noqa: PLC0415
+        run = self.get_object()
+        traces = RunPinpointTrace.objects.filter(run=run).order_by('service_name', '-elapsed_ms')
+        return Response(RunPinpointTraceSerializer(traces, many=True).data)
 
 
 # ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────

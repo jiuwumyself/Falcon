@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  Activity, BarChart3, AlertOctagon, Clock, Server, GitBranch, FileText,
+  Activity, BarChart3, AlertOctagon, Clock, Server, GitBranch, Cpu, FileText,
 } from 'lucide-vue-next'
 import type { RunMetrics, Task, TaskRun } from '@/types/task'
 import TrendsTab from './dashboard/TrendsTab.vue'
@@ -10,6 +10,7 @@ import ErrorsTab from './dashboard/ErrorsTab.vue'
 import TimelineTab from './dashboard/TimelineTab.vue'
 import ServicePanelsTab from './dashboard/ServicePanelsTab.vue'
 import TracePanelsTab from './dashboard/TracePanelsTab.vue'
+import JvmTab from './dashboard/JvmTab.vue'
 import PreCheckTab from './dashboard/PreCheckTab.vue'
 
 const props = defineProps<{
@@ -19,7 +20,7 @@ const props = defineProps<{
   isDark: boolean
 }>()
 
-type TabId = 'trends' | 'samplers' | 'errors' | 'timeline' | 'service' | 'trace' | 'precheck'
+type TabId = 'trends' | 'samplers' | 'errors' | 'timeline' | 'service' | 'trace' | 'jvm' | 'precheck'
 
 const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'trends', label: '指标趋势', icon: Activity },
@@ -28,6 +29,8 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'timeline', label: '运行时间轴', icon: Clock },
   { id: 'service', label: '服务面板', icon: Server },
   { id: 'trace', label: '链路面板', icon: GitBranch },
+  // G4：JVM tab v1（plan §4.5），位于"链路面板"之后；dump 按钮 disabled 等 Arthas
+  { id: 'jvm', label: 'JVM', icon: Cpu },
   { id: 'precheck', label: '预检日志', icon: FileText },
 ]
 
@@ -73,6 +76,7 @@ const isTerminal = computed(() =>
     <!-- 当前 tab 内容（占满剩余高度）-->
     <div class="flex-1 min-h-0">
       <TrendsTab v-if="active === 'trends'"
+                 :task="task"
                  :run="run"
                  :metrics="metrics" :is-dark="isDark" />
       <SamplersTab v-else-if="active === 'samplers'"
@@ -88,6 +92,8 @@ const isTerminal = computed(() =>
                         :task="task" :run="run" :is-dark="isDark" />
       <TracePanelsTab v-else-if="active === 'trace'"
                       :task="task" :run="run" :is-dark="isDark" />
+      <JvmTab v-else-if="active === 'jvm'"
+              :task="task" :run="run" :is-dark="isDark" />
       <PreCheckTab v-else-if="active === 'precheck'"
                    :log="run?.pre_check_log || ''"
                    :is-dark="isDark" />

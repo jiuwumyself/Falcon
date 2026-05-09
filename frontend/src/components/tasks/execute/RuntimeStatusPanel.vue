@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Activity, Server, GitBranch, AlertCircle } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
-import { getMockServiceByName } from '@/lib/servicesMock'
+import { useServices } from '@/composables/useServices'
 import type { GrafanaPanel, Task, TaskRun } from '@/types/task'
 import GrafanaPanelViewer from './GrafanaPanelViewer.vue'
 
@@ -45,12 +45,15 @@ async function loadTimeline() {
 watch(() => props.run?.run_id, loadTimeline)
 onMounted(loadTimeline)
 
+// G3：mock → 真 API
+const { getByName } = useServices()
+
 // 服务 / 链路面板：遍历 task.service_names 取并集
 const allPanels = computed<GrafanaPanel[]>(() => {
   const out: GrafanaPanel[] = []
   const seen = new Set<string>()
   for (const name of props.task.service_names || []) {
-    const svc = getMockServiceByName(name)
+    const svc = getByName(name)
     if (!svc) continue
     for (const p of svc.grafana_panels) {
       const key = `${name}::${p.name}::${p.url}`

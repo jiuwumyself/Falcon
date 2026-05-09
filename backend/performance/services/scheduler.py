@@ -37,6 +37,90 @@ class Shard:
     csv_files: list[Path] = field(default_factory=list)   # 已切好的 csv 绝对路径
 
 
+# ── max_wall 估算（P0 #1）──────────────────────────────────────────────
+
+def _estimate_tg_seconds(kind: str, params: dict) -> int:
+    """单个 TG 估算实际跑时长（秒）。多 TG 时上层取 max（TG 在 JMeter 里并行）。
+
+    各 kind 公式按用户在 Step 2 配置的语义：
+      ThreadGroup        : duration（标准 baseline）
+      SteppingThreadGroup: step_count × step_delay + hold + shutdown_dur
+                           其中 shutdown_dur ≈ ceil(max_threads/stop_count) × stop_period
+                           简化：用 step_count×step_users / max(stop_users_count, 1) × stop_users_period 上限
+      ConcurrencyThreadGroup: ramp_up + hold + shutdown
+      UltimateThreadGroup: max(rows: initial_delay + ramp_up + hold + shutdown)
+      ArrivalsThreadGroup: ramp_up + hold + shutdown
+    """
+    p = params or {}
+
+    def _i(key, default=0):
+        try:
+            return int(p.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    if kind == 'ThreadGroup':
+        return _i('duration')
+    if kind == 'SteppingThreadGroup':
+        ramp = _i('step_count') * _i('step_delay')
+        max_threads = _i('initial_threads') + _i('step_count') * _i('step_users')
+        stop_users = _i('Stop users count', 1) or _i('stop_users_count', 1) or 1
+        stop_period = _i('Stop users period') or _i('stop_users_period') or _i('shutdown', 5)
+        # plugin 用驼峰；Step 2 表单可能给 'shutdown' 字段映射成 stop period
+        shutdown_dur = -(-max_threads // max(stop_users, 1)) * stop_period  # ceil div
+        return ramp + _i('hold') + shutdown_dur
+    if kind == 'ConcurrencyThreadGroup':
+        return _i('ramp_up') + _i('hold') + _i('shutdown', 5)
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows') or []
+        if not isinstance(rows, list) or not rows:
+            return _i('initial_delay') + _i('ramp_up') + _i('hold') + _i('shutdown')
+        max_end = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            end = (
+                int(row.get('initial_delay') or 0)
+                + int(row.get('ramp_up') or 0)
+                + int(row.get('hold') or 0)
+                + int(row.get('shutdown') or 0)
+            )
+            max_end = max(max_end, end)
+        return max_end
+    if kind == 'ArrivalsThreadGroup':
+        return _i('ramp_up') + _i('hold') + _i('shutdown', 5)
+    # 未知 kind 兜底：duration 直接用，不合理时上层 +OVERRUN 仍能兜
+    return _i('duration')
+
+
+def estimate_max_wall_sec(
+    thread_groups_config: list[dict],
+    fallback_seconds: int = 0,
+) -> int:
+    """
+    所有启用 TG（PATCH 时禁用 TG 已剔除，只剩启用项）取 max(单 TG 估算)。
+    JMeter 默认行为：多 TG 并行，整 run 持续到最后退出的 TG。
+
+    Args:
+      thread_groups_config: task.thread_groups_config，每项 {path, scenario, kind, params}
+      fallback_seconds: 配置全空 / 解析失败时的兜底（一般传 task.duration_seconds）
+
+    返回：最长 TG 估算秒数，最少 1 秒（避免 0 max_wall 让 _heartbeat_loop 无超时检查）
+    """
+    if not thread_groups_config:
+        return max(1, fallback_seconds)
+    longest = 0
+    for tg in thread_groups_config:
+        if not isinstance(tg, dict):
+            continue
+        kind = tg.get('kind') or 'ThreadGroup'
+        params = tg.get('params') or {}
+        longest = max(longest, _estimate_tg_seconds(kind, params))
+    if longest <= 0:
+        return max(1, fallback_seconds)
+    return longest
+
+
 # ── 分配 ────────────────────────────────────────────────────────────────
 
 def compute_shards(

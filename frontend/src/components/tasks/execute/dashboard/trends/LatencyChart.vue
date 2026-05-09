@@ -29,6 +29,9 @@ const props = withDefaults(defineProps<{
 const chartRef = ref<any>(null)
 type Mode = 'all-percentiles' | 'tx-p95' | 'breakdown'
 const mode = ref<Mode>('all-percentiles')
+// P0 #2：'剔除失败样本'toggle。仅 all-percentiles 模式有效，切到 p50/95/99_ok_ms 数据。
+// 默认 false 保留含 KO 的旧行为做 backward compat；用户切到 true 才看真实业务延迟。
+const excludeKO = ref(false)
 
 // 拆解数据按需 fetch（不进 5s metrics 轮询，避免每 5s 扫一次 JTL 拖累）
 const breakdown = ref<LatencyBreakdownResponse | null>(null)
@@ -87,6 +90,14 @@ watch(
 const seriesSpecs = computed<SeriesSpec[]>(() => {
   if (mode.value === 'all-percentiles') {
     if (!props.overall) return []
+    // P0 #2：excludeKO=true 时切到 OK 单独的分位数（剔除 KO 样本，看真实业务延迟）
+    if (excludeKO.value) {
+      return [
+        { name: 'P50 (OK)', data: props.overall.p50_ok_ms || [], color: SEMANTIC.success, lineWidth: 2, area: true },
+        { name: 'P95 (OK)', data: props.overall.p95_ok_ms || [], color: SEMANTIC.latency, lineWidth: 2 },
+        { name: 'P99 (OK)', data: props.overall.p99_ok_ms || [], color: SEMANTIC.errors, lineWidth: 2 },
+      ]
+    }
     return [
       { name: 'P50', data: props.overall.p50_ms, color: SEMANTIC.success, lineWidth: 2, area: true },
       { name: 'P95', data: props.overall.p95_ms, color: SEMANTIC.latency, lineWidth: 2 },
@@ -183,12 +194,13 @@ watch(chartRef, (v) => {
 
 <template>
   <div class="flex flex-col h-full min-h-0">
-    <div class="flex items-center justify-between mb-2">
-      <div
-        class="flex-1 text-center text-[12px]"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.65)' }"
-      >
-        接口响应时间
+    <div class="flex items-center justify-between mb-1.5">
+      <div class="flex items-center gap-1.5">
+        <span class="w-0.5 h-3.5 rounded-full" :style="{ background: SEMANTIC.latency }" />
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
+          延迟 · ms
+        </span>
       </div>
       <!-- Segmented control 替代原 <select>，提升 mode 切换的发现性 -->
       <div
@@ -254,6 +266,16 @@ watch(chartRef, (v) => {
           拆解三段
         </button>
       </div>
+      <!-- P0 #2：仅 all-percentiles mode 显示 OK only toggle。剔除 KO 样本看真实业务延迟。 -->
+      <label
+        v-if="mode === 'all-percentiles'"
+        class="flex items-center gap-1 text-[11px] cursor-pointer ml-2"
+        :title="'勾选后曲线切到 OK 样本单独的分位数（剔除 401/403 等失败拉低真实延迟分布）'"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)' }"
+      >
+        <input type="checkbox" v-model="excludeKO" class="cursor-pointer" />
+        剔除失败样本
+      </label>
     </div>
     <div class="flex-1 min-h-0 grid grid-cols-[1fr_180px] gap-3">
       <VChart
