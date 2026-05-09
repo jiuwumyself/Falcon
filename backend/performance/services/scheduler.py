@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .jmx import (
-    JmxParseError, _inject_backend_listener, build_run_xml, list_thread_groups,
-    replace_thread_group,
+    JmxParseError, _inject_backend_listener, _set_csv_filename_at_path,
+    build_run_xml, list_thread_groups, replace_thread_group,
 )
 
 if TYPE_CHECKING:
@@ -44,12 +44,15 @@ def compute_shards(
     available_lgs: list['LoadGenerator'],
 ) -> list[Shard]:
     """
-    按 max_vusers 容量分配 vusers 到各 agent。
-    - capacity 大的优先分配（避免小机被堆满）
-    - 每台不超过自己的 max_vusers
-    - 总 capacity 不够时返回 ValueError，由调用方决定是否扩容
+    平均分配 vusers 到各 agent：floor(vusers/n) 平摊，余数压到容量最大的那台。
 
-    返回的 Shard 每个 vusers 都 ≥ 1。
+    - vusers=3, n=2 → [2, 1]  （base=1，余 1 给第一台）
+    - vusers=10, n=3 → [4, 3, 3]
+    - vusers=2, n=3 → [2, 0, 0]  （base=0，余 2 全给第一台；后两台不建 shard）
+    - 异构容量 cap=[100, 50]、vusers=150 → 按容量降序后排成 [100,50]，
+      base=75,余 0 → [75, 75]，但第二台 cap=50 不够 → 抛 ValueError 让用户加机器
+
+    旧"贪心填充"会把 3 vusers 全塞第一台，第二台闲着——多机验证场景退化为单机。
     """
     if vusers <= 0:
         raise ValueError(f'vusers must be positive, got {vusers}')
@@ -63,22 +66,33 @@ def compute_shards(
             f'across {len(available_lgs)} agents',
         )
 
-    # 容量大的优先；同容量时按 id 稳定排
+    # 容量大的优先（让"第一台"扛得住余数 + 单 agent cap 不够时早暴露）
     sorted_lgs = sorted(available_lgs, key=lambda lg: (-lg.max_vusers, lg.id))
-    remaining = vusers
+    n = len(sorted_lgs)
+    base = vusers // n
+    remainder = vusers % n
+    # 余数全给第一台
+    shares = [base + remainder if i == 0 else base for i in range(n)]
+
+    # 容量校验：异构 cap 时某台 share 可能超它自己的 max_vusers
+    for lg, sh in zip(sorted_lgs, shares):
+        if sh > lg.max_vusers:
+            raise ValueError(
+                f'agent {lg.pod_name} cap={lg.max_vusers} 装不下 share={sh}：'
+                f'平均分配后该台超容量，建议加机器或减 vusers',
+            )
+
     shards: list[Shard] = []
-    for i, lg in enumerate(sorted_lgs):
-        take = min(remaining, lg.max_vusers)
-        if take <= 0:
-            break
+    for i, (lg, sh) in enumerate(zip(sorted_lgs, shares)):
+        if sh <= 0:
+            continue   # share=0 的 agent 不建 shard，避免起 0 thread 的 jmeter
         shards.append(Shard(
             index=i,
             load_generator_id=lg.id,
             pod_name=lg.pod_name,
             base_url=lg.base_url,
-            vusers=take,
+            vusers=sh,
         ))
-        remaining -= take
     return shards
 
 
@@ -170,12 +184,16 @@ def build_shard_jmx(
     run_id: str,
     shard: Shard,
     total_vusers: int,
+    total_shards: int,
     influxdb_url: str,
     influxdb_db: str,
 ) -> bytes:
     """
     生成本分片的可执行 JMX：
       Step 2 完整 xml → 缩 TG 参数到本分片 → 注入 BackendListener（带 host tag）
+
+    total_shards 由 _run_distributed 传 len(shards)；旧版本拿 total_vusers/shard.vusers
+    现算，容量分配不均时各片算出来不一致（80+20+20 三片各报 2/6/6）。
     """
     # 先拿基础 xml（含 Step 2 thread-groups + csv-bindings + DNS 注入）
     # 不让 build_run_xml 注入 BackendListener，scheduler 自己加（要带 host tag）
@@ -186,6 +204,22 @@ def build_shard_jmx(
     )
     # 按分片缩 TG vusers
     sliced = _scale_thread_groups_to_shard(base, shard.vusers, total_vusers)
+
+    # 阶段 3：CSVDataSet filename 改写到 agent 端相对路径 csv/<filename>。
+    # build_run_xml 第 2 步已经 patch 成宿主 scripts/ 的绝对路径（LOCAL_FALLBACK 用），
+    # 这里覆盖回相对路径；JMeter 按 jmx 所在目录解析 → agent 把 csv 写到
+    # <work_dir>/csv/<filename>，正好对得上。executor 配套作 multipart 上传 csv_files。
+    for binding in task.csv_bindings.all():
+        if not binding.component_path or not binding.filename:
+            continue
+        try:
+            sliced = _set_csv_filename_at_path(
+                sliced, binding.component_path, f'csv/{binding.filename}',
+            )
+        except JmxParseError:
+            # path 在 build_run_xml 之后理论上一定有效；脏数据跳过
+            continue
+
     # 注入带 host tag 的 BackendListener
     final = _inject_backend_listener(
         sliced,
@@ -196,7 +230,7 @@ def build_shard_jmx(
         extra_tags={
             'host': shard.pod_name,
             'shard': str(shard.index),
-            'shard_count': str(max(1, math.ceil(total_vusers / max(shard.vusers, 1)))),
+            'shard_count': str(max(1, total_shards)),
         },
     )
     return final

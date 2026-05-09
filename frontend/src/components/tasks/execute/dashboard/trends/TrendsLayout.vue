@@ -112,7 +112,16 @@ watch(
 
 const overall = computed(() => props.metrics?.overall ?? null)
 const byTg = computed(() => props.metrics?.by_tg ?? {})
+const byHost = computed(() => props.metrics?.by_host ?? {})
 const totals = computed(() => props.metrics?.totals ?? null)
+
+// v1.2 多机切线：>1 host 时允许切到"按主机"看分散度。<=1 不显示按钮，纯按接口。
+const splitMode = ref<'tg' | 'host'>('tg')
+const hostKeys = computed(() => Object.keys(byHost.value))
+const showSplitToggle = computed(() => hostKeys.value.length > 1)
+const trendSplit = computed(() =>
+  splitMode.value === 'host' && showSplitToggle.value ? byHost.value : byTg.value,
+)
 
 const hasAnyData = computed(() => {
   const o = overall.value
@@ -183,21 +192,50 @@ const heroStyle = computed(() => ({
          上两张 compact 隐藏 x 轴标签 + 紧贴最底下 NetworkChart 的 x 轴；
          共用一个 hero 容器，垂直对比效率提升。 -->
     <div class="rounded-xl p-4" :style="heroStyle">
-      <div
-        class="text-[11.5px] mb-2 px-1"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-      >
-        趋势曲线（hover 联动 · 共用时间轴）
+      <div class="flex items-center justify-between mb-2 px-1">
+        <div
+          class="text-[11.5px]"
+          :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
+        >
+          趋势曲线（hover 联动 · 共用时间轴）
+        </div>
+        <!-- 多 host 切线 toggle：仅在 v1.2 多机场景显示 -->
+        <div
+          v-if="showSplitToggle"
+          class="flex text-[11px] rounded-md overflow-hidden"
+          :style="{ border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }"
+        >
+          <button
+            class="px-2 py-0.5 cursor-pointer"
+            :style="{
+              background: splitMode === 'tg'
+                ? (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)')
+                : 'transparent',
+              color: isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)',
+            }"
+            @click="splitMode = 'tg'"
+          >按接口</button>
+          <button
+            class="px-2 py-0.5 cursor-pointer"
+            :style="{
+              background: splitMode === 'host'
+                ? (isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)')
+                : 'transparent',
+              color: isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)',
+            }"
+            @click="splitMode = 'host'"
+          >按主机 ({{ hostKeys.length }})</button>
+        </div>
       </div>
       <div class="space-y-1">
         <div class="h-[200px]">
-          <RpsChart :overall="overall" :by-tg="byTg" :is-dark="isDark" compact />
+          <RpsChart :overall="overall" :by-tg="trendSplit" :is-dark="isDark" compact />
         </div>
         <div class="h-[260px]">
-          <LatencyChart :overall="overall" :by-tg="byTg" :run-id="activeRunId" :is-dark="isDark" compact />
+          <LatencyChart :overall="overall" :by-tg="trendSplit" :run-id="activeRunId" :is-dark="isDark" compact />
         </div>
         <div class="h-[220px]">
-          <NetworkChart :overall="overall" :by-tg="byTg" :is-dark="isDark" />
+          <NetworkChart :overall="overall" :by-tg="trendSplit" :is-dark="isDark" />
         </div>
       </div>
     </div>

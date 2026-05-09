@@ -115,6 +115,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                   'p99_ms': [...], 'error_rate': [...], 'error_count': [...],
                   'bytes_recv': [...], 'bytes_sent': [...], 'active_users': [...]},
       'by_tg': {'<threadName>': {同上 9 组}, ...},
+      'by_host': {'<pod_name>': {同上 9 组}, ...},  # v1.2 多机切线，单机时只有 1 个 key
       'totals': {'total_count', 'total_errors', 'total_bytes_recv', 'total_bytes_sent'},  # 累计 KPI（不带 since 过滤）
       'last_ts': '2026-04-30T12:00:00Z'  # 前端下次轮询的 since
     }
@@ -123,17 +124,23 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
       measurement = 'jmeter'
         fields: count, hit, error, avg, min, max, pct50.0, pct90.0, pct95.0, pct99.0,
                 rb (receivedBytes), sb (sentBytes), minAT/meanAT/maxAT
-        tags: application, statut(all/ok/ko), transaction, run_id, task_id
+        tags: application, statut(all/ok/ko), transaction, run_id, task_id, host (v1.2)
 
     我们查 statut='ok' + 'ko' 算 RPS / error_rate；查 transaction='all' 拿总分位
     数；分 TG 时按 transaction（实际为 threadName/sample label）切片。
     bytes 走 statut='all' 拿（每条 sample 都写 rb/sb，all 行已聚合）。
+
+    多 host 聚合策略（v1.2）：
+      - count / rb / sb / maxAT 用 sum 跨 host 加总（多机正确性，单机 sum=值不变）
+      - p50/p95/p99 用 mean 跨 host 平均（per-host 分位数无法直接 sum；JMeter-Influx
+        业界惯例。要严格全局分位数得拉原始 sample，超出 InfluxDB 数据粒度）
     """
     client = get_client()
     if client is None:
         return {
             'overall': _empty_series(),
             'by_tg': {},
+            'by_host': {},
             'totals': _empty_totals(),
             'last_ts': '',
         }
@@ -146,8 +153,10 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     safe_run = run_id.replace("'", "''")
 
     # 总览：按 transaction='all' 拿全局分位 + 按 statut 切片算 rps/error/bytes
+    # 多 host 聚合：count / rb / sb / maxAT 用 sum（每秒每 host 一行 → 跨 host
+    # 加总）；分位数用 mean（per-host p99 不能 sum，按业界惯例平均近似）。
     overall_q = (
-        "SELECT mean(\"count\") AS rps, "
+        "SELECT sum(\"count\") AS rps, "
         "mean(\"pct50.0\") AS p50_ms, "
         "mean(\"pct95.0\") AS p95_ms, "
         "mean(\"pct99.0\") AS p99_ms, "
@@ -157,7 +166,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         "GROUP BY time(1s) fill(none)"
     )
     bytes_q = (
-        "SELECT mean(\"rb\") AS rb, mean(\"sb\") AS sb "
+        "SELECT sum(\"rb\") AS rb, sum(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s) fill(none)"
@@ -184,8 +193,9 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     # 活跃用户数：JMeter Backend Listener 把 minAT/meanAT/maxAT 写在
     # transaction='internal' 行（不是 sampler 维度），且这些行 statut 字段为空。
     # 不能用 statut='all' 过滤，要按 transaction='internal' 拿。
+    # 多 host 时每台报自己的 maxAT，跨 host 用 sum 算总并发。
     users_q = (
-        "SELECT mean(\"maxAT\") AS active_users "
+        "SELECT sum(\"maxAT\") AS active_users "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"='internal'{where_time} "
         "GROUP BY time(1s) fill(none)"
@@ -311,12 +321,93 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
+    # 按 host（v1.2 多机）切片。单机时 by_host 只有 1 个 key（agent pod_name），
+    # 多机时每台 agent 一组曲线 → 前端可叠加 / 切线对比。
+    # 单 host 维度内：count/rb/sb 不再跨 host 加总，所以用 sum (host) ≡ host 自己的值；
+    # 分位数 mean 也是 host 自己（每秒一条数据）。
+    by_host: dict[str, dict] = {}
+    by_host_main_q = (
+        "SELECT sum(\"count\") AS rps, "
+        "mean(\"pct50.0\") AS p50_ms, "
+        "mean(\"pct95.0\") AS p95_ms, "
+        "mean(\"pct99.0\") AS p99_ms, "
+        "sum(\"rb\") AS rb, sum(\"sb\") AS sb "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s), \"host\" fill(none)"
+    )
+    by_host_users_q = (
+        "SELECT sum(\"maxAT\") AS active_users "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='internal'{where_time} "
+        "GROUP BY time(1s), \"host\" fill(none)"
+    )
+    by_host_err_q = (
+        "SELECT sum(\"countError\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s), \"host\" fill(0)"
+    )
+    by_host_total_q = (
+        "SELECT sum(\"count\") AS total "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s), \"host\" fill(0)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_host_main_q).items():
+            host = (tags or {}).get('host') or 'unknown'
+            series = by_host.setdefault(host, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                if r.get('rps') is not None:
+                    series['rps'].append([ts, float(r['rps'])])
+                if r.get('p50_ms') is not None:
+                    series['p50_ms'].append([ts, float(r['p50_ms'])])
+                if r.get('p95_ms') is not None:
+                    series['p95_ms'].append([ts, float(r['p95_ms'])])
+                if r.get('p99_ms') is not None:
+                    series['p99_ms'].append([ts, float(r['p99_ms'])])
+                if r.get('rb') is not None:
+                    series['bytes_recv'].append([ts, float(r['rb'])])
+                if r.get('sb') is not None:
+                    series['bytes_sent'].append([ts, float(r['sb'])])
+        for (_meas, tags), points in client.query(by_host_users_q).items():
+            host = (tags or {}).get('host') or 'unknown'
+            series = by_host.setdefault(host, _empty_series())
+            for r in points:
+                if r.get('active_users') is not None:
+                    series['active_users'].append(
+                        [_ts_to_ms(r['time']), float(r['active_users'])],
+                    )
+        # error_rate / error_count by host：与 by_tg 同样的 host→ts→errors 中转
+        host_err_map: dict[str, dict[int, float]] = {}
+        for (_meas, tags), points in client.query(by_host_err_q).items():
+            host = (tags or {}).get('host') or 'unknown'
+            slot = host_err_map.setdefault(host, {})
+            for r in points:
+                slot[_ts_to_ms(r['time'])] = float(r.get('errors') or 0)
+        for (_meas, tags), points in client.query(by_host_total_q).items():
+            host = (tags or {}).get('host') or 'unknown'
+            series = by_host.setdefault(host, _empty_series())
+            host_errs = host_err_map.get(host, {})
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                total = float(r.get('total') or 0)
+                errs = host_errs.get(ts, 0)
+                rate = (errs / total * 100) if total > 0 else 0
+                series['error_rate'].append([ts, rate])
+                series['error_count'].append([ts, errs])
+    except Exception:  # noqa: BLE001
+        pass
+
     # 累计 KPI（永远全量算，不带 since 过滤）
     totals = _query_totals(client, safe_run)
 
     return {
         'overall': overall,
         'by_tg': by_tg,
+        'by_host': by_host,
         'totals': totals,
         'last_ts': last_ts,
     }

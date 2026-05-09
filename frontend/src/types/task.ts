@@ -254,6 +254,7 @@ export interface RunMetricsTotals {
 export interface RunMetrics {
   overall: RunMetricsSeries
   by_tg: Record<string, RunMetricsSeries>   // key = JMeter sample label / TG name
+  by_host: Record<string, RunMetricsSeries> // v1.2：key = agent pod_name；单机时只有 1 个 key
   totals: RunMetricsTotals                  // 累计 KPI（KpiBar 用）
   last_ts: string                           // 下次轮询的 since 参数
   run: TaskRun                              // 后端附带最新 run 状态

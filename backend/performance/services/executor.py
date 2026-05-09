@@ -358,6 +358,7 @@ class RunExecutor:
                 run_id=self.run.run_id,
                 shard=shard,
                 total_vusers=self.run.virtual_users,
+                total_shards=len(shards),
                 # 分布式：jmx 在 agent 容器里跑，烤进容器可达的 InfluxDB URL
                 # （主控自己读 InfluxDB 仍走 settings.INFLUXDB_URL）
                 influxdb_url=getattr(
@@ -366,8 +367,26 @@ class RunExecutor:
                 influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
             )
             files = [('jmx_file', ('run.jmx', shard_jmx, 'application/xml'))]
-            # CSV：暂不切（v1.2 第一版本 plan 列了 CSV 切片，executor 这版先用全量；
-            # scheduler.slice_csv_by_offset 已经实现，留接口位等用户测过反馈再串）
+            # 阶段 3：把 task.csv_bindings 的 CSV 文件作 multipart 上传给 agent。
+            # build_shard_jmx 已经把 CSVDataSet filename 改成 'csv/<filename>'（agent 端
+            # 相对路径），agent main.py 收到 csv_files 后写到 <work_dir>/csv/<filename>，
+            # JMeter 按 jmx 所在目录解析相对路径，对得上。
+            # 切片：CLAUDE.md §5 v1.2 ❓ 列的"slice_csv_by_offset 串接 executor"待办——
+            # 当前用全量副本（每台 agent 一份完整 CSV），账号池场景需要切片时再分支。
+            from .jmeter import get_scripts_dir  # noqa: PLC0415
+            scripts_dir = get_scripts_dir()
+            for binding in self.run.task.csv_bindings.all():
+                if not binding.component_path or not binding.filename:
+                    continue
+                src = scripts_dir / binding.filename
+                if not src.exists():
+                    print(f'[executor] WARN: csv binding {binding.filename} 物理文件不存在，跳过',
+                          file=sys.stderr)
+                    continue
+                files.append((
+                    'csv_files',
+                    (binding.filename, src.read_bytes(), 'text/csv'),
+                ))
             try:
                 r = requests.post(
                     f'{shard.base_url}/runs',
@@ -658,7 +677,18 @@ class RunExecutor:
         elif run.status == RunStatus.TIMEOUT:
             status_update['status'] = RunStatus.TIMEOUT
         elif exit_code == 0:
-            status_update['status'] = RunStatus.SUCCESS
+            # 阶段 0 踩过：JMeter 主进程 exit 0 但 thread 全因 CSV/init 失败 0 sampler，
+            # 不能误标 success。total_requests=0 时降级 failed + 指引看 jmeter.log。
+            if (summary.get('total_requests') or 0) == 0:
+                status_update['status'] = RunStatus.FAILED
+                if not run.error_message:
+                    status_update['error_message'] = (
+                        'JMeter 子进程退出 0 但未产生任何 sample。常见原因：'
+                        'CSVDataSet 文件路径错误 / Thread init 阶段抛异常 / 全部 sampler 被禁。'
+                        '详情见 jmeter.log（runs/<run_id>/jmeter.log）'
+                    )
+            else:
+                status_update['status'] = RunStatus.SUCCESS
         else:
             status_update['status'] = RunStatus.FAILED
             # 保留具体错误（_run_distributed 等子流程已写入），仅在为空时填通用信息

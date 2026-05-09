@@ -52,6 +52,9 @@ def _env(key: str, default: str = '') -> str:
 MASTER_URL = _env('FALCON_MASTER_URL', 'http://localhost:8000').rstrip('/')
 AGENT_TOKEN = _env('FALCON_AGENT_TOKEN', '')
 AGENT_PORT = int(_env('FALCON_AGENT_PORT', '9100'))
+# AGENT_PORT 是容器内部监听端口；多 agent 单宿主部署时每个容器映射不同 host port，
+# 这条 env 让 agent 上报"宿主可达的"端口，主控反向调用走这个值。空 = 与 AGENT_PORT 同。
+AGENT_REPORT_PORT = int(_env('FALCON_AGENT_REPORT_PORT') or AGENT_PORT)
 POD_NAME = _env('FALCON_POD_NAME') or _env('HOSTNAME') or f'agent-{secrets.token_hex(4)}'
 ORCHESTRATOR_TYPE = _env('FALCON_ORCHESTRATOR_TYPE', 'docker')
 JMETER_HOME = _env('JMETER_HOME', '/opt/apache-jmeter-5.6.3')
@@ -156,7 +159,7 @@ def _register_self() -> Optional[int]:
         'pod_name': POD_NAME,
         'hostname': socket.gethostname(),
         'ip': _get_local_ip(),
-        'port': AGENT_PORT,
+        'port': AGENT_REPORT_PORT,
         'token': AGENT_TOKEN,
         'cpu_cores': psutil.cpu_count(logical=True) or 0,
         'memory_gb': round(psutil.virtual_memory().total / 1024**3, 2),
