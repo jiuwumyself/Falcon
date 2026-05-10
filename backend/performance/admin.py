@@ -2,7 +2,8 @@ from django.contrib import admin
 
 from .models import (
     BackendListenerConfig, Environment, LoadGenerator, MetricSample,
-    PinpointConfig, RunPinpointTrace, Service, Task, TaskCsvBinding, TaskRun,
+    PinpointConfig, RunEventAnchor, RunPinpointTrace, Service,
+    Task, TaskCsvBinding, TaskRun,
 )
 
 
@@ -116,6 +117,18 @@ class PinpointConfigAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(RunEventAnchor)
+class RunEventAnchorAdmin(admin.ModelAdmin):
+    """§ 12 S1：run 期间关键事件锚点。仅查看 / 排查用，自动写入。"""
+    list_display = ('id', 'run', 'event_type', 'ts_ms', 'created_at')
+    list_filter = ('event_type',)
+    search_fields = ('run__run_id',)
+    readonly_fields = ('run', 'event_type', 'ts_ms', 'metadata', 'created_at')
+
+    def has_add_permission(self, request):
+        return False  # 由 executor 写入
 
 
 @admin.register(RunPinpointTrace)

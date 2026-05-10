@@ -19,7 +19,7 @@ from .models import (
 )
 from .serializers import (
     EnvironmentSerializer, LoadGeneratorSerializer,
-    RunPinpointTraceSerializer, ServiceSerializer,
+    RunEventAnchorSerializer, RunPinpointTraceSerializer, ServiceSerializer,
     TaskRunSerializer, TaskSerializer,
 )
 from .services import executor as executor_svc
@@ -1174,6 +1174,19 @@ class RunViewSet(viewsets.GenericViewSet):
             'ramp_up_seconds': run.ramp_up_seconds,
             'phases': phases,
         })
+
+    @action(detail=True, methods=['get'], url_path='events')
+    def events(self, request, run_id=None):
+        """§ 12 S1：返回该 run 的关键事件锚点列表（按 ts_ms 升序）。
+
+        来源：executor 状态切换时主动写（ramp_done / hold_start / shutdown_start /
+        error_rate_breached）+ _on_finish 扫 InfluxDB 补 first_error。前端时间轴
+        markLine 用。
+        """
+        from .models import RunEventAnchor  # noqa: PLC0415
+        run = self.get_object()
+        events = RunEventAnchor.objects.filter(run=run).order_by('ts_ms')
+        return Response(RunEventAnchorSerializer(events, many=True).data)
 
     @action(detail=True, methods=['get'], url_path='pinpoint-traces')
     def pinpoint_traces(self, request, run_id=None):

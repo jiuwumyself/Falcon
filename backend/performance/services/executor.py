@@ -468,6 +468,11 @@ class RunExecutor:
                 if abort_msg:
                     early_aborted = True
                     self._early_aborted = True
+                    self._record_event_anchor(
+                        'error_rate_breached',
+                        ts_ms=int(time.time() * 1000),
+                        metadata={'message': abort_msg[:200]},
+                    )
                     self._update_run(
                         status=RunStatus.CANCELLING,
                         error_message=abort_msg,
@@ -667,6 +672,11 @@ class RunExecutor:
                 abort_msg = self._check_early_abort()
                 if abort_msg:
                     self._early_aborted = True
+                    self._record_event_anchor(
+                        'error_rate_breached',
+                        ts_ms=int(time.time() * 1000),
+                        metadata={'message': abort_msg[:200]},
+                    )
                     self._update_run(
                         status=RunStatus.CANCELLING,
                         error_message=abort_msg,
@@ -762,12 +772,20 @@ class RunExecutor:
         if summary['total_requests'] == 0:
             summary = _summarize_jtl(get_run_dir(run.run_id) / 'results.jtl')
 
+        # § 12 S2：error_breakdown 总是来自 JTL（InfluxDB summary 不含分桶字段）。
+        # 即使 InfluxDB summary 命中也补扫一次 JTL 算分桶——_summarize_jtl 已经
+        # 是 JTL 全扫，体积小（终态 JTL 一般 < 100MB）。
+        if 'error_breakdown' not in summary:
+            jtl_summary = _summarize_jtl(get_run_dir(run.run_id) / 'results.jtl')
+            summary['error_breakdown'] = jtl_summary.get('error_breakdown', {})
+
         status_update = {
             'finished_at': dj_timezone.now(),
             'avg_rps': summary.get('avg_rps', 0),
             'p99_ms': summary.get('p99_ms', 0),
             'error_rate': summary.get('error_rate', 0),
             'total_requests': summary.get('total_requests', 0),
+            'error_breakdown': summary.get('error_breakdown') or {},
         }
 
         # 终态决策
@@ -802,6 +820,13 @@ class RunExecutor:
 
         TaskRun.objects.filter(pk=run.pk).update(**status_update)
 
+        # § 12 S1：写阶段事件锚点（ramp_done / hold_start / shutdown_start）+
+        # 扫 InfluxDB 补 first_error。同步写表，体量小（< 10 条），失败静默不阻塞。
+        try:
+            self._record_phase_anchors_for_run(run)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: phase anchors record failed: {e}', file=sys.stderr)
+
         # 旧 run 自动归档
         try:
             cleanup_old_runs(keep=_RUN_KEEP_COUNT)
@@ -826,6 +851,76 @@ class RunExecutor:
             except Exception as e:  # noqa: BLE001
                 print(f'[executor] WARN: pinpoint collect dispatch failed: {e}',
                       file=sys.stderr)
+
+    def _record_event_anchor(self, event_type: str, ts_ms: int, metadata: dict | None = None) -> None:
+        """§ 12 S1：往 RunEventAnchor 写一条事件锚点。失败静默——事件锚点是辅助
+        信号，不阻塞 run 终态。"""
+        try:
+            from ..models import RunEventAnchor  # noqa: PLC0415
+            RunEventAnchor.objects.create(
+                run=self.run,
+                event_type=event_type,
+                ts_ms=int(ts_ms),
+                metadata=metadata or {},
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: event anchor write failed ({event_type}): {e}',
+                  file=sys.stderr)
+
+    def _record_phase_anchors_for_run(self, run) -> None:
+        """§ 12 S1：基于 run.started_at + task.thread_groups_config 算阶段锚点
+        （ramp_done / hold_start / shutdown_start）+ 扫 InfluxDB 补 first_error。
+
+        多 TG 时取首个（与 § 4 主场景决策一致）；TG kind 未知时跳过阶段锚点。
+        InfluxDB 不可达时 first_error 跳过。整流程失败静默。
+        """
+        from ..models import RunEventAnchor  # noqa: PLC0415
+        if not run.started_at:
+            return
+        started_ms = int(run.started_at.timestamp() * 1000)
+
+        # 1) 阶段锚点（来自 task config + 实际起始时刻）
+        anchors = scheduler_svc.estimate_phase_anchors_sec(run.task.thread_groups_config or [])
+        if anchors:
+            for event_type, sec_key in [
+                ('ramp_done', 'ramp_done_sec'),
+                ('hold_start', 'hold_start_sec'),
+                ('shutdown_start', 'shutdown_start_sec'),
+            ]:
+                sec = anchors.get(sec_key)
+                if sec is None or sec < 0:
+                    continue
+                # 同 ts 不写两次（hold_start 和 ramp_done 时刻经常一致）
+                ts_ms = started_ms + sec * 1000
+                if RunEventAnchor.objects.filter(
+                    run=run, event_type=event_type, ts_ms=ts_ms,
+                ).exists():
+                    continue
+                try:
+                    RunEventAnchor.objects.create(
+                        run=run, event_type=event_type, ts_ms=ts_ms,
+                        metadata={'phase_offset_sec': sec},
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f'[executor] WARN: phase anchor {event_type}: {e}', file=sys.stderr)
+
+        # 2) first_error：扫 InfluxDB 找第一个 error_count > 0 的 ts
+        try:
+            metrics = influxdb_svc.query_run_realtime(run.run_id)
+            err_pts = (metrics or {}).get('overall', {}).get('error_count') or []
+            for ts_ms, val in err_pts:
+                if val and val > 0:
+                    if not RunEventAnchor.objects.filter(
+                        run=run, event_type='first_error',
+                    ).exists():
+                        RunEventAnchor.objects.create(
+                            run=run, event_type='first_error',
+                            ts_ms=int(ts_ms),
+                            metadata={'error_count': int(val)},
+                        )
+                    break
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: first_error scan: {e}', file=sys.stderr)
 
     def _collect_pinpoint_safely(self, run) -> None:
         """daemon thread 入口；任何异常都吞掉，pinpoint_collector 自身已 fail-fast。"""
@@ -869,15 +964,23 @@ def _summarize_jtl(jtl_path: Path) -> dict:
     JTL 默认列：timeStamp,elapsed,label,responseCode,responseMessage,threadName,
     dataType,success,failureMessage,bytes,sentBytes,grpThreads,allThreads,
     URL,Latency,IdleTime,Connect
+
+    § 12 S2：同时按 jmeter_runner.classify_jtl_error 算 error_breakdown 5 桶。
     """
+    from .jmeter_runner import classify_jtl_error, empty_error_breakdown  # noqa: PLC0415
+    empty = {
+        'avg_rps': 0, 'p99_ms': 0, 'error_rate': 0, 'total_requests': 0,
+        'error_breakdown': empty_error_breakdown(),
+    }
     if not jtl_path.exists() or jtl_path.stat().st_size == 0:
-        return {'avg_rps': 0, 'p99_ms': 0, 'error_rate': 0, 'total_requests': 0}
+        return empty
 
     elapsed_list: list[int] = []
     error_count = 0
     total = 0
     first_ts: int | None = None
     last_ts: int | None = None
+    error_breakdown = empty_error_breakdown()
 
     try:
         with jtl_path.open('r', encoding='utf-8', errors='replace') as f:
@@ -896,8 +999,10 @@ def _summarize_jtl(jtl_path: Path) -> dict:
                 success = (row.get('success') or '').lower() == 'true'
                 if not success:
                     error_count += 1
+                    bucket = classify_jtl_error(row)
+                    error_breakdown[bucket] = error_breakdown.get(bucket, 0) + 1
     except OSError:
-        return {'avg_rps': 0, 'p99_ms': 0, 'error_rate': 0, 'total_requests': 0}
+        return empty
 
     p99 = 0
     if elapsed_list:
@@ -916,4 +1021,5 @@ def _summarize_jtl(jtl_path: Path) -> dict:
         'p99_ms': p99,
         'error_rate': (error_count / total * 100) if total else 0,
         'total_requests': total,
+        'error_breakdown': error_breakdown,
     }

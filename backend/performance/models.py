@@ -287,6 +287,12 @@ class TaskRun(models.Model):
     p99_ms = models.FloatField(default=0)
     error_rate = models.FloatField(default=0)  # 0-100 百分比
 
+    # § 12 S2：失败原因 5 类分桶（按 responseCode / failureMessage 分类，详见
+    # services/jmeter_runner.py::classify_jtl_error）。结构：
+    #   {'4xx': N, '5xx': N, 'assertion': N, 'timeout': N, 'connect_error': N, 'other': N}
+    # 总和 ≤ 失败样本数（other 桶兜底未识别的）。run 终态填，运行中保持空 dict。
+    error_breakdown = models.JSONField(default=dict, blank=True)
+
     error_message = models.TextField(blank=True)
 
     # Step 3 子进程编排相关
@@ -398,6 +404,56 @@ class BackendListenerConfig(models.Model):
     def get_config(cls) -> 'BackendListenerConfig':
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+
+class RunEventType(models.TextChoices):
+    """§ 12 关键事件锚点 enum。TextChoices 用 string 不用 int，新加值零 migration。"""
+    RAMP_DONE = 'ramp_done', 'ramp 完成（所有 vu 起来）'
+    HOLD_START = 'hold_start', 'hold 开始（稳态期）'
+    SHUTDOWN_START = 'shutdown_start', 'shutdown 开始'
+    FIRST_ERROR = 'first_error', '第一次出现错误'
+    ERROR_RATE_BREACHED = 'error_rate_breached', '错误率破阈值'
+    P99_SLA_BREACHED = 'p99_sla_breached', 'P99 破 SLA'
+
+
+class RunEventAnchor(models.Model):
+    """§ 12 S1：run 期间的关键事件锚点（v1.3）。
+
+    AI 看时序图能看出"P99 在 t=80s 跳了"，但没事件锚点 AI 推不出"这是 hold 开始的
+    瞬间还是中段抖动"——event 锚点提供因果关联。
+
+    写入路径：
+    - executor 状态切换时主动写（ramp_done / hold_start / shutdown_start /
+      error_rate_breached）
+    - _on_finish 扫 InfluxDB 一次性补录（first_error / p99_sla_breached）
+
+    前端 TrendsLayout / 焦点图按 ts_ms 在时间轴上画 markLine + 文字标注。
+    生命周期：与 run 一起 cascade（FK on_delete=CASCADE）。
+    """
+    run = models.ForeignKey('TaskRun', on_delete=models.CASCADE, related_name='event_anchors')
+    event_type = models.CharField(
+        max_length=40, choices=RunEventType.choices,
+        help_text='事件类型；按 RunEventType TextChoices 取值。',
+    )
+    ts_ms = models.BigIntegerField(help_text='事件时刻（ms epoch）；与 InfluxDB 时序对齐。')
+    metadata = models.JSONField(
+        default=dict, blank=True,
+        help_text='额外参数，例：error_rate_breached → {"threshold":0.8,"actual":0.95}；'
+                  'p99_sla_breached → {"sla_ms":500,"actual_ms":680}。',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Run 事件锚点'
+        verbose_name_plural = 'Run 事件锚点'
+        ordering = ['ts_ms']
+        indexes = [
+            models.Index(fields=['run', 'event_type']),
+            models.Index(fields=['run', 'ts_ms']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.run_id}/{self.event_type}@{self.ts_ms}'
 
 
 class PinpointConfig(models.Model):

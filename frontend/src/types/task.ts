@@ -222,6 +222,9 @@ export interface TaskRun {
   avg_rps: number
   p99_ms: number
   error_rate: number
+  // § 12 S2 失败原因 5 类分桶（终态时填，运行中为空 dict）
+  // 桶 key：'4xx' / '5xx' / 'assertion' / 'timeout' / 'connect_error' / 'other'
+  error_breakdown?: Record<string, number>
   error_message: string
   // Step 3 子进程编排相关
   pre_check_log: string
@@ -230,6 +233,23 @@ export interface TaskRun {
   last_heartbeat_at: string | null
   cancel_requested_at: string | null
   archived_at: string | null
+}
+
+// § 12 S1 关键事件锚点：run 期间的状态切换 / 阈值破坏事件，前端时间轴 markLine 用
+export type RunEventType =
+  | 'ramp_done'
+  | 'hold_start'
+  | 'shutdown_start'
+  | 'first_error'
+  | 'error_rate_breached'
+  | 'p99_sla_breached'
+
+export interface RunEvent {
+  id: number
+  event_type: RunEventType
+  ts_ms: number          // 毫秒 epoch
+  metadata: Record<string, any>
+  created_at: string
 }
 
 // § 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据列表

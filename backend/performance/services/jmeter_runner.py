@@ -272,6 +272,68 @@ def _sample_to_jtl(sample: etree._Element) -> JtlSample:
     )
 
 
+# ─── § 12 S2：失败原因 5 类分桶 ─────────────────────────────────────────
+
+ERROR_BUCKETS = ('4xx', '5xx', 'assertion', 'timeout', 'connect_error', 'other')
+
+
+def classify_jtl_error(row: dict) -> str:
+    """对单条 JTL 失败 sample 分类到 5 桶之一（other 桶兜底未识别）。
+
+    输入：CSV reader dict（含 responseCode / responseMessage / dataType /
+    failureMessage / success 等列）。仅在 success != 'true' 时调用。
+
+    优先级：assertion > timeout > connect-error > 4xx > 5xx > other（assertion
+    failure 可能挂在 200 OK 上，必须先识别）。
+
+    分类规则：
+      - assertion：dataType=='text' + responseCode 是 200/2xx + responseMessage
+        含 'Test failed' / failureMessage 含 'Assertion'
+      - timeout：failureMessage / responseMessage 含 timeout 关键字
+      - connect_error：connect / refused / unknown host / network unreachable
+      - 4xx：responseCode 400-499
+      - 5xx：responseCode 500-599
+      - other：未匹配（包含 Non HTTP / 0 / 空 等）
+    """
+    code_str = (row.get('responseCode') or '').strip()
+    fail_msg = (row.get('failureMessage') or '').lower()
+    resp_msg = (row.get('responseMessage') or '').lower()
+    combined = f'{fail_msg} {resp_msg}'.strip()
+
+    # assertion：可能挂在 200 OK 上，先识别
+    if 'assertion' in combined or 'test failed' in combined:
+        return 'assertion'
+
+    # timeout：read timed out / SocketTimeoutException / connect timed out
+    if 'timed out' in combined or 'timeout' in combined or 'sockettimeout' in combined:
+        return 'timeout'
+
+    # connect-error：连接层
+    if (
+        'connection refused' in combined or 'connection reset' in combined
+        or 'unknown host' in combined or 'network is unreachable' in combined
+        or 'no route to host' in combined or 'connect ' in combined
+    ):
+        return 'connect_error'
+
+    # 按 HTTP 状态码桶
+    try:
+        code = int(code_str)
+        if 400 <= code < 500:
+            return '4xx'
+        if 500 <= code < 600:
+            return '5xx'
+    except (TypeError, ValueError):
+        pass
+
+    return 'other'
+
+
+def empty_error_breakdown() -> dict:
+    """返回所有桶都是 0 的初始字典。"""
+    return {b: 0 for b in ERROR_BUCKETS}
+
+
 def _parse_jtl_xml(jtl_path: Path) -> list[JtlSample]:
     """XML 格式 JTL → JtlSample 列表。仅 save_response_data=True 时调用。"""
     if not jtl_path.exists():

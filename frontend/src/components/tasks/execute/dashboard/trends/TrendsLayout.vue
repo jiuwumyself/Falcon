@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import type { ErrorAggregateRow, RunMetrics, SamplerStat, Task, TaskRun } from '@/types/task'
+import type {
+  ErrorAggregateRow, RunEvent, RunMetrics, SamplerStat, Task, TaskRun,
+} from '@/types/task'
 import { runsApi } from '@/lib/api'
+import EventTimeline from './EventTimeline.vue'
 import KpiBar from './KpiBar.vue'
 import ErrorRateGauge from './ErrorRateGauge.vue'
 import ErrorCountChart from './ErrorCountChart.vue'
@@ -31,6 +34,7 @@ const TERMINAL_STATUSES: TaskRun['status'][] = [
 
 const samplerStats = ref<SamplerStat[]>([])
 const errorAggregates = ref<ErrorAggregateRow[]>([])
+const events = ref<RunEvent[]>([])
 
 let samplerTimer: number | null = null
 let errorTimer: number | null = null
@@ -67,10 +71,25 @@ async function fetchErrorAggregates() {
   }
 }
 
+// § 12 S1：拉关键事件锚点。终态时一次性拉好；运行中也能拉（早期事件已写入）
+async function fetchEvents() {
+  const id = activeRunId.value
+  if (!id) {
+    events.value = []
+    return
+  }
+  try {
+    events.value = await runsApi.events(id)
+  } catch {
+    events.value = []
+  }
+}
+
 function startTimers() {
   stopTimers()
   void fetchSamplerStats()
   void fetchErrorAggregates()
+  void fetchEvents()
   if (!isTerminal.value) {
     samplerTimer = window.setInterval(fetchSamplerStats, SAMPLER_POLL_MS)
     errorTimer = window.setInterval(fetchErrorAggregates, ERROR_POLL_MS)
@@ -162,6 +181,9 @@ const heroStyle = computed(() => ({
     >
       <KpiBar :task="task" :totals="totals" :series="overall" :is-dark="isDark" />
     </div>
+
+    <!-- 1.5 § 12 S1：关键事件锚点时间轴（无事件时不渲染） -->
+    <EventTimeline :events="events" :run="run" :is-dark="isDark" />
 
     <!-- 2. 健康度小图：错误率 gauge / 错误数 / 并发 / 人均吞吐 -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 h-[200px]">

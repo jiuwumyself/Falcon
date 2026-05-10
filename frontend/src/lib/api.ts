@@ -1,7 +1,7 @@
 import type {
   Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
-  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, RunMetrics,
-  SamplerStat, Service, Task, TaskRun,
+  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, RunEvent,
+  RunMetrics, SamplerStat, Service, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -169,6 +169,10 @@ export const runsApi = {
   // 未启用 / 无数据时返回空数组
   pinpointTraces: (runId: string): Promise<PinpointTrace[]> =>
     api<PinpointTrace[]>(`/runs/${runId}/pinpoint-traces/`),
+  // § 12 S1：run 期间关键事件锚点（ramp_done / hold_start / shutdown_start /
+  // first_error / error_rate_breached / p99_sla_breached）；前端时间轴 markLine 用
+  events: (runId: string): Promise<RunEvent[]> =>
+    api<RunEvent[]>(`/runs/${runId}/events/`),
 }
 
 // ─── LoadGenerators API（v1.2 容器化压力源） ────────────────────────────

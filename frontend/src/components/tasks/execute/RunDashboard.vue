@@ -84,6 +84,7 @@ const isTerminal = computed(() =>
                    :is-terminal="isTerminal"
                    :is-dark="isDark" />
       <ErrorsTab v-else-if="active === 'errors'"
+                 :run="run"
                  :run-id="run?.run_id || null"
                  :is-dark="isDark" />
       <TimelineTab v-else-if="active === 'timeline'"

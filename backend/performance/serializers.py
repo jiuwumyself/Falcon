@@ -1,8 +1,8 @@
 from rest_framework import serializers
 
 from .models import (
-    Environment, LoadGenerator, MetricSample, RunPinpointTrace, Service,
-    Task, TaskCsvBinding, TaskRun,
+    Environment, LoadGenerator, MetricSample, RunEventAnchor, RunPinpointTrace,
+    Service, Task, TaskCsvBinding, TaskRun,
 )
 
 
@@ -94,11 +94,20 @@ class TaskRunSerializer(serializers.ModelSerializer):
             'started_at', 'finished_at',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
             'total_requests', 'avg_rps', 'p99_ms', 'error_rate',
+            'error_breakdown',  # § 12 S2 失败原因 5 类分桶
             'error_message', 'pre_check_log',
             'pid', 'stop_port', 'last_heartbeat_at',
             'cancel_requested_at', 'archived_at',
         ]
         read_only_fields = fields  # 写入由 RunExecutor 控制，不通过 serializer
+
+
+class RunEventAnchorSerializer(serializers.ModelSerializer):
+    """§ 12 S1：run 期间的关键事件锚点。前端时间轴 markLine 用。"""
+    class Meta:
+        model = RunEventAnchor
+        fields = ['id', 'event_type', 'ts_ms', 'metadata', 'created_at']
+        read_only_fields = fields
 
 
 class RunPinpointTraceSerializer(serializers.ModelSerializer):

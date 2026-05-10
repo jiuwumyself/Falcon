@@ -93,6 +93,77 @@ def _estimate_tg_seconds(kind: str, params: dict) -> int:
     return _i('duration')
 
 
+def estimate_phase_anchors_sec(thread_groups_config: list[dict]) -> dict[str, int]:
+    """§ 12 S1：估算 run 内三个阶段切换的相对秒数（从 started_at 起）。
+
+    多 TG 时取第一个 enabled TG（与 § 4 §12 决策一致：主场景由首个 TG 决定）。
+
+    返回 {'ramp_done_sec', 'hold_start_sec', 'shutdown_start_sec'}；未知 kind /
+    缺参数时返回空 dict（调用方按"无锚点"处理，不写事件）。
+    """
+    if not thread_groups_config:
+        return {}
+    tg = thread_groups_config[0]
+    if not isinstance(tg, dict):
+        return {}
+    kind = tg.get('kind') or 'ThreadGroup'
+    p = tg.get('params') or {}
+
+    def _i(key, default=0):
+        try:
+            return int(p.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    if kind == 'ThreadGroup':
+        ramp = _i('ramp_up')
+        duration = _i('duration')
+        if duration <= 0:
+            return {}
+        return {
+            'ramp_done_sec': ramp,
+            'hold_start_sec': ramp,
+            'shutdown_start_sec': duration,  # 标准 TG 没显式 shutdown，duration 结束就退
+        }
+    if kind == 'SteppingThreadGroup':
+        ramp = _i('step_count') * _i('step_delay')
+        hold = _i('hold')
+        return {
+            'ramp_done_sec': ramp,
+            'hold_start_sec': ramp,
+            'shutdown_start_sec': ramp + hold,
+        }
+    if kind == 'ConcurrencyThreadGroup':
+        ramp = _i('ramp_up')
+        hold = _i('hold')
+        return {
+            'ramp_done_sec': ramp,
+            'hold_start_sec': ramp,
+            'shutdown_start_sec': ramp + hold,
+        }
+    if kind == 'ArrivalsThreadGroup':
+        ramp = _i('ramp_up')
+        hold = _i('hold')
+        return {
+            'ramp_done_sec': ramp,
+            'hold_start_sec': ramp,
+            'shutdown_start_sec': ramp + hold,
+        }
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows') or []
+        if not isinstance(rows, list) or not rows:
+            return {}
+        row = rows[0] if isinstance(rows[0], dict) else {}
+        ramp = int(row.get('initial_delay') or 0) + int(row.get('ramp_up') or 0)
+        hold = int(row.get('hold') or 0)
+        return {
+            'ramp_done_sec': ramp,
+            'hold_start_sec': ramp,
+            'shutdown_start_sec': ramp + hold,
+        }
+    return {}
+
+
 def estimate_max_wall_sec(
     thread_groups_config: list[dict],
     fallback_seconds: int = 0,
