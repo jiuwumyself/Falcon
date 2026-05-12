@@ -298,7 +298,12 @@ def classify_jtl_error(row: dict) -> str:
     code_str = (row.get('responseCode') or '').strip()
     fail_msg = (row.get('failureMessage') or '').lower()
     resp_msg = (row.get('responseMessage') or '').lower()
-    combined = f'{fail_msg} {resp_msg}'.strip()
+    # responseCode 也纳入关键字匹配：JMeter Non-HTTP 失败把 Java 异常类名写在这里
+    # （'Non HTTP response code: java.net.UnknownHostException' 等），不读这一列
+    # camelcase 关键字（unknownhostexception / connectexception）永远匹配不上。
+    # 纯数字 code（400/500 等）不会误命中下面的英文关键字，安全。
+    code_lower = code_str.lower()
+    combined = f'{fail_msg} {resp_msg} {code_lower}'.strip()
 
     # assertion：可能挂在 200 OK 上，先识别
     if 'assertion' in combined or 'test failed' in combined:
@@ -309,10 +314,15 @@ def classify_jtl_error(row: dict) -> str:
         return 'timeout'
 
     # connect-error：连接层
+    # 同时识别两种形态：JMeter 写的"人类 message"（带空格 / 空格分词）+ Java 异常类名
+    # （UnknownHostException 等 camelcase 无空格，lower 后连成一串）—— 不加 camelcase
+    # 关键字时 fall through 到 other 桶。
     if (
         'connection refused' in combined or 'connection reset' in combined
-        or 'unknown host' in combined or 'network is unreachable' in combined
-        or 'no route to host' in combined or 'connect ' in combined
+        or 'unknown host' in combined or 'unknownhostexception' in combined
+        or 'network is unreachable' in combined or 'unreachable' in combined
+        or 'no route to host' in combined or 'noroutetohostexception' in combined
+        or 'connect ' in combined or 'connectexception' in combined
     ):
         return 'connect_error'
 
