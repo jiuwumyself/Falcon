@@ -28,9 +28,25 @@ const scaling = ref(false)
 const scaleCount = ref(1)
 const error = ref('')
 
+// 心跳 ≤ 90s 算"刚活"。release_idle_agents 30 min 才会标 lost，开发态 idle 状态可能
+// 残留死容器；客户端再卡一道时间窗，只显示真活的 agent。
+const FRESH_HEARTBEAT_MS = 90 * 1000
+
+// 显示用 list：只保留 status=idle 且心跳新鲜的（lost / busy / pending / 心跳过期全过滤）。
+// 用户开 modal 看到的列表 = 「能马上跑的 agent」，无歧义。
+const visibleLgs = computed<LoadGenerator[]>(() => {
+  const now = Date.now()
+  return lgs.value.filter((g) => {
+    if (g.status !== 'idle') return false
+    if (!g.last_heartbeat_at) return false
+    const age = now - new Date(g.last_heartbeat_at).getTime()
+    return age < FRESH_HEARTBEAT_MS
+  })
+})
+
 const selected = computed(() => selectedIds.value)
 const totalCapacity = computed(() =>
-  lgs.value
+  visibleLgs.value
     .filter((g) => selected.value.has(g.id))
     .reduce((sum, g) => sum + g.max_vusers, 0),
 )
@@ -45,6 +61,14 @@ async function refresh() {
   error.value = ''
   try {
     lgs.value = await loadGeneratorsApi.list()
+    // 选中过的 agent 若已不在 visibleLgs 里（心跳过期 / 变 lost / 容器停了）
+    // → 自动反选，避免用户点"开始"时把已死 agent 传给后端
+    const visibleIds = new Set(visibleLgs.value.map((g) => g.id))
+    const cleaned = new Set<number>()
+    for (const id of selectedIds.value) {
+      if (visibleIds.has(id)) cleaned.add(id)
+    }
+    selectedIds.value = cleaned
     autoSelectIfEmpty()
   } catch (e) {
     error.value = e instanceof ApiError ? e.humanMessage : String(e)
@@ -55,19 +79,17 @@ async function refresh() {
 
 function autoSelectIfEmpty() {
   if (selectedIds.value.size > 0) return
-  const idle = lgs.value
-    .filter((g) => g.status === 'idle')
-    .sort((a, b) => b.max_vusers - a.max_vusers)
+  const fresh = [...visibleLgs.value].sort((a, b) => b.max_vusers - a.max_vusers)
   let need = props.vusers
   const next = new Set<number>()
-  for (const g of idle) {
+  for (const g of fresh) {
     if (need <= 0) break
     next.add(g.id)
     need -= g.max_vusers
   }
   // 至少选 1 台（即使 vusers 已经被前面填满也保证默认有选）
-  if (next.size === 0 && idle.length) {
-    next.add(idle[0].id)
+  if (next.size === 0 && fresh.length) {
+    next.add(fresh[0].id)
   }
   selectedIds.value = next
 }
@@ -92,13 +114,6 @@ async function doScaleUp() {
   } finally {
     scaling.value = false
   }
-}
-
-function statusColor(s: string): string {
-  if (s === 'idle') return '#10b981'
-  if (s === 'busy') return '#f59e0b'
-  if (s === 'lost') return '#ef4444'
-  return '#6b7280'
 }
 
 function confirm() {
@@ -179,27 +194,25 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         <AlertCircle :size="11" /> {{ error }}
       </p>
 
-      <!-- agent 列表 -->
+      <!-- agent 列表（只显示 status=idle 且心跳新鲜的，过滤 lost / 死壳）-->
       <div class="flex-1 min-h-0 overflow-y-auto rounded-lg border"
            :style="{ borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }">
-        <p v-if="!lgs.length && !loading"
+        <p v-if="!visibleLgs.length && !loading"
            class="text-[11px] py-4 text-center"
            :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }">
-          暂无压力源。点下方「+扩容」拉起 agent 容器。
+          暂无可用压力源。点下方「+扩容」拉起 agent 容器。
         </p>
         <button
-          v-for="g in lgs"
+          v-for="g in visibleLgs"
           :key="g.id"
-          class="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] cursor-pointer disabled:opacity-50"
-          :disabled="g.status !== 'idle'"
+          class="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] cursor-pointer"
           :style="{
             background: selected.has(g.id)
               ? (isDark ? 'rgba(59,130,246,0.12)' : 'rgba(59,130,246,0.08)')
               : 'transparent',
             color: isDark ? '#fff' : '#1a1a2e',
-            cursor: g.status !== 'idle' ? 'not-allowed' : 'pointer',
           }"
-          @click="g.status === 'idle' && toggle(g.id)"
+          @click="toggle(g.id)"
         >
           <span
             class="flex items-center justify-center w-4 h-4 rounded-sm flex-shrink-0"
@@ -212,7 +225,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           >
             <CheckCircle2 v-if="selected.has(g.id)" :size="11" color="#fff" />
           </span>
-          <span class="flex-1 truncate">{{ g.pod_name }}</span>
+          <!-- 主体：容器名 + IP:Port（一眼看清哪台机器）-->
+          <span class="flex-1 min-w-0 flex items-baseline gap-2">
+            <span class="truncate font-mono">{{ g.pod_name }}</span>
+            <span class="text-[10px] flex-shrink-0"
+                  :style="{ color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)' }">
+              {{ g.ip }}:{{ g.port }}
+            </span>
+          </span>
           <span class="text-[10px]"
                 :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.5)' }">
             {{ g.cpu_cores }}C/{{ g.memory_gb }}G
@@ -221,13 +241,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
                 :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.5)' }">
             cap {{ g.max_vusers }}
           </span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
-                :style="{
-                  background: `${statusColor(g.status)}1f`,
-                  color: statusColor(g.status),
-                }">
-            {{ g.status }}
-          </span>
+          <!-- 在线圆点（visibleLgs 全是 idle + 心跳新鲜，不需要 status 文本徽章）-->
+          <span class="w-2 h-2 rounded-full flex-shrink-0"
+                :style="{ background: '#10b981', boxShadow: '0 0 4px rgba(16,185,129,0.5)' }"
+                title="online"></span>
         </button>
       </div>
 
