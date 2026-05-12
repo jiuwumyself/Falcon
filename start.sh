@@ -30,10 +30,23 @@ echo "→ 启动前端 (Vite @ :5173) …"
 ( cd frontend && npm run dev ) &
 FRONTEND_PID=$!
 
+# v1.2 多机：周期回收僵尸 agent（30min 无心跳的 idle agent 标 lost + scale_down）。
+# 生产环境应该走 cron / systemd timer，开发态简单起个 bg loop 够用。
+# IDLE_RELEASE_MINUTES 默认 30，可在 backend/.env 覆盖。
+echo "→ 启动 agent 周期回收 (每 5 min release_idle_agents) …"
+(
+  while true; do
+    sleep 300
+    ( cd backend && ./venv/bin/python manage.py release_idle_agents ) \
+      >> /tmp/falcon-release-idle.log 2>&1 || true
+  done
+) &
+RELEASE_PID=$!
+
 cleanup() {
   echo
   echo "→ 停止 …"
-  kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$FRONTEND_PID" "$RELEASE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   exit 0
 }
@@ -41,10 +54,11 @@ trap cleanup INT TERM
 
 cat <<EOF
 
-  Backend  → http://localhost:8000   (pid $BACKEND_PID)
-  Frontend → http://localhost:5173   (pid $FRONTEND_PID)
+  Backend         → http://localhost:8000   (pid $BACKEND_PID)
+  Frontend        → http://localhost:5173   (pid $FRONTEND_PID)
+  release-idle    → 每 5 min 跑一次          (pid $RELEASE_PID, log /tmp/falcon-release-idle.log)
 
-  Ctrl+C 同时停止两端
+  Ctrl+C 同时停止
 EOF
 
 wait

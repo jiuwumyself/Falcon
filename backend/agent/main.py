@@ -39,7 +39,7 @@ from typing import Optional
 import psutil
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 
 # ── 环境变量 ────────────────────────────────────────────────────────────
@@ -507,6 +507,27 @@ def run_log(run_id: str, tail: int = 200):
     return {'lines': lines[-tail:] if len(lines) > tail else lines}
 
 
+def _stream_snapshot(path: Path, chunk: int = 65536):
+    """按"读取时的文件 size 快照"流式吐字节，不预设 Content-Length。
+
+    JMeter 边跑边追加写 jtl / errors.xml，主控运行中拉增量。FileResponse 把打开
+    时的 stat().st_size 写到 Content-Length 头，等 starlette 真在 send 时文件
+    已经变大 → RuntimeError: Response content longer than Content-Length。
+
+    修法：先 snapshot 一次 size，只读这么多字节。读出来一定是完整 ≤ snapshot 的
+    一个状态切片，下游 csv 解析不受影响（最多丢掉一行未刷盘的半行，下次拉时补回）。
+    """
+    size = path.stat().st_size
+    with path.open('rb') as f:
+        remaining = size
+        while remaining > 0:
+            data = f.read(min(chunk, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
+
+
 @app.get('/runs/{run_id}/jtl')
 def run_jtl(run_id: str):
     with _runs_lock:
@@ -516,13 +537,18 @@ def run_jtl(run_id: str):
     jtl = run.work_dir / 'results.jtl'
     if not jtl.exists():
         raise HTTPException(status_code=404, detail='jtl not yet')
-    return FileResponse(str(jtl), media_type='text/csv', filename=f'{run_id}.jtl')
+    return StreamingResponse(
+        _stream_snapshot(jtl),
+        media_type='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{run_id}.jtl"'},
+    )
 
 
 @app.get('/runs/{run_id}/errors-xml')
 def run_errors_xml(run_id: str):
     """SimpleDataWriter 落盘的失败样本 XML（含 responseData/body），主控合并后给
-    前端 ErrorByEndpointTable 的 message 列拿真实响应。文件不存在时 404，主控容错。"""
+    前端 ErrorByEndpointTable 的 message 列拿真实响应。文件不存在时 404，主控容错。
+    同 jtl：StreamingResponse + size snapshot 避开 Content-Length 漂移。"""
     with _runs_lock:
         run = _runs.get(run_id)
     if not run:
@@ -530,7 +556,11 @@ def run_errors_xml(run_id: str):
     errors = run.work_dir / 'errors.xml'
     if not errors.exists() or errors.stat().st_size == 0:
         raise HTTPException(status_code=404, detail='no errors.xml')
-    return FileResponse(str(errors), media_type='application/xml', filename=f'{run_id}.errors.xml')
+    return StreamingResponse(
+        _stream_snapshot(errors),
+        media_type='application/xml',
+        headers={'Content-Disposition': f'attachment; filename="{run_id}.errors.xml"'},
+    )
 
 
 @app.delete('/runs/{run_id}')

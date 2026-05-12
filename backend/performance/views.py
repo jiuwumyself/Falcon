@@ -65,28 +65,13 @@ def _compute_tg_planned_users(run) -> dict:
 
     testname 仍从当前 jmx 按 path 推（snapshot 没存 testname）；TG 改名时会错位，但
     比 kind/params 错配影响小。
+
+    per-kind 计算逻辑走 scheduler._planned_vusers_for_tg（同源 single source of
+    truth；executor.compute_shards 也用它算分片总数，避免两份分发漂移）。
     """
+    from .services.scheduler import _planned_vusers_for_tg  # noqa: PLC0415
     path_to_testname = _path_to_testname(run)
     snap_cfgs = run.thread_groups_config_snapshot or run.task.thread_groups_config or []
-
-    def _planned(kind: str, params: dict) -> int:
-        try:
-            if kind == 'ThreadGroup':
-                return int(params.get('users') or 0)
-            if kind == 'SteppingThreadGroup':
-                return int(params.get('initial_threads') or 0) + \
-                    int(params.get('step_users') or 0) * int(params.get('step_count') or 0)
-            if kind == 'ConcurrencyThreadGroup':
-                return int(params.get('target_concurrency') or 0)
-            if kind == 'UltimateThreadGroup':
-                rows = params.get('rows') or []
-                if isinstance(rows, list):
-                    return sum(int(r.get('users') or 0) for r in rows if isinstance(r, dict))
-                return int(params.get('users') or 0)
-            # ArrivalsThreadGroup 不算线程驱动 → 0
-            return 0
-        except (TypeError, ValueError):
-            return 0
 
     out: dict[str, int] = {}
     for entry in snap_cfgs:
@@ -99,7 +84,7 @@ def _compute_tg_planned_users(run) -> dict:
         testname = path_to_testname.get(path) or path
         if not testname:
             continue
-        out[testname] = _planned(kind, params)
+        out[testname] = _planned_vusers_for_tg(kind, params)
     return out
 
 

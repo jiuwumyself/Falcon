@@ -165,6 +165,68 @@ def estimate_phase_anchors_sec(thread_groups_config: list[dict]) -> dict[str, in
     return {}
 
 
+def _planned_vusers_for_tg(kind: str, params: dict) -> int:
+    """单个 TG 的"计划线程数"（thread 驱动 TG 的并发上限）。
+
+    跟 views._compute_tg_planned_users 同源：前端 ConcurrencyChart 拿这个画计划线，
+    后端 compute_shards 拿 sum 做分片。
+
+      ThreadGroup            : users
+      SteppingThreadGroup    : initial_threads + step_users × step_count
+      ConcurrencyThreadGroup : target_concurrency
+      UltimateThreadGroup    : sum(rows.users)（多峰错峰也是总线程数）
+      ArrivalsThreadGroup    : 0（RPS 驱动，不按 vusers 分；由 _scale_thread_groups_to_shard
+                                按 target_rps 比例缩放）
+    """
+    p = params or {}
+
+    def _i(key, default=0):
+        try:
+            return int(p.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    if kind == 'ThreadGroup':
+        return _i('users')
+    if kind == 'SteppingThreadGroup':
+        return _i('initial_threads') + _i('step_users') * _i('step_count')
+    if kind == 'ConcurrencyThreadGroup':
+        return _i('target_concurrency')
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows') or []
+        if isinstance(rows, list) and rows:
+            return sum(int(r.get('users') or 0) for r in rows if isinstance(r, dict))
+        return _i('users')
+    # ArrivalsThreadGroup / 未知 kind → 0
+    return 0
+
+
+def compute_planned_vusers_total(
+    thread_groups_config: list[dict],
+    fallback: int = 0,
+) -> int:
+    """所有 enabled thread-driven TG 的 planned vusers 之和。
+
+    JMeter 行为：多 TG 并行 → 总线程数 = 各 TG 之和（不是 max）。多机分片要按这个
+    总数除以 agent 台数派活，否则像 task.virtual_users（jmx parse 时的初值）会把
+    "3 个 TG 各 5 线程"误读成 1，分片永远只塞第一台。
+
+    fallback：sum=0 时（纯 ArrivalsTG 或配置全空）返 fallback，最少 1。
+    """
+    if not thread_groups_config:
+        return max(1, fallback)
+    total = 0
+    for tg in thread_groups_config:
+        if not isinstance(tg, dict):
+            continue
+        kind = tg.get('kind') or 'ThreadGroup'
+        params = tg.get('params') or {}
+        total += _planned_vusers_for_tg(kind, params)
+    if total <= 0:
+        return max(1, fallback)
+    return total
+
+
 def estimate_max_wall_sec(
     thread_groups_config: list[dict],
     fallback_seconds: int = 0,

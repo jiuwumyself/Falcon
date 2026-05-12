@@ -528,14 +528,26 @@ class RunExecutor:
         run_dir = get_run_dir(self.run.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        shards = scheduler_svc.compute_shards(self.run.virtual_users, self._selected_lgs)
+        # 总并发要走 thread_groups_config 聚合：task.virtual_users 是 jmx parse 时
+        # 的初值（来自第一个标准 TG，可能 = 1 或解析兜底），多 TG 场景严重失真 →
+        # compute_shards 拿到偏小的 vusers，share 算少甚至只塞第一台 agent。
+        # snapshot 优先（已快照当时的 TG 配置），无 snapshot 走当前 task 配置兜底。
+        tg_cfgs = (
+            self.run.thread_groups_config_snapshot
+            or self.run.task.thread_groups_config
+            or []
+        )
+        total_vusers = scheduler_svc.compute_planned_vusers_total(
+            tg_cfgs, fallback=self.run.virtual_users or 1,
+        )
+        shards = scheduler_svc.compute_shards(total_vusers, self._selected_lgs)
         # 每台 agent 起一个分片任务
         for shard in shards:
             shard_jmx = scheduler_svc.build_shard_jmx(
                 self.run.task,
                 run_id=self.run.run_id,
                 shard=shard,
-                total_vusers=self.run.virtual_users,
+                total_vusers=total_vusers,
                 total_shards=len(shards),
                 # 分布式：jmx 在 agent 容器里跑，烤进容器可达的 InfluxDB URL
                 # （主控自己读 InfluxDB 仍走 settings.INFLUXDB_URL）
@@ -549,8 +561,12 @@ class RunExecutor:
             # build_shard_jmx 已经把 CSVDataSet filename 改成 'csv/<filename>'（agent 端
             # 相对路径），agent main.py 收到 csv_files 后写到 <work_dir>/csv/<filename>，
             # JMeter 按 jmx 所在目录解析相对路径，对得上。
-            # 切片：CLAUDE.md §5 v1.2 ❓ 列的"slice_csv_by_offset 串接 executor"待办——
-            # 当前用全量副本（每台 agent 一份完整 CSV），账号池场景需要切片时再分支。
+            #
+            # 切片开关 settings.CSV_SLICE_ENABLED：
+            #   - False（默认）→ 全量副本（字典表 / 共享参数场景）
+            #   - True → slice_csv_by_offset 按行模 (row_idx % shard_count == shard_index)
+            #     切片，各 agent 只拿自己那部分（账号池等"数据只能用一次"场景）
+            csv_slice = getattr(settings, 'CSV_SLICE_ENABLED', False)
             from .jmeter import get_scripts_dir  # noqa: PLC0415
             scripts_dir = get_scripts_dir()
             for binding in self.run.task.csv_bindings.all():
@@ -561,9 +577,21 @@ class RunExecutor:
                     print(f'[executor] WARN: csv binding {binding.filename} 物理文件不存在，跳过',
                           file=sys.stderr)
                     continue
+                if csv_slice and len(shards) > 1:
+                    try:
+                        payload = scheduler_svc.slice_csv_by_offset(
+                            src, shard_index=shard.index, shard_count=len(shards),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        # 切片失败（编码 / 格式异常）→ 兜底全量副本，不阻断 run
+                        print(f'[executor] WARN: csv slice {binding.filename} 失败兜底全量: {e}',
+                              file=sys.stderr)
+                        payload = src.read_bytes()
+                else:
+                    payload = src.read_bytes()
                 files.append((
                     'csv_files',
-                    (binding.filename, src.read_bytes(), 'text/csv'),
+                    (binding.filename, payload, 'text/csv'),
                 ))
             try:
                 r = requests.post(

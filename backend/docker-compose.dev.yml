@@ -1,16 +1,20 @@
-# Falcon Step 3 本地开发用 InfluxDB v1.8。
-#
-# 用途：JMeter Backend Listener 把每个请求的耗时 / 状态推到 InfluxDB；
-#       后端 performance/services/influxdb.py 只读查询给前端展示。
+# Falcon 本地开发：InfluxDB + 3 台 falcon-agent。
 #
 # 启停：
 #   docker compose -f backend/docker-compose.dev.yml up -d
 #   docker compose -f backend/docker-compose.dev.yml down
+#   docker compose -f backend/docker-compose.dev.yml down -v   # 连数据一起清
 #
-# 数据持久化在 named volume `falcon-influxdb-data`，重启容器不丢。
-# 想清空数据：docker compose -f backend/docker-compose.dev.yml down -v
+# 启动后建库 + 保留策略：./venv/bin/python manage.py setup_influxdb
 #
-# 启动后必须跑一次 `./venv/bin/python manage.py setup_influxdb` 建库 + 保留策略。
+# ── 多 agent 端口分配 ─────────────────────────────────────────────────────
+# 单机 dev 形态下 `--scale agent=N` 会撞 host port，所以拆成 agent1/agent2/agent3
+# 三个独立 service，各自固定 host port + FALCON_AGENT_REPORT_PORT。agent 容器内
+# 仍 listen 9100；外面通过 `9101:9100` / `9102:9100` 映射到不同 host port，
+# FALCON_AGENT_REPORT_PORT 告诉它 register 时该上报的 host port，主控按此调进来。
+#
+# 想只起部分：`docker compose -f ... up -d agent1 agent2`（只起 2 台）。
+# 想加更多：复制 agent3 段，host port 改 9103/9104...
 services:
   influxdb:
     image: influxdb:1.8
@@ -25,38 +29,60 @@ services:
       - falcon-influxdb-data:/var/lib/influxdb
     restart: unless-stopped
 
-  # falcon-agent：v1.2 容器化压力源
-  # 默认启动 1 副本（开发态永远在线）；用户在 Step 3 弹窗里点「+扩容」按钮
-  # 主控调适配器执行 `up -d --scale agent=N` 改副本数。
-  #
-  # 启动（默认 1 台）：docker compose -f backend/docker-compose.dev.yml up -d agent
-  # 手动扩容：       docker compose -f backend/docker-compose.dev.yml up -d --scale agent=3 agent
-  # 缩容到 0：       docker compose -f backend/docker-compose.dev.yml up -d --scale agent=0 agent
-  #
-  # agent 启动时自动调主控 POST /api/performance/load-generators/register/ 自注册。
-  agent:
+  agent1:
     build:
       context: .
       dockerfile: agent/Dockerfile
     image: falcon-agent:1.2
-    deploy:
-      # 默认副本数。docker compose v2 的 deploy.replicas 在非 swarm 模式下也被尊重。
-      replicas: 1
     environment:
-      # host.docker.internal 让 Linux 容器也能回调宿主主控（macOS Docker Desktop 内置）
+      - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
+      - FALCON_AGENT_TOKEN=${FALCON_AGENT_TOKEN:-}
+      - FALCON_AGENT_PORT=9100                     # 容器内 listen
+      - FALCON_AGENT_REPORT_IP=${FALCON_AGENT_REPORT_IP:-127.0.0.1}
+      - FALCON_AGENT_REPORT_PORT=9100              # 上报给主控的 host port
+      - FALCON_MAX_VUSERS=100
+      - FALCON_ORCHESTRATOR_TYPE=docker
+    ports:
+      - "9100:9100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  agent2:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: falcon-agent:1.2
+    environment:
       - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
       - FALCON_AGENT_TOKEN=${FALCON_AGENT_TOKEN:-}
       - FALCON_AGENT_PORT=9100
+      - FALCON_AGENT_REPORT_IP=${FALCON_AGENT_REPORT_IP:-127.0.0.1}
+      - FALCON_AGENT_REPORT_PORT=9101
       - FALCON_MAX_VUSERS=100
       - FALCON_ORCHESTRATOR_TYPE=docker
-      # 单机 dev 形态：让 agent 上报 127.0.0.1（主控走宿主 published port 9100 调进来）。
-      # 多 agent 扩容时这条得改：每个 replica 拿不同 host port，需要别的方案。
-      - FALCON_AGENT_REPORT_IP=${FALCON_AGENT_REPORT_IP:-127.0.0.1}
     ports:
-      # 单机 dev：发布 9100 供主控反向调用。scale > 1 会端口冲突，阶段 2 解决。
-      - "9100:9100"
+      - "9101:9100"
     extra_hosts:
-      # Linux Docker 没有 host.docker.internal，手动加；macOS/Windows Docker Desktop 自带
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  agent3:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: falcon-agent:1.2
+    environment:
+      - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
+      - FALCON_AGENT_TOKEN=${FALCON_AGENT_TOKEN:-}
+      - FALCON_AGENT_PORT=9100
+      - FALCON_AGENT_REPORT_IP=${FALCON_AGENT_REPORT_IP:-127.0.0.1}
+      - FALCON_AGENT_REPORT_PORT=9102
+      - FALCON_MAX_VUSERS=100
+      - FALCON_ORCHESTRATOR_TYPE=docker
+    ports:
+      - "9102:9100"
+    extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
