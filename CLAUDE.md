@@ -145,13 +145,13 @@ npx vue-tsc --noEmit     # 仅类型检查
 
 ## 5. 当前真实状态（重要）
 
-**v1.2 容器化压力源 + Dashboard 重构 已落地（前/后端骨架，未现场跑通）**（2026-05-07）：
+**v1.2 容器化压力源 + Dashboard 重构 已落地（端到端已验证）**（2026-05-07 骨架；2026-05-13 多机联调通过 commit 18407d9）：
 
 ### 容器化压力源（LoadGenerator）+ 多机调度
 
 - ✅ **`LoadGenerator` 模型**（migration 0010）：`pod_name`（unique）/ `ip:port` / `token` / `status`（pending/idle/busy/lost）/ `cpu_cores` / `memory_gb` / `max_vusers`（默认 100）/ `orchestrator_type` / `last_heartbeat_at`。`TaskRun` 加 M2M `load_generators` 记录这次 run 用了哪几台
 - ✅ **`backend/agent/`** = 单进程 FastAPI + 内置 JMeter 5.6.3（含 plugins-casutg / cmn-jmeter）的容器镜像。`agent/main.py` startup 自调主控 `register/`，30s 心跳；端点 `POST /runs` 起 jmeter 子进程 / `POST /runs/:id/cancel` graceful + SIGKILL / `GET /jtl` 给主控合并 / `GET /system-metrics` psutil 实时 CPU/Mem/IO
-- ✅ **`docker-compose.dev.yml` 加 `agent` 服务**：默认 1 副本，扩缩容 `up -d --scale agent=N agent`。`extra_hosts: host.docker.internal:host-gateway` 让 Linux 容器也能回调宿主主控
+- ✅ **`docker-compose.dev.yml` 拆 agent1/agent2/agent3 三个独立 service**（2026-05-13 重构）：固定 host port 9100/9101/9102，`FALCON_AGENT_REPORT_PORT` 注入对应值让 agent 注册时上报正确 host port。要更多机器复制 agent3 段递增端口即可。`extra_hosts: host.docker.internal:host-gateway` 让 Linux 容器也能回调宿主主控。**不再用 `--scale`**（单机 dev 下会撞 host port）
 - ✅ **`services/orchestrator/`** = OrchestratorAdapter 抽象 + `DockerComposeAdapter`（subprocess 调 docker compose）+ `K8sAdapter`（v1.3 stub）；`factory.get_adapter()` 按 `settings.ORCHESTRATOR_TYPE` 选实现
 - ✅ **`services/scheduler.py`**：`compute_shards`（按 max_vusers 容量分配 vusers）+ `build_shard_jmx`（复用 `build_run_xml` 后逐 TG 改 num_threads + BackendListener 加 `host=pod_name` tag）+ `slice_csv_by_offset`（行偏移切片，留接口位）
 - ✅ **`services/jtl_merger.py`**：多 jtl 流式 N-way merge by timeStamp，O(N) 内存
@@ -185,12 +185,22 @@ npx vue-tsc --noEmit     # 仅类型检查
 - ✅ **`StartRunModal`**：列出 idle agent + 容量校验（合计 max_vusers ≥ task.virtual_users）+ 「+ 扩容」按钮（调 `loadGeneratorsApi.scaleUp`）
 - ✅ **`SystemMetricsModal`**：弹窗轮询 agent psutil 实时 CPU/Mem/Net/Disk IO
 
-### v1.2 仍待验证 / 收尾
+### v1.2 多机端到端联调（2026-05-13，commit 18407d9）
 
-- ❓ 整套未做端到端联调（仍承接 v1.1 bookmark：Step 3 BackendListener 修复后未验证图表，又叠了 v1.2 改动）
-- ❓ `_run_distributed` 当前 CSV 用全量副本（每台 agent 一份完整 CSV），`scheduler.slice_csv_by_offset` 已实现接口位但未在 executor 串接
-- ❓ 多 agent 的 InfluxDB host tag 已注入，但前端 `RunMetricsCharts` / dashboard `TrendsTab` 是否正确按 host 切分图未验证
+5 件套 fix 后端到端跑通（task vu=1 + 3 agent，run `9648ad3d7e31fa73`）：
+- ✅ **#1 compute_shards 改吃 thread_groups_config 聚合**：原拿 `task.virtual_users`（jmx parse 初值，多 TG 失真）→ 单 TG 1 vu 多 TG 实际 10 vu，shares=[1,0,0] 只塞第 1 台。新增 `scheduler.compute_planned_vusers_total()` + `_planned_vusers_for_tg()`，executor 调用方改吃聚合值；`views._compute_tg_planned_users` 复用同源逻辑（single source of truth）
+- ✅ **#2 agent /jtl + /errors-xml 改 StreamingResponse + size snapshot**：FileResponse 把打开时 stat.st_size 写到 Content-Length，JMeter 边写边读时实际字节多 → `RuntimeError: Response content longer than Content-Length`。snapshot size 后只读这么多字节，下游 csv 按行容忍尾部半行
+- ✅ **#3 `start.sh` 加 release_idle_agents 周期回收**：bg loop 每 5 min 跑一次，僵尸 agent（30 min 无心跳）自动标 lost
+- ✅ **#4 CSV slice 串接 executor + `settings.CSV_SLICE_ENABLED` 开关**：`scheduler.slice_csv_by_offset` 早实现了接口位但 executor 没调用。默认 False 保持现有"全量副本"行为（字典表 / 共享参数场景），env 设 `CSV_SLICE_ENABLED=true` 开启按行模分片（账号池场景）。失败兜底全量副本不阻断 run
+- ✅ **#5 compose 拆 3 service**：见上面 docker-compose.dev.yml 那条
+
+验证数据：jtl 3 份均衡（3629/3649/3617）+ InfluxDB `shard_count=3` + 3 个 host tag + 每 host samples 222/222/222 + agent log Content-Length 错误 0 次。
+
+### v1.2 待跟进
+
+- ❓ 前端 host 切分图：后端 InfluxDB host tag 数据完备，前端 `RunMetricsCharts` / dashboard `TrendsTab` 按 host 切线 UI 没现场看过——多 agent 跑时图表是否真把 3 条线分开
 - ❓ Service 模型仍是前端 mock（`servicesMock.ts`）；v1.3 接真表
+- ❌ per-binding CSV slice 控制（当前 `CSV_SLICE_ENABLED` 是全局开关，粒度粗，将来给 TaskCsvBinding 加字段）
 
 ---
 
@@ -301,7 +311,7 @@ npx vue-tsc --noEmit     # 仅类型检查
 ## 6. 下一步路线（按重要性）
 
 1. ~~**JMeter CLI 执行**~~ ✅ Step 3 已落地（见 §5）
-2. ~~**压力机管理**（v1.2）：容器化压力源（FastAPI agent + DockerComposeAdapter）+ 多机调度~~ ✅ 骨架已落地（见 §5 v1.2），**端到端联调 + 多机指标切分图待验证**
+2. ~~**压力机管理**（v1.2）：容器化压力源（FastAPI agent + DockerComposeAdapter）+ 多机调度~~ ✅ 骨架已落地 + 端到端已联调（commit 18407d9）；**前端 host 切分图未现场看，发现问题再修**
 3. **Service 模型 + SLA 字段**（v1.3，Step 4 报告前置）：当前 `Task.service_names` 是字符串数组 + 前端 `servicesMock.ts`；v1.3 接后端 Service 表（grafana_url / pinpoint_app / arthus_endpoint / SLA）+ Task 改 M2M
 4. **K8sAdapter 实现**（v1.3）：当前 `services/orchestrator/k8s.py` 是 stub，靠 `kubectl scale deployment`；生产部署前需要补
 5. **异步化升级**（v1.3）：Celery + Redis 替代 threading；多 worker 横向扩展、子进程管理跨进程持久化
@@ -333,7 +343,7 @@ npx vue-tsc --noEmit     # 仅类型检查
 - **`TypeScript 6` + `erasableSyntaxOnly`**：前端不能用 constructor parameter properties（`constructor(public foo: string)` 这种语法），要写成先声明 field 再在 constructor 里赋值。见 `frontend/src/lib/api.ts` 的 `ApiError` 类。
 - **v1.2 多机调度走分支判断**：`executor._select_load_generators()` 拉 `TaskRun.load_generators` M2M（前端 StartRunModal 选定后 `tasks/:id/run/` body 传 `load_generator_ids` 写入）；非空 → `_run_distributed`，空 + `LOCAL_FALLBACK=1` → 原 v1.1 单机流程。前端**必走 StartRunModal 选机器**，再调 startRun（即使只选 1 台）。
 - **agent ↔ 主控通信**：agent 在容器里用 `host.docker.internal:8000`（macOS Docker Desktop 内置；Linux 走 `extra_hosts: host-gateway`）回调主控；主控调 agent 用 `LoadGenerator.base_url`（`http://<ip>:<port>`）。Bearer 鉴权 = `settings.FALCON_AGENT_TOKEN`，空 token 不强校验（开发态）。
-- **多机 InfluxDB 切分**：分布式时 `build_shard_jmx` 给每片注入 `host=pod_name` tag，前端图表按 host 切分（实现位于 dashboard/`TrendsTab` 等，**v1.2 未现场验证**）。
+- **多机 InfluxDB 切分**：分布式时 `build_shard_jmx` 给每片注入 `host=pod_name` tag。后端 InfluxDB 数据完备（已验证 shard_count + 3 个 host tag + 每 host samples 均衡）；前端按 host 切线 UI（dashboard/`TrendsTab` 等）后端数据 OK 但前端展示未现场看。
 - **agent 自注册不等同于在线可用**：scale-up 拉副本后 agent 还要 5–15s 才会调 `register/`；前端 StartRunModal 用 `loadGeneratorsApi.list()` 轮询刷新，不要在 scale-up 后立即起 run。
 - **idle agent 释放策略**：30 min 无心跳 + status=idle → `release_idle_agents` 命令（cron 每 5 min 跑）调 scale_down 回收容器并标 LOST；lost 后心跳恢复会自动复活回 idle。
 
@@ -377,13 +387,14 @@ docker compose -f backend/docker-compose.dev.yml up -d
 docker compose -f backend/docker-compose.dev.yml down       # 停
 docker compose -f backend/docker-compose.dev.yml down -v    # 停并清数据
 
-# v1.2: falcon-agent 容器化压力源（开发态默认 1 副本）
-docker compose -f backend/docker-compose.dev.yml build agent              # 构建镜像
-docker compose -f backend/docker-compose.dev.yml up -d agent              # 起默认 1 副本
-docker compose -f backend/docker-compose.dev.yml up -d --scale agent=3 agent  # 扩到 3 台
-docker compose -f backend/docker-compose.dev.yml up -d --scale agent=0 agent  # 缩到 0
-./venv/bin/python manage.py release_idle_agents                           # 手动跑一次回收
-./venv/bin/python manage.py release_idle_agents --dry-run --minutes 5     # 调试用
+# v1.2: falcon-agent 容器化压力源（compose 已固化 3 个 service: agent1/agent2/agent3）
+docker compose -f backend/docker-compose.dev.yml build agent1              # 构建镜像（3 个 service 共享镜像，build 任意一个即可）
+docker compose -f backend/docker-compose.dev.yml up -d agent1 agent2 agent3 # 起 3 台
+docker compose -f backend/docker-compose.dev.yml up -d agent1              # 只起 1 台
+docker compose -f backend/docker-compose.dev.yml down agent1 agent2 agent3 # 全停
+./start.sh                                                                  # 已带 release_idle_agents 后台周期（每 5 min）
+./venv/bin/python manage.py release_idle_agents                            # 手动跑一次回收
+./venv/bin/python manage.py release_idle_agents --dry-run --minutes 5      # 调试用
 ```
 
 ```bash

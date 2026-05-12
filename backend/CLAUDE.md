@@ -183,7 +183,8 @@ BackendListenerConfig (singleton pk=1, admin 配置，build_run_xml 注入)
 - `jmx_filename`（CharField，bare 文件名）—— **原件**物理文件在 `<JMETER_HOME>/scripts/<jmx_filename>`
 - `jmx_hash`（sha256，去重）
 - `csv_bindings` 反向关联 `TaskCsvBinding`（每个 CSVDataSet 一条；2026-04-28 取代旧 `csv_filename` 单字段）
-- **JMX 解析字段**：`virtual_users`、`ramp_up_seconds`、`duration_seconds` — 这三个字段与 JMX 文件里的 `ThreadGroup` 内容**保持同步**；Step 2 保存时也会同步（用第一个启用的标准 TG 的参数）
+- **JMX 解析字段**：`virtual_users`、`ramp_up_seconds`、`duration_seconds` — 这三个字段与 JMX 文件里的**第一个标准 ThreadGroup** 同步；Step 2 保存时也会同步（用第一个启用的标准 TG 的参数）。
+  - ⚠️ **多 TG 场景陷阱**：`virtual_users` 只反映第一个标准 TG，不是所有 TG 真实总并发！前端 UI "X VU" 显示走 `views._compute_tg_planned_users` 实时聚合 `thread_groups_config`；多机调度的 `compute_shards` 走 `scheduler.compute_planned_vusers_total()`（同源 single source of truth，commit 18407d9）—— 不要直接用 `task.virtual_users` 当总并发。
 - **Step 2 字段**：
   - `thread_groups_config`（JSONField，默认 `[]`）—— `[{"path":"0.0","scenario":"baseline","kind":"ThreadGroup","params":{...}}, ...]`
   - `environment`（FK → Environment, nullable）
