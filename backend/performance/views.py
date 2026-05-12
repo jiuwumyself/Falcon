@@ -1248,7 +1248,7 @@ class RunViewSet(viewsets.GenericViewSet):
                     continue
 
         samples: list[dict] = []
-        agg: dict[tuple[str, str, str], dict] = {}
+        agg: dict[tuple[str, str], dict] = {}
         total = 0
         try:
             with jtl.open('r', encoding='utf-8', errors='replace') as f:
@@ -1270,11 +1270,12 @@ class RunViewSet(viewsets.GenericViewSet):
                         continue
                     total += 1
                     if aggregate:
-                        # msg_norm = 优先用 failureMessage，其次 responseMessage；归一化裁切前 200 字
-                        # 同 (code, label, msg_norm) 视为一组；HTTP/2 下 msg/fmsg 都空 → msg_norm=''
-                        # 自然合并到一组，前端按 code 派生 HTTP_REASON 显示
-                        msg_norm = (fmsg or msg).strip()[:200]
-                        key = (code, label, msg_norm)
+                        # 按 (code, label) 二键聚合：同接口同 code 不同 message 文本
+                        # 合并为一行（之前三键含 msg_norm，HTTP 500 不同异常栈会分多行
+                        # 用户反馈"重复看了"）。代表 message 取首条样本的 fmsg/msg，
+                        # 前端按 code 派生 HTTP_REASON 兜底；要看不同 message 走行展开
+                        # 看具体样本。
+                        key = (code, label)
                         existing = agg.get(key)
                         if existing is None:
                             agg[key] = {

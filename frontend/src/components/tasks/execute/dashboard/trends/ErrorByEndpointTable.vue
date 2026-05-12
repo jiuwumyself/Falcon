@@ -67,13 +67,13 @@ function urlPath(url: string): string {
   }
 }
 
-// 展开行状态：key = label|response_code|msg_norm（跟后端聚合 key 同源）
+// 展开行状态：key = label|response_code（跟后端二键聚合同源）
 const expandedKey = ref<string | null>(null)
 const samplesCache = ref<Map<string, ErrorSample[]>>(new Map())
 const samplesLoading = ref<Set<string>>(new Set())
 
-function rowKey(r: { label: string; responseCode: string; primary: string }): string {
-  return `${r.label}|${r.responseCode}|${r.primary.slice(0, 50)}`
+function rowKey(r: { label: string; responseCode: string }): string {
+  return `${r.label}|${r.responseCode}`
 }
 
 async function toggleRow(r: DisplayRow) {
@@ -89,10 +89,13 @@ async function toggleRow(r: DisplayRow) {
   // 首次展开拉样本：按 sampler + 精确 response_code 过滤；limit 20 个够看出模式
   samplesLoading.value.add(key)
   try {
+    // limit 50：SampleList 按 (body, reason) dedup 后通常只剩几行，但要让
+    // ×N 徽章接近真实数量需要多采几条。50 条扫 jtl 仍很快。聚合行的 count
+    // 已经显示该组合**真实总数**（不受这里 limit 影响）。
     const res = await runsApi.errorSamples(props.runId, {
       sampler: r.label,
       responseCode: r.responseCode,
-      limit: 20,
+      limit: 50,
     })
     samplesCache.value.set(key, res.samples)
   } catch {
