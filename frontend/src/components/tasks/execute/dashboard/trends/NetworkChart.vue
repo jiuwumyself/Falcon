@@ -131,6 +131,15 @@ function toggleSeries(name: string) {
   }
 }
 
+// 表格单元只显示 KiB/s 数值（不带单位），统一行间标度——单位由 header "KB/s" 标注。
+// Y 轴 / tooltip 继续走 fmtBytesRate 自动换算（MiB/s · KiB/s）。
+function fmtKiB(bps: number): string {
+  const kib = bps / 1024
+  if (kib < 10) return kib.toFixed(2)
+  if (kib < 100) return kib.toFixed(1)
+  return kib.toFixed(0)
+}
+
 onMounted(() => {
   if (chartRef.value && chartRef.value.chart) {
     chartRef.value.chart.group = CONNECT_GROUP
@@ -160,9 +169,9 @@ watch(chartRef, (v) => {
         ref="chartRef"
         :option="option"
         autoresize
-        style="width: 100%; height: 100%; min-height: 220px"
+        style="width: 100%; height: 100%"
       />
-      <div class="overflow-y-auto text-[11px] tabular-nums">
+      <div class="overflow-y-auto no-scrollbar text-[11px] tabular-nums">
         <table class="w-full">
           <thead>
             <tr :style="{ color: '#3b82f6' }">
@@ -191,8 +200,8 @@ watch(chartRef, (v) => {
                   <span class="truncate" :title="row.name">{{ row.name }}</span>
                 </div>
               </td>
-              <td class="py-0.5 px-1 text-right">{{ fmtBytesRate(row.mean) }}</td>
-              <td class="py-0.5 pl-1 text-right">{{ fmtBytesRate(row.max) }}</td>
+              <td class="py-0.5 px-1 text-right">{{ fmtKiB(row.mean) }}</td>
+              <td class="py-0.5 pl-1 text-right">{{ fmtKiB(row.max) }}</td>
             </tr>
           </tbody>
         </table>

@@ -43,6 +43,89 @@ _SAFE_PATH_RE = re.compile(r'[^A-Za-z0-9]+')
 _HIDDEN_COMPONENT_TAGS = frozenset({'BackendListener'})
 
 
+def _path_to_testname(run) -> dict[str, str]:
+    """读当前 jmx 拿 path → testname 映射。snapshot 没存 testname，testname 只能从
+    当前 jmx 推。jmx 改过 (Step 1 重新上传 / 顺序重排) 时可能跟 snapshot 当时不一致——
+    平台限制，但通常 task 改 TG 类型不改 testname，比 path/kind 错配稳定一些。"""
+    from .services.jmx import list_thread_groups  # noqa: PLC0415
+    try:
+        tg_info = list_thread_groups(run.task.read_jmx_bytes())
+    except Exception:  # noqa: BLE001
+        return {}
+    return {tg.get('path') or '': tg.get('testname') or '' for tg in tg_info}
+
+
+def _compute_tg_planned_users(run) -> dict:
+    """按 ThreadGroup testname 算"计划线程数"。
+
+    **重要**：kind + params 必须**配对来自 snapshot**——snapshot 已经存了 (path, kind, params)
+    三元组。之前用"jmx 当前 kind + snapshot params"会错配：用户改 TG 类型后（如教师端
+    ConcurrencyThreadGroup → SteppingThreadGroup），jmx 拿 SteppingThreadGroup，snapshot
+    params 还是 target_concurrency=2，错配后 _planned 走 fallback 默认值算出 100 之类。
+
+    testname 仍从当前 jmx 按 path 推（snapshot 没存 testname）；TG 改名时会错位，但
+    比 kind/params 错配影响小。
+    """
+    path_to_testname = _path_to_testname(run)
+    snap_cfgs = run.thread_groups_config_snapshot or run.task.thread_groups_config or []
+
+    def _planned(kind: str, params: dict) -> int:
+        try:
+            if kind == 'ThreadGroup':
+                return int(params.get('users') or 0)
+            if kind == 'SteppingThreadGroup':
+                return int(params.get('initial_threads') or 0) + \
+                    int(params.get('step_users') or 0) * int(params.get('step_count') or 0)
+            if kind == 'ConcurrencyThreadGroup':
+                return int(params.get('target_concurrency') or 0)
+            if kind == 'UltimateThreadGroup':
+                rows = params.get('rows') or []
+                if isinstance(rows, list):
+                    return sum(int(r.get('users') or 0) for r in rows if isinstance(r, dict))
+                return int(params.get('users') or 0)
+            # ArrivalsThreadGroup 不算线程驱动 → 0
+            return 0
+        except (TypeError, ValueError):
+            return 0
+
+    out: dict[str, int] = {}
+    for entry in snap_cfgs:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get('path') or ''
+        kind = entry.get('kind') or 'ThreadGroup'
+        params = entry.get('params') or {}
+        # testname 优先 jmx 推；jmx 找不到（path 重排/jmx 删了 TG）→ 用 path 作兜底 key
+        testname = path_to_testname.get(path) or path
+        if not testname:
+            continue
+        out[testname] = _planned(kind, params)
+    return out
+
+
+def _compute_tg_planned_meta(run) -> dict:
+    """按 ThreadGroup testname 返回 (kind, params)，前端 plannedCurve 用。
+
+    跟 _compute_tg_planned_users 同源数据；kind+params **必须**来自 snapshot 配对，
+    不能混用当前 jmx 的 kind（详见 _compute_tg_planned_users 注释）。
+    """
+    path_to_testname = _path_to_testname(run)
+    snap_cfgs = run.thread_groups_config_snapshot or run.task.thread_groups_config or []
+
+    out: dict[str, dict] = {}
+    for entry in snap_cfgs:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get('path') or ''
+        kind = entry.get('kind') or 'ThreadGroup'
+        params = entry.get('params') or {}
+        testname = path_to_testname.get(path) or path
+        if not testname:
+            continue
+        out[testname] = {'kind': kind, 'params': params}
+    return out
+
+
 def _filter_tree_dicts(nodes: list, hidden_tags: frozenset) -> list:
     """从组件树 dict 列表里递归过滤掉指定 tag 的节点（前端不展示 BackendListener 等）。"""
     result = []
@@ -720,6 +803,10 @@ class TaskViewSet(viewsets.ModelViewSet):
                     virtual_users=instance.virtual_users,
                     ramp_up_seconds=instance.ramp_up_seconds,
                     duration_seconds=instance.duration_seconds,
+                    # 快照当前 Step 2 配置 + jmx 指纹；切历史 run 时给前端展示"当时是
+                    # 这么跑的"，且跟当前 task 对比能提示"已变化"
+                    thread_groups_config_snapshot=instance.thread_groups_config or [],
+                    jmx_hash_snapshot=instance.jmx_hash or '',
                 )
                 if selected_lgs:
                     task_run.load_generators.set(selected_lgs)
@@ -768,6 +855,41 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         return Response(TaskRunSerializer(run).data)
 
+    def destroy(self, request, run_id=None):
+        """软删 TaskRun + 物理删 run_dir + 删 InfluxDB 数据。
+
+        - 软删：is_deleted=True / deleted_at=now；表行保留供大盘统计
+        - 物理清 run_dir + archive.tar.gz
+        - InfluxDB DELETE FROM jmeter WHERE run_id=...
+        - 活跃 run（pre_checking/pending/running/cancelling）→ 409 拒绝
+        - GenericViewSet 没自带 destroy，DRF Router 仍会按 method=DELETE 路由到这里
+        """
+        import shutil  # noqa: PLC0415
+
+        run = self.get_object()
+        if run.is_active:
+            return Response(
+                {'detail': '该 run 仍在执行，先取消'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        run.is_deleted = True
+        run.deleted_at = timezone.now()
+        run.save(update_fields=['is_deleted', 'deleted_at'])
+
+        rd = get_runs_dir() / run.run_id
+        if rd.exists():
+            shutil.rmtree(rd, ignore_errors=True)
+        archive = get_runs_dir() / f'{run.run_id}.tar.gz'
+        archive.unlink(missing_ok=True)
+
+        try:
+            influxdb_svc.delete_run_data(run.run_id)
+        except Exception:  # noqa: BLE001
+            # InfluxDB DELETE 失败不阻断：retention policy 30d 自然 GC
+            pass
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, run_id=None):
         run = self.get_object()
@@ -801,6 +923,12 @@ class RunViewSet(viewsets.GenericViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         data = influxdb_svc.query_run_realtime(run.run_id, since=since)
+        # tg_planned_users: 按 testname 给前端 lookup per-TG 的"计划线程数"。
+        # tg_planned_meta: 同步返 {testname: {kind, params}}，前端按曲线算 ramp-up 波动。
+        # JMeter Backend Listener 没法拿 per-TG 实测并发（maxAT 是全局），前端 ConcurrencyChart
+        # 单 TG 选中时按 meta 算计划曲线渲染，能看到启动 ramp 形态（不再是直平线）。
+        data['tg_planned_users'] = _compute_tg_planned_users(run)
+        data['tg_planned_meta'] = _compute_tg_planned_meta(run)
         # 顺手附上 run 状态，前端可以一次拿到全部信息
         data['run'] = TaskRunSerializer(run).data
         return Response(data)
@@ -819,9 +947,13 @@ class RunViewSet(viewsets.GenericViewSet):
 
         前端 LatencyChart "拆解" mode 用 —— 一眼看出 RT 高在哪一段。
         非高频接口，前端按需调用（不进 5s metrics 轮询）。
+
+        Query 参数：
+          - exclude_ko=true：剔除失败样本（success=false 跳过），看真实业务延迟分布
         """
         import csv as _csv
         run = self.get_object()
+        exclude_ko = request.query_params.get('exclude_ko', '').lower() == 'true'
         jtl = get_runs_dir() / run.run_id / 'results.jtl'
         empty = {'connect_ms': [], 'server_ms': [], 'receive_ms': []}
         if not jtl.exists() or jtl.stat().st_size == 0:
@@ -833,6 +965,8 @@ class RunViewSet(viewsets.GenericViewSet):
             with jtl.open('r', encoding='utf-8', errors='replace') as f:
                 reader = _csv.DictReader(f)
                 for row in reader:
+                    if exclude_ko and (row.get('success') or '').lower() != 'true':
+                        continue
                     try:
                         ts = int(row.get('timeStamp') or 0)
                         elapsed = float(row.get('elapsed') or 0)
@@ -1049,8 +1183,10 @@ class RunViewSet(viewsets.GenericViewSet):
 
         两种返回模式：
         - 默认（aggregate=false）：返 samples（被 limit 截，最多 500）+ total（真实总数）
-        - aggregate=true：按 (code, label) 服端聚合，每组带真实 count + 一条代表 message
-          → 用于 ErrorMessageTable，sum 永远 = 真实总错误数（不被 limit 影响）
+        - aggregate=true：按 (code, label, msg_norm) 服端聚合 —— 同一接口同 code 下
+          不同 message 算独立组合（HTTP/2 时 message 多为空 → msg_norm='' 自然合并）
+          每组带真实 count + 一条代表 url
+          → 用于 ErrorByEndpointTable，sum 永远 = 真实总错误数（不被 limit 影响）
         """
         import csv as _csv
         run = self.get_object()
@@ -1077,8 +1213,53 @@ class RunViewSet(viewsets.GenericViewSet):
                 return '4xx'
             return 'other'
 
+        # errors*.xml（双轨：仅失败样本 + body）。CSV 不带 body，body 必须从这里拿。
+        # 单机模式 = errors.xml；分布式 = errors_<pod>.xml（每台 agent 一份）。
+        # 解析建立 (label, responseCode) → 首条 responseData 索引（同组多条取头一条够用）。
+        run_dir = get_runs_dir() / run.run_id
+        body_index: dict[tuple[str, str], str] = {}
+        if run_dir.exists():
+            from lxml import etree as _etree  # noqa: PLC0415
+            for errors_xml in sorted(run_dir.glob('errors*.xml')):
+                if errors_xml.stat().st_size == 0:
+                    continue
+                try:
+                    # iterparse end 事件**先触发子元素**（responseData / cookies 等）
+                    # 再触发父元素 sample/httpSample。如果对子元素调 clear()，会把它
+                    # 们的 text 提前清掉 → 外层 sample.find('responseData').text 空。
+                    # 所以只在父级 sample/httpSample 上 clear()（自动级联清子元素）。
+                    # root 节点用 fast_iter 模式从 parent 删除已处理的 sample，防止
+                    # 流式解析时 root.testResults 无限增长爆内存。
+                    ctx = _etree.iterparse(
+                        str(errors_xml),
+                        events=('end',),
+                        recover=True,
+                    )
+                    for _ev, el in ctx:
+                        if el.tag not in ('sample', 'httpSample'):
+                            continue  # ← 子元素不要 clear，等父级 sample 一起清
+                        if (el.get('s') or '').lower() == 'true':
+                            pass
+                        else:
+                            lab = el.get('lb') or ''
+                            code = el.get('rc') or ''
+                            key = (lab, code)
+                            if key not in body_index:
+                                body_el = el.find('responseData')
+                                if body_el is not None:
+                                    txt = (body_el.text or '').strip()
+                                    if txt:
+                                        body_index[key] = txt[:500]  # 截断防表大
+                        # 释放：清子树 + 从 root 摘除（fast_iter 防内存爆）
+                        el.clear()
+                        parent = el.getparent()
+                        if parent is not None:
+                            parent.remove(el)
+                except OSError:
+                    continue
+
         samples: list[dict] = []
-        agg: dict[tuple[str, str], dict] = {}
+        agg: dict[tuple[str, str, str], dict] = {}
         total = 0
         try:
             with jtl.open('r', encoding='utf-8', errors='replace') as f:
@@ -1098,7 +1279,11 @@ class RunViewSet(viewsets.GenericViewSet):
                         continue
                     total += 1
                     if aggregate:
-                        key = (code, label)
+                        # msg_norm = 优先用 failureMessage，其次 responseMessage；归一化裁切前 200 字
+                        # 同 (code, label, msg_norm) 视为一组；HTTP/2 下 msg/fmsg 都空 → msg_norm=''
+                        # 自然合并到一组，前端按 code 派生 HTTP_REASON 显示
+                        msg_norm = (fmsg or msg).strip()[:200]
+                        key = (code, label, msg_norm)
                         existing = agg.get(key)
                         if existing is None:
                             agg[key] = {
@@ -1108,6 +1293,8 @@ class RunViewSet(viewsets.GenericViewSet):
                                 'sample_message': msg,
                                 'sample_failure_message': fmsg,
                                 'sample_url': url,
+                                # body 从 errors.xml 拿（双轨注入，仅失败样本带）
+                                'sample_response_body': body_index.get((label, code), ''),
                             }
                         else:
                             existing['count'] += 1
@@ -1121,7 +1308,8 @@ class RunViewSet(viewsets.GenericViewSet):
                             'failure_message': fmsg,
                             'url': url,
                             'elapsed_ms': int(row.get('elapsed') or 0),
-                            'response_body': '',  # 默认 CSV 不带 body；要真实 body 走 -Jjmeter.save.saveservice.response_data=true 的 XML JTL
+                            # body 从 errors.xml 双轨拿；旧 run（未注入 listener）→ 空字符串
+                            'response_body': body_index.get((label, code), ''),
                         })
         except OSError as e:
             return Response({'detail': f'read jtl: {e}'}, status=500)

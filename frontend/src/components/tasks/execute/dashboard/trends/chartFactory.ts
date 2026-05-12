@@ -6,7 +6,7 @@
  * hover 任何一张，其它图都会高亮同一时间点。
  */
 
-import type { SeriesPoint } from '@/types/task'
+import type { RunMetricsTotals, SeriesPoint, TaskRun } from '@/types/task'
 
 export interface ChartTheme {
   isDark: boolean
@@ -23,6 +23,8 @@ export interface SeriesSpec {
   stack?: string
   /** 是否填充区域（all 加粗系列默认填，其它默认不填） */
   area?: boolean
+  /** 堆叠面积时用：去渐变改实色（保留边界辨识度）。普通线图保持默认渐变 fade out */
+  solidArea?: boolean
 }
 
 export const CONNECT_GROUP = 'falcon-trends'
@@ -56,9 +58,11 @@ export function buildSeriesOption(
     gridBottom?: number
     /** small multiples 紧贴布局用：上面的图隐藏 x 轴标签让最底下一张承担 */
     hideXAxisLabel?: boolean
+    /** 同 dashboard 多图统一时间窗（[startMs, endMs]），避免每张图按自己 series 自适应 */
+    xRange?: [number, number] | null
   } = {},
 ) {
-  const { showLegend = true, hideXAxisLabel = false } = opts
+  const { showLegend = true, hideXAxisLabel = false, xRange = null } = opts
   const gridBottom = opts.gridBottom ?? (hideXAxisLabel ? 8 : 28)
 
   return {
@@ -113,6 +117,7 @@ export function buildSeriesOption(
         ? { show: false }
         : { color: labelColor(isDark), fontSize: 10 },
       splitLine: { show: false },
+      ...(xRange ? { min: xRange[0], max: xRange[1] } : {}),
     },
     yAxis: {
       type: 'value' as const,
@@ -130,19 +135,23 @@ export function buildSeriesOption(
       lineStyle: { color: s.color, width: s.lineWidth ?? 1.2 },
       itemStyle: { color: s.color },
       areaStyle: s.area
-        ? {
-            color: {
-              type: 'linear' as const,
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: hexToAlpha(s.color, 0.32) },
-                { offset: 1, color: hexToAlpha(s.color, 0) },
-              ],
-            },
-          }
+        ? (s.solidArea
+            // 堆叠模式：实色填充，不能用渐变 fade out（否则相邻 series 的接触点
+            // 一上一下都是高 alpha，融成糊状）。alpha 0.55 在深底色上够亮够分。
+            ? { color: hexToAlpha(s.color, 0.55) }
+            : {
+                color: {
+                  type: 'linear' as const,
+                  x: 0,
+                  y: 0,
+                  x2: 0,
+                  y2: 1,
+                  colorStops: [
+                    { offset: 0, color: hexToAlpha(s.color, 0.32) },
+                    { offset: 1, color: hexToAlpha(s.color, 0) },
+                  ],
+                },
+              })
         : undefined,
     })),
   }
@@ -154,6 +163,39 @@ function hexToAlpha(hex: string, alpha: number): string {
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
   return `rgba(${r},${g},${b},${alpha})`
+}
+
+/** 累计错误率 = total_errors / total_count × 100。total_count 0 时返 null */
+export function cumulativeErrorRate(totals: RunMetricsTotals | null | undefined): number | null {
+  if (!totals?.total_count) return null
+  return ((totals.total_errors ?? 0) / totals.total_count) * 100
+}
+
+/** 近 60s 滚动窗口错误率。
+ *  now baseline = run.finished_at（终态）或 rps 最后时间戳（运行中）；
+ *  不用 error_count.last_ts —— InfluxDB error_count 时序里可能有跨 run 脏数据
+ *  时间戳远超真实窗口，会让 cutoff 漂出去。
+ */
+export function lastWindowErrorRate(
+  errorPts: SeriesPoint[] | undefined,
+  rpsPts: SeriesPoint[] | undefined,
+  run: TaskRun | null,
+  windowMs = 60_000,
+): number | null {
+  if (!errorPts?.length || !rpsPts?.length) return null
+  let now: number
+  if (run?.finished_at) {
+    now = new Date(run.finished_at).getTime()
+  } else {
+    now = rpsPts[rpsPts.length - 1][0]
+  }
+  const cutoff = now - windowMs
+  let errSum = 0
+  let reqSum = 0
+  for (const [t, v] of errorPts) if (t >= cutoff && t <= now) errSum += v
+  for (const [t, v] of rpsPts) if (t >= cutoff && t <= now) reqSum += v
+  if (reqSum === 0) return null
+  return (errSum / reqSum) * 100
 }
 
 /** 算 series 的 mean / max / min（右侧统计表用），忽略 null */

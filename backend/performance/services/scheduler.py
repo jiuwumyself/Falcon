@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .jmx import (
-    JmxParseError, _inject_backend_listener, _set_csv_filename_at_path,
+    JmxParseError, _inject_backend_listener_per_tg, _inject_error_response_listener,
+    _set_csv_filename_at_path,
     build_run_xml, list_thread_groups, replace_thread_group,
 )
 
@@ -375,8 +376,9 @@ def build_shard_jmx(
             # path 在 build_run_xml 之后理论上一定有效；脏数据跳过
             continue
 
-    # 注入带 host tag 的 BackendListener
-    final = _inject_backend_listener(
+    # 每个 enabled TG 各注入一个 BackendListener（详见 jmx._inject_backend_listener_per_tg
+    # 的注释）；每个 listener 额外带 host/shard tag，前端"按主机"切线时仍能区分 pod。
+    sliced = _inject_backend_listener_per_tg(
         sliced,
         run_id=run_id,
         task_id=task.id,
@@ -388,6 +390,10 @@ def build_shard_jmx(
             'shard_count': str(max(1, total_shards)),
         },
     )
+    # 注入 SimpleDataWriter（仅失败样本带 body）→ agent 端 work_dir/errors.xml；
+    # 相对路径，JMeter cwd=jmx 所在目录，写到 work_dir 根下。主控拉回合并给前端
+    # ErrorByEndpointTable 的 message 列拿真实 response body。
+    final = _inject_error_response_listener(sliced, errors_xml_path='errors.xml')
     return final
 
 

@@ -102,3 +102,12 @@ body {
 #app {
   min-height: 100vh;
 }
+
+/* 隐藏滚动条但保留滚动功能。用于 trends 卡片的 stats 表：多 series 时可用鼠标滚轮浏览，
+   视觉上避免 chartjunk。Firefox 用 scrollbar-width；Chrome/Safari/Edge 用 webkit。 */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

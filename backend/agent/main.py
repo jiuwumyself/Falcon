@@ -240,11 +240,26 @@ def _spawn_jmeter(work_dir: Path, run_jmx: Path, stop_port: int) -> subprocess.P
         f'-Jjmeterengine.nongui.port={stop_port}',
         '-Jjmeterengine.stopfail.system.exit=false',
         '-Jjmeterengine.remote.system.exit=false',
+        # 跟 master executor 对齐的 JTL 保存开关（不能依赖 jmeter.properties 默认值，
+        # 不同版本会漂移）：
+        #   response_message: HTTP responseMessage 列（前端 message 兜底）
+        #   assertion_results_failure_message: 断言失败原因列（JSR223/BeanShell
+        #     assertion 写的 FailureMessage 落到这里——分布式失败 body 的关键来源）
+        #   url: 错误样例下钻看请求 URL
+        '-Jjmeter.save.saveservice.response_message=true',
+        '-Jjmeter.save.saveservice.assertion_results_failure_message=true',
         '-Jjmeter.save.saveservice.url=true',
     ]
 
+    # cwd = work_dir（**不是 JMETER_HOME**）。原因：scheduler.py 注入的
+    # SimpleDataWriter listener 写 errors.xml 时用的是相对路径 'errors.xml'，
+    # JMeter 按 cwd 解析 → 必须落到 work_dir 下，否则 agent /errors-xml 端点
+    # 在 work_dir 找不到文件返 404 → 主控 body_index 永远为空 → 前端 message
+    # 列 100% 走 HTTP_REASON 兜底（看不到真实响应 body）。
+    # -l / -j / -o 都是绝对路径，cwd 切换不影响；JMeter 加载 lib/ext 走
+    # JMETER_HOME 环境变量，也不依赖 cwd。
     kwargs: dict = {
-        'cwd': str(JMETER_HOME),
+        'cwd': str(work_dir),
         'env': _augmented_env(),
         'stdout': subprocess.DEVNULL,
         'stderr': subprocess.STDOUT,
@@ -502,6 +517,20 @@ def run_jtl(run_id: str):
     if not jtl.exists():
         raise HTTPException(status_code=404, detail='jtl not yet')
     return FileResponse(str(jtl), media_type='text/csv', filename=f'{run_id}.jtl')
+
+
+@app.get('/runs/{run_id}/errors-xml')
+def run_errors_xml(run_id: str):
+    """SimpleDataWriter 落盘的失败样本 XML（含 responseData/body），主控合并后给
+    前端 ErrorByEndpointTable 的 message 列拿真实响应。文件不存在时 404，主控容错。"""
+    with _runs_lock:
+        run = _runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail='run not found')
+    errors = run.work_dir / 'errors.xml'
+    if not errors.exists() or errors.stat().st_size == 0:
+        raise HTTPException(status_code=404, detail='no errors.xml')
+    return FileResponse(str(errors), media_type='application/xml', filename=f'{run_id}.errors.xml')
 
 
 @app.delete('/runs/{run_id}')

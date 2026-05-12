@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ApiError, runsApi, tasksApi } from '@/lib/api'
-import type { RunMetrics, Task, TaskRun } from '@/types/task'
+import type { Environment, RunEvent, RunMetrics, Task, TaskRun } from '@/types/task'
 import RunControlBar from './execute/RunControlBar.vue'
 import RunDashboard from './execute/RunDashboard.vue'
 import StartRunModal from './execute/StartRunModal.vue'
@@ -14,6 +14,14 @@ const props = defineProps<{
 const runs = ref<TaskRun[]>([])
 const selectedRunId = ref<string | null>(null)
 const metrics = ref<RunMetrics | null>(null)
+// § 12 S1：事件锚点（融合到 RunControlBar 进度条上，跟 task.duration 共享时间刻度）
+const events = ref<RunEvent[]>([])
+// RunPlanSummary 显示环境名 + hosts 数用；按 task.environment 反查
+const environments = ref<Environment[]>([])
+const taskEnvironment = computed<Environment | null>(() => {
+  if (!props.task.environment) return null
+  return environments.value.find((e) => e.id === props.task.environment) || null
+})
 const busy = ref(false)
 const errorMessage = ref('')
 const startModalOpen = ref(false)
@@ -32,7 +40,7 @@ const isPolling = computed(() =>
   !!selectedRun.value && activeStatuses.includes(selectedRun.value.status),
 )
 
-async function fetchRuns(autoSelect = true) {
+async function fetchRuns(autoSelect = false) {
   try {
     const page = await tasksApi.listRuns(props.task.id)
     runs.value = page.results
@@ -62,12 +70,27 @@ async function fetchMetrics() {
   }
 }
 
+async function fetchEvents() {
+  if (!selectedRunId.value) {
+    events.value = []
+    return
+  }
+  try {
+    events.value = await runsApi.events(selectedRunId.value)
+  } catch {
+    events.value = []
+  }
+}
+
 function startPolling() {
   if (pollTimer) return
   pollTimer = setInterval(async () => {
     await fetchMetrics()
+    void fetchEvents()  // 事件锚点轻量，跟 metrics 同节奏轮询，能看到 early abort 实时触发
     if (selectedRun.value && !activeStatuses.includes(selectedRun.value.status)) {
       stopPolling()
+      // 终态再拉一次：_record_phase_anchors_for_run 在 _on_finish 后写 phase 三事件 + first_error
+      void fetchEvents()
     }
   }, POLL_INTERVAL_MS)
 }
@@ -84,7 +107,9 @@ watch(isPolling, (active) => {
 
 watch(selectedRunId, () => {
   metrics.value = null
+  events.value = []
   fetchMetrics()
+  void fetchEvents()
 })
 
 // ─── 控制条事件 ─────────────────────────────────
@@ -134,20 +159,34 @@ async function onStop() {
   }
 }
 
-function onViewReport() {
-  if (!selectedRunId.value) return
-  window.open(runsApi.reportUrl(selectedRunId.value), '_blank')
-}
-
 function onSelectRun(rid: string) {
   selectedRunId.value = rid
 }
 
+async function onRunDeleted(rid: string) {
+  // 删的是当前选中的 → 切到最近一个非删 run（或 null）
+  const wasSelected = selectedRunId.value === rid
+  await fetchRuns(false)
+  if (wasSelected) {
+    selectedRunId.value = runs.value[0]?.run_id ?? null
+    await fetchMetrics()
+  }
+}
+
 onMounted(async () => {
-  await fetchRuns(true)
+  // autoSelect=false：进来不自动选最新 terminal run；只在有 active run 时选中（监控进度合理）。
+  // 都是终态时 selectedRunId 保持 null → 空盘灰底 + 按钮文案「开始」。
+  await fetchRuns(false)
   const active = runs.value.find((r) => activeStatuses.includes(r.status))
   if (active) selectedRunId.value = active.run_id
   await fetchMetrics()
+  void fetchEvents()
+  // 拉环境列表给 RunPlanSummary 显示环境名 + hosts 数；失败静默
+  try {
+    environments.value = await tasksApi.environments()
+  } catch {
+    environments.value = []
+  }
 })
 
 onUnmounted(stopPolling)
@@ -168,17 +207,20 @@ onUnmounted(stopPolling)
       {{ errorMessage }}
     </div>
 
-    <!-- 顶部控制条（一行紧凑）-->
+    <!-- 顶部控制条（两行：上=控制条 / 下=任务简介）+ 事件锚点叠在进度条上 -->
     <RunControlBar
       :selected-run="selectedRun"
       :runs="runs"
+      :events="events"
+      :task="task"
+      :environment="taskEnvironment"
       :duration-seconds="task.duration_seconds || 0"
       :busy="busy"
       :is-dark="isDark"
       @start="onStartClick"
       @stop="onStop"
-      @view-report="onViewReport"
       @select="onSelectRun"
+      @run-deleted="onRunDeleted"
     />
 
     <!-- 终态失败原因（run.error_message 在终态非空时显示，比 jmeter.log 更直白） -->
@@ -208,6 +250,7 @@ onUnmounted(stopPolling)
     <StartRunModal
       :open="startModalOpen"
       :vusers="task.virtual_users"
+      :tg-count="(task.thread_groups_config || []).length"
       :is-dark="isDark"
       @close="startModalOpen = false"
       @confirm="onConfirmStart"

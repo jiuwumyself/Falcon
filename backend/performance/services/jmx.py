@@ -1299,6 +1299,163 @@ def _inject_dns_cache_manager(
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
+def _append_backend_listener_to_subtree(
+    parent_ht: etree._Element,
+    *,
+    listener_testname: str,
+    run_id: str,
+    task_id: int,
+    influxdb_url: str,
+    influxdb_db: str,
+    extra_tags: dict[str, str] | None = None,
+) -> None:
+    """把一个 InfluxDB BackendListener 元素 + 配对 hashTree 加到 parent_ht 下。
+
+    纯 etree 操作，不返字节流——给 _inject_backend_listener / _inject_backend_listener_per_tg
+    复用。extra_tags 自动加 TAG_ 前缀（已带 TAG_ 的不重复加）。
+    """
+    listener = etree.SubElement(parent_ht, 'BackendListener', {
+        'guiclass': 'BackendListenerGui',
+        'testclass': 'BackendListener',
+        'testname': listener_testname,
+        'enabled': 'true',
+    })
+    args = etree.SubElement(listener, 'elementProp', {
+        'name': 'arguments',
+        'elementType': 'Arguments',
+        'guiclass': 'ArgumentsPanel',
+        'testclass': 'Arguments',
+        'enabled': 'true',
+    })
+    coll = etree.SubElement(args, 'collectionProp', {'name': 'Arguments.arguments'})
+
+    write_url = influxdb_url.rstrip('/') + f'/write?db={influxdb_db}'
+    backend_args = [
+        ('influxdbMetricsSender',
+         'org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender'),
+        ('influxdbUrl', write_url),
+        ('application', 'falcon'),
+        ('measurement', 'jmeter'),
+        ('summaryOnly', 'false'),
+        # JMeter 5.6.3 BackendListener 链路两层 sampler 过滤（详情见 CLAUDE.md §15）
+        ('samplersList', '.*'),
+        ('useRegexpForSamplersList', 'true'),
+        ('samplersRegex', '.*'),
+        ('testTitle', f'Falcon-Run-{run_id}'),
+        ('TAG_run_id', run_id),
+        ('TAG_task_id', str(task_id)),
+        ('percentiles', '50;90;95;99'),
+    ]
+    if extra_tags:
+        for k, v in extra_tags.items():
+            tag_key = k if k.startswith('TAG_') else f'TAG_{k}'
+            backend_args.append((tag_key, str(v)))
+    for k, v in backend_args:
+        arg = etree.SubElement(coll, 'elementProp', {
+            'name': k,
+            'elementType': 'Argument',
+        })
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.name'}).text = k
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.value'}).text = v
+        etree.SubElement(arg, 'stringProp', {'name': 'Argument.metadata'}).text = '='
+
+    etree.SubElement(listener, 'stringProp', {
+        'name': 'classname',
+    }).text = 'org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient'
+
+    # 配对结构：listener 后紧跟一个空 hashTree
+    etree.SubElement(parent_ht, 'hashTree')
+
+
+def _inject_backend_listener_per_tg(
+    xml_bytes: bytes,
+    *,
+    run_id: str,
+    task_id: int,
+    influxdb_url: str,
+    influxdb_db: str,
+    extra_tags: dict[str, str] | None = None,
+) -> bytes:
+    """**每个 enabled TG** 子 hashTree 各注入一个 BackendListener。
+
+    每个 listener 附加 `TAG_thread_group=<TG testname>`。InfluxDB query 按这个
+    tag GROUP BY 就能拿到真正的 TG 级聚合（解决"by_tg 显示成 sample label
+    而不是 TG 名"的问题）。
+
+    设计要点：
+    - listener 放在 TG 的子 hashTree（跟 Sampler 同级，对该 TG 内所有 sample
+      生效；对其他 TG 不可见 —— JMeter listener 作用域跟它放的位置走）
+    - 禁用的 TG 不注入 listener（自然不收集数据）
+    - TG testname 重名时加 `#N` 后缀（实际几乎不会发生，写得稳健）
+    - 嵌套 TG（罕见）也支持（_collect 递归就行；用 path 唯一）
+    - 没找到任何 enabled TG → 兜底为旧行为（TestPlan 子树单 listener，extra_tags
+      不含 thread_group）；这是为了空 jmx / 损坏 jmx 不至于崩
+    """
+    if not (run_id and influxdb_url and influxdb_db):
+        return xml_bytes
+
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+
+    # 先找 TestPlan 子 hashTree
+    test_plan_subtree = None
+    for el, child_ht, _idx in _hashtree_pairs(top):
+        if _local(el) == 'TestPlan':
+            test_plan_subtree = child_ht
+            break
+    if test_plan_subtree is None:
+        return xml_bytes  # 没 TestPlan：放弃注入（外层 build 流程自然没指标）
+
+    # 递归收集所有 enabled TG，记下它们的 child_ht（要在这里加 listener）
+    targets: list[tuple[etree._Element, str]] = []  # [(child_ht, tg_name)]
+    name_counter: dict[str, int] = {}
+
+    def _walk(parent_ht: etree._Element) -> None:
+        for el, child_ht, _idx in _hashtree_pairs(parent_ht):
+            tag = _local(el)
+            kind = _tg_kind_from_tag(tag)
+            if kind is not None and (el.get('enabled', 'true') or 'true').lower() == 'true':
+                raw_name = (el.get('testname') or kind or 'TG').strip() or kind
+                # 同名加序号兜底
+                if raw_name in name_counter:
+                    name_counter[raw_name] += 1
+                    final_name = f'{raw_name}#{name_counter[raw_name]}'
+                else:
+                    name_counter[raw_name] = 1
+                    final_name = raw_name
+                if child_ht is not None:
+                    targets.append((child_ht, final_name))
+            # 继续递归子树（嵌套 controller / TG 都遍历到）
+            if child_ht is not None:
+                _walk(child_ht)
+
+    _walk(test_plan_subtree)
+
+    if not targets:
+        # 没找到 enabled TG → fallback 老逻辑：TestPlan 子树单 listener
+        _append_backend_listener_to_subtree(
+            test_plan_subtree,
+            listener_testname=f'Falcon BackendListener ({run_id})',
+            run_id=run_id, task_id=task_id,
+            influxdb_url=influxdb_url, influxdb_db=influxdb_db,
+            extra_tags=extra_tags,
+        )
+        return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+    for child_ht, tg_name in targets:
+        merged_tags = dict(extra_tags or {})
+        merged_tags['thread_group'] = tg_name  # 关键 tag —— InfluxDB GROUP BY 用
+        _append_backend_listener_to_subtree(
+            child_ht,
+            listener_testname=f'Falcon BackendListener [{tg_name}] ({run_id})',
+            run_id=run_id, task_id=task_id,
+            influxdb_url=influxdb_url, influxdb_db=influxdb_db,
+            extra_tags=merged_tags,
+        )
+
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
 def _inject_backend_listener(
     xml_bytes: bytes,
     *,
@@ -1310,11 +1467,10 @@ def _inject_backend_listener(
 ) -> bytes:
     """
     在 TestPlan 顶层 hashTree 注入一个 BackendListener，把全部 sampler 数据推到
-    InfluxDB v1.x 的 `/write?db=<db>` 端点。前端实时图、跑完归档查询都靠这条线。
+    InfluxDB v1.x 的 `/write?db=<db>` 端点。
 
-    - 用 JMeter 内置 `org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient`
-    - tag `run_id=<run_id>` `task_id=<task_id>` 让多 run 数据共表也能切片
-    - 不破坏 Step 2 配置：build_run_xml 仅在 inject_backend_listener=True 时调
+    **保留用于兼容**：build_run_xml 已切到 _inject_backend_listener_per_tg；
+    这个函数仍可调用，但生成的数据 by_tg 是按 sample label 切（旧行为）。
     """
     if not (run_id and influxdb_url and influxdb_db):
         return xml_bytes
@@ -1345,66 +1501,75 @@ def _inject_backend_listener(
         # 兜底：找不到 TestPlan 就用 top（不会工作但不至于崩，写日志方便定位）
         test_plan_subtree = top
 
-    listener = etree.SubElement(test_plan_subtree, 'BackendListener', {
-        'guiclass': 'BackendListenerGui',
-        'testclass': 'BackendListener',
-        'testname': f'Falcon BackendListener ({run_id})',
+    _append_backend_listener_to_subtree(
+        test_plan_subtree,
+        listener_testname=f'Falcon BackendListener ({run_id})',
+        run_id=run_id, task_id=task_id,
+        influxdb_url=influxdb_url, influxdb_db=influxdb_db,
+        extra_tags=extra_tags,
+    )
+
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
+def _inject_error_response_listener(xml_bytes: bytes, *, errors_xml_path: str) -> bytes:
+    """注入一个 SimpleDataWriter（仅记录失败样本到 errors.xml），用于把失败时
+    服务返的完整 response body 落盘。
+
+    主 JTL（results.jtl）保持 CSV 格式，所有聚合统计走它；errors.xml 体积只跟
+    失败样本数量相关（通常远小于成功样本），用来拿"那条失败的 body 说了什么"。
+
+    filename 用绝对路径 —— JMeter cwd=jmeter_home，相对路径会写错地方；调用方
+    传 run_dir/errors.xml 完整路径。
+    """
+    if not errors_xml_path:
+        return xml_bytes
+    tree = _parse_tree(xml_bytes)
+    top = _top_hashtree(tree)
+
+    test_plan_subtree = None
+    for el, child_ht, _idx in _hashtree_pairs(top):
+        if _local(el) == 'TestPlan':
+            test_plan_subtree = child_ht
+            break
+    if test_plan_subtree is None:
+        test_plan_subtree = top
+
+    rc = etree.SubElement(test_plan_subtree, 'ResultCollector', {
+        'guiclass': 'SimpleDataWriter',
+        'testclass': 'ResultCollector',
+        'testname': 'Falcon ErrorSampler',
         'enabled': 'true',
     })
-    args = etree.SubElement(listener, 'elementProp', {
-        'name': 'arguments',
-        'elementType': 'Arguments',
-        'guiclass': 'ArgumentsPanel',
-        'testclass': 'Arguments',
-        'enabled': 'true',
-    })
-    coll = etree.SubElement(args, 'collectionProp', {'name': 'Arguments.arguments'})
+    etree.SubElement(rc, 'boolProp', {'name': 'ResultCollector.error_logging'}).text = 'true'
 
-    # 走 v1 协议：URL = http://host:8086/write?db=<bucket>
-    write_url = influxdb_url.rstrip('/') + f'/write?db={influxdb_db}'
-
-    backend_args = [
-        ('influxdbMetricsSender',
-         'org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender'),
-        ('influxdbUrl', write_url),
-        ('application', 'falcon'),
-        ('measurement', 'jmeter'),
-        ('summaryOnly', 'false'),
-        # JMeter 5.6.3 BackendListener 链路有两层独立的 sampler 过滤：
-        #   1. 父类 BackendListener (Filter): samplersList + useRegexpForSamplersList
-        #      过滤 sampleOccurred 事件 — 决定这条 sample 要不要分发给 client
-        #   2. InfluxdbBackendListenerClient 自己 (samplersToFilter Pattern):
-        #      samplersRegex 单独再过滤 — 决定这条 sample 要不要进 SamplerMetric
-        # 两层任一拒绝 sampler-级数据就不会写到 InfluxDB（之前只配上一层 →
-        # InfluxDB 里只有 transaction=internal 的活跃线程数据）
-        ('samplersList', '.*'),
-        ('useRegexpForSamplersList', 'true'),
-        ('samplersRegex', '.*'),
-        ('testTitle', f'Falcon-Run-{run_id}'),
-        # 自定义 tags：JMeter 把 TAG_<key>=<val> 自动加到每条数据点
-        ('TAG_run_id', run_id),
-        ('TAG_task_id', str(task_id)),
-        ('percentiles', '50;90;95;99'),
+    obj = etree.SubElement(rc, 'objProp')
+    etree.SubElement(obj, 'name').text = 'saveConfig'
+    val = etree.SubElement(obj, 'value', {'class': 'SampleSaveConfiguration'})
+    # SampleSaveConfiguration 字段（顺序按 JMeter 5.6 默认 saveConfig 模板）
+    save_fields = [
+        ('time', 'true'), ('latency', 'true'), ('timestamp', 'true'),
+        ('success', 'true'), ('label', 'true'), ('code', 'true'),
+        ('message', 'true'), ('threadName', 'true'), ('dataType', 'true'),
+        ('encoding', 'false'), ('assertions', 'true'), ('subresults', 'false'),
+        ('responseData', 'true'),    # 关键：写 body
+        ('samplerData', 'false'),
+        ('xml', 'true'), ('fieldNames', 'true'),
+        ('responseHeaders', 'false'), ('requestHeaders', 'false'),
+        ('responseDataOnError', 'true'),  # 关键：失败时强制写 body
+        ('saveAssertionResultsFailureMessage', 'true'),
+        ('assertionsResultsToSave', '0'),
+        ('bytes', 'true'), ('sentBytes', 'true'),
+        ('url', 'true'), ('threadCounts', 'true'),
+        ('idleTime', 'true'), ('connectTime', 'true'),
     ]
-    # v1.2 多机调度：scheduler 通过 extra_tags 加 host=pod_name 等
-    if extra_tags:
-        for k, v in extra_tags.items():
-            tag_key = k if k.startswith('TAG_') else f'TAG_{k}'
-            backend_args.append((tag_key, str(v)))
-    for k, v in backend_args:
-        arg = etree.SubElement(coll, 'elementProp', {
-            'name': k,
-            'elementType': 'Argument',
-        })
-        etree.SubElement(arg, 'stringProp', {'name': 'Argument.name'}).text = k
-        etree.SubElement(arg, 'stringProp', {'name': 'Argument.value'}).text = v
-        etree.SubElement(arg, 'stringProp', {'name': 'Argument.metadata'}).text = '='
+    for k, v in save_fields:
+        etree.SubElement(val, k).text = v
 
-    etree.SubElement(listener, 'stringProp', {
-        'name': 'classname',
-    }).text = 'org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient'
+    # 绝对路径：JMeter cwd=jmeter_home，相对路径会写错地方
+    etree.SubElement(rc, 'stringProp', {'name': 'filename'}).text = errors_xml_path
 
-    # BackendListener 后面紧跟空 hashTree（配对结构要求）—— 加到刚才插入的同一容器
+    # 配对 hashTree
     etree.SubElement(test_plan_subtree, 'hashTree')
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
@@ -1415,6 +1580,7 @@ def build_run_xml(
     *,
     inject_environment_dns: bool = False,
     inject_backend_listener: bool = False,
+    inject_error_response_listener: bool = False,
     run_id: str | None = None,
     extra_backend_tags: dict[str, str] | None = None,
     warnings: list[str] | None = None,
@@ -1467,8 +1633,11 @@ def build_run_xml(
         )
 
     # 4) BackendListener → InfluxDB（仅 Step 3 真跑时用，按 run_id 切片）
+    # **每个 enabled TG 一个独立 listener**，附加 TAG_thread_group=<TG name>。
+    # InfluxDB query 按 thread_group GROUP BY → 前端 by_tg 是真 TG 级聚合
+    # （而不是按 sample label 切碎，一个 TG 里 N 个 sampler 显示 N 条 chip）。
     if inject_backend_listener and run_id:
-        xml = _inject_backend_listener(
+        xml = _inject_backend_listener_per_tg(
             xml,
             run_id=run_id,
             task_id=task.id,
@@ -1476,6 +1645,12 @@ def build_run_xml(
             influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
             extra_tags=extra_backend_tags,
         )
+
+    # 5) errors.xml 双轨：失败样本带 response body（用于「错误明细」/ 合并表 message）
+    if inject_error_response_listener and run_id:
+        from .jmeter import get_run_dir  # noqa: PLC0415
+        errors_xml = str(get_run_dir(run_id) / 'errors.xml')
+        xml = _inject_error_response_listener(xml, errors_xml_path=errors_xml)
 
     return xml
 

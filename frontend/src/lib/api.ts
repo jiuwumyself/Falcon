@@ -163,8 +163,11 @@ export const runsApi = {
     return api<ErrorAggregatesResponse>(`/runs/${runId}/error-samples/?${params.toString()}`)
   },
   // 响应时间拆解：扫 JTL 算 Connect/Server/Receive 三段时序，前端按需拉一次
-  latencyBreakdown: (runId: string): Promise<LatencyBreakdownResponse> =>
-    api<LatencyBreakdownResponse>(`/runs/${runId}/latency-breakdown/`),
+  // excludeKO=true 时只算 success=true 样本，看真实业务延迟
+  latencyBreakdown: (runId: string, excludeKO = false): Promise<LatencyBreakdownResponse> => {
+    const qs = excludeKO ? '?exclude_ko=true' : ''
+    return api<LatencyBreakdownResponse>(`/runs/${runId}/latency-breakdown/${qs}`)
+  },
   // § 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据；run 还在跑 / Pinpoint
   // 未启用 / 无数据时返回空数组
   pinpointTraces: (runId: string): Promise<PinpointTrace[]> =>
@@ -173,6 +176,11 @@ export const runsApi = {
   // first_error / error_rate_breached / p99_sla_breached）；前端时间轴 markLine 用
   events: (runId: string): Promise<RunEvent[]> =>
     api<RunEvent[]>(`/runs/${runId}/events/`),
+
+  // 软删 TaskRun + 物理清 run_dir + InfluxDB DELETE。表行保留供大盘统计。
+  // 活跃 run（pre_checking/pending/running/cancelling）后端 409 拒绝。
+  delete: (runId: string): Promise<void> =>
+    api<void>(`/runs/${runId}/`, { method: 'DELETE' }),
 }
 
 // ─── LoadGenerators API（v1.2 容器化压力源） ────────────────────────────

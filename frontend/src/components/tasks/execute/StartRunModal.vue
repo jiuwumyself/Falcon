@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  X, Plus, RefreshCw, Loader, AlertCircle, CheckCircle2, Server, Play,
+  X, Plus, RefreshCw, Loader, AlertCircle, AlertTriangle, CheckCircle2, Server, Play,
 } from 'lucide-vue-next'
 import { ApiError, loadGeneratorsApi } from '@/lib/api'
 import type { LoadGenerator } from '@/types/task'
@@ -9,6 +9,10 @@ import type { LoadGenerator } from '@/types/task'
 const props = defineProps<{
   open: boolean
   vusers: number
+  // 多 TG + 多 agent 时 jmx 缩放可能让总线程数偏差 ±N（N=TG 数）。这是 v1.2 已知问题
+  // （`_scale_thread_groups_to_shard` per-TG ceil 累加，详见 plan v1.2）。本轮 v1.3 仅前端
+  // 警告，不动 jmx 生成逻辑。
+  tgCount: number
   isDark: boolean
 }>()
 
@@ -263,6 +267,24 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         </span>
       </div>
 
+      <!-- 多 TG + 多压力源 警告：jmx 缩放每个 TG 各自 ceil 累加，总线程数会有 ±N 误差 -->
+      <div
+        v-if="tgCount > 1 && selected.size > 1"
+        class="flex items-start gap-2 mt-3 p-2 rounded text-[11.5px]"
+        :style="{
+          background: isDark ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.1)',
+          color: '#f59e0b',
+          border: '1px solid rgba(245,158,11,0.25)',
+        }"
+      >
+        <AlertTriangle :size="13" class="mt-0.5 flex-shrink-0" />
+        <span>
+          多线程组 ({{ tgCount }}) + 多压力源 ({{ selected.size }})：每个 TG 在每台压力源
+          上按比例缩放 + 向上取整，实际总线程数可能与配置有 ±{{ tgCount }} 误差。需要
+          <b>精确</b>总并发请用单机模式（选 1 台）。
+        </span>
+      </div>
+
       <!-- 底部按钮 -->
       <div class="flex items-center gap-2 mt-3 justify-end">
         <button
@@ -278,6 +300,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           :style="{ background: localOnly ? '#3b82f6' : '#10b981', color: '#fff' }"
           :disabled="!canConfirm"
           @click="confirm"
+          :title="tgCount > 1 && selected.size > 1
+            ? `多 TG (${tgCount}) + 多压力源 (${selected.size}) 分配按比例缩放，实际总线程数可能与配置有 ±${tgCount} 误差；要精确总并发请用单机模式`
+            : ''"
         >
           <Play :size="11" />
           {{ localOnly ? '本机直跑' : '确认并开始' }}

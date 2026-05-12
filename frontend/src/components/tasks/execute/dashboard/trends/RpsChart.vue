@@ -130,16 +130,15 @@ watch(chartRef, (v) => {
         ref="chartRef"
         :option="option"
         autoresize
-        style="width: 100%; height: 100%; min-height: 220px"
+        style="width: 100%; height: 100%"
       />
-      <div class="overflow-y-auto text-[11px] tabular-nums">
+      <div class="overflow-y-auto no-scrollbar text-[11px] tabular-nums">
         <table class="w-full">
           <thead>
             <tr :style="{ color: '#3b82f6' }">
               <th class="text-left font-medium pb-1.5"></th>
               <th class="text-right font-medium pb-1.5 px-1">Mean</th>
-              <th class="text-right font-medium pb-1.5 px-1">Max</th>
-              <th class="text-right font-medium pb-1.5 pl-1">Min</th>
+              <th class="text-right font-medium pb-1.5 pl-1">Max</th>
             </tr>
           </thead>
           <tbody>
@@ -163,8 +162,7 @@ watch(chartRef, (v) => {
                 </div>
               </td>
               <td class="py-0.5 px-1 text-right">{{ row.mean.toFixed(row.mean < 10 ? 2 : 0) }}</td>
-              <td class="py-0.5 px-1 text-right">{{ row.max.toFixed(row.max < 10 ? 2 : 0) }}</td>
-              <td class="py-0.5 pl-1 text-right">{{ row.min.toFixed(row.min < 10 ? 2 : 0) }}</td>
+              <td class="py-0.5 pl-1 text-right">{{ row.max.toFixed(row.max < 10 ? 2 : 0) }}</td>
             </tr>
           </tbody>
         </table>

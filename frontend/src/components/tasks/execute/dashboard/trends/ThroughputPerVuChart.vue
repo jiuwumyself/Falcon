@@ -17,6 +17,7 @@ use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent
 const props = defineProps<{
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  xRange?: [number, number] | null
   isDark: boolean
 }>()
 
@@ -50,7 +51,7 @@ const option = computed(() =>
     ],
     props.isDark,
     'req/VU/s',
-    { showLegend: false, gridBottom: 24 },
+    { showLegend: false, gridBottom: 24, xRange: props.xRange ?? null },
   ),
 )
 

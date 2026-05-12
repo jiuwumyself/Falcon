@@ -77,6 +77,12 @@ class TaskManager(models.Manager):
         return super().get_queryset().filter(is_deleted=False)
 
 
+class TaskRunManager(models.Manager):
+    """Default manager: hide soft-deleted runs（保留行做大盘统计，但 dropdown / list 不显示）。"""
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
 class Task(models.Model):
     """
     一个压测任务（对应一份 JMX 文件 + 可选的 CSV 参数化文件）。
@@ -273,6 +279,8 @@ class TaskRun(models.Model):
         max_length=20, choices=RunStatus.choices, default=RunStatus.PRE_CHECKING,
     )
 
+    # pre_check 起始时刻；进度条用它作起点（覆盖到 pre_check 阶段）
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True, db_index=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
@@ -294,6 +302,21 @@ class TaskRun(models.Model):
     error_breakdown = models.JSONField(default=dict, blank=True)
 
     error_message = models.TextField(blank=True)
+
+    # 启动时拷贝的 Step 2 配置 + 脚本指纹快照。运行中 / 历史 run 切换时给前端做
+    # "当时是这么跑的"展示；跟当前 task.thread_groups_config / task.jmx_hash 对比
+    # 可以判断"配置已变化"，给用户提示。
+    thread_groups_config_snapshot = models.JSONField(default=list, blank=True)
+    jmx_hash_snapshot = models.CharField(max_length=64, blank=True)
+
+    # 软删除：用户点 history dropdown 的 trash → 标 is_deleted=True，物理清 run_dir
+    # + InfluxDB 数据；表行保留供大盘统计任务历史 run 数。默认 manager 过滤掉软删，
+    # 大盘走 all_objects.filter(task=...).count()。
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    objects = TaskRunManager()
+    all_objects = models.Manager()
 
     # Step 3 子进程编排相关
     pre_check_log = models.TextField(blank=True)
@@ -407,13 +430,26 @@ class BackendListenerConfig(models.Model):
 
 
 class RunEventType(models.TextChoices):
-    """§ 12 关键事件锚点 enum。TextChoices 用 string 不用 int，新加值零 migration。"""
+    """§ 12 关键事件锚点 enum。TextChoices 用 string 不用 int，新加值零 migration。
+
+    分两类语义：
+    - **phase 边界**（ramp_done / hold_start / shutdown_start / first_sample）：
+      靠进度条 5 段染色（pre_check / startup_wait / ramp / steady / cool_down）表达；
+      前端可选择不画圆点（避免跟染色边界重复）。
+    - **突发/告警事件**（first_error / first_5xx / error_rate_breached /
+      p99_sla_breached）：用色块/圆点画在进度条上，hover 看时刻。
+    """
+    # phase 边界
     RAMP_DONE = 'ramp_done', 'ramp 完成（所有 vu 起来）'
     HOLD_START = 'hold_start', 'hold 开始（稳态期）'
     SHUTDOWN_START = 'shutdown_start', 'shutdown 开始'
+    FIRST_SAMPLE = 'first_sample', '首条 sample 落地（JMeter 真正开跑）'
+    # 突发/告警
     FIRST_ERROR = 'first_error', '第一次出现错误'
+    FIRST_5XX = 'first_5xx', '第一次出现 5xx 服务端错误'
     ERROR_RATE_BREACHED = 'error_rate_breached', '错误率破阈值'
     P99_SLA_BREACHED = 'p99_sla_breached', 'P99 破 SLA'
+    THROUGHPUT_PLATEAU = 'throughput_plateau', '吞吐拐点（加 VU 但 RPS 不涨）'
 
 
 class RunEventAnchor(models.Model):

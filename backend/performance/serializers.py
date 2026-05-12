@@ -87,19 +87,37 @@ class MetricSampleSerializer(serializers.ModelSerializer):
 
 
 class TaskRunSerializer(serializers.ModelSerializer):
+    # 全程预估秒数（含 ramp + steady + cool_down）—— 来自 scheduler.estimate_max_wall_sec。
+    # 前端 RunControlBar 进度条用它当分母，避免 elapsed 超过 task.duration_seconds 时进度溢出。
+    max_wall_sec = serializers.SerializerMethodField()
+    # run.created_at（pre_check 开始时刻），前端进度条起点用
+    created_at = serializers.DateTimeField(read_only=True)
+
     class Meta:
         model = TaskRun
         fields = [
             'id', 'run_id', 'task', 'status',
-            'started_at', 'finished_at',
+            'created_at', 'started_at', 'finished_at',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
+            'max_wall_sec',
             'total_requests', 'avg_rps', 'p99_ms', 'error_rate',
             'error_breakdown',  # § 12 S2 失败原因 5 类分桶
             'error_message', 'pre_check_log',
             'pid', 'stop_port', 'last_heartbeat_at',
             'cancel_requested_at', 'archived_at',
+            'thread_groups_config_snapshot', 'jmx_hash_snapshot',
         ]
         read_only_fields = fields  # 写入由 RunExecutor 控制，不通过 serializer
+
+    def get_max_wall_sec(self, obj):
+        from .services.scheduler import estimate_max_wall_sec  # noqa: PLC0415
+        try:
+            return int(estimate_max_wall_sec(
+                obj.task.thread_groups_config or [],
+                fallback_seconds=obj.duration_seconds or 0,
+            ))
+        except Exception:  # noqa: BLE001
+            return obj.duration_seconds or 0
 
 
 class RunEventAnchorSerializer(serializers.ModelSerializer):

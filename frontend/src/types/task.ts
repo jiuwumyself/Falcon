@@ -213,11 +213,13 @@ export interface TaskRun {
   run_id: string                // Step 3 起：面向用户的短 uuid，URL / 目录名 / InfluxDB tag 都用它
   task: number
   status: RunStatus
+  created_at: string            // pre_check 起始时刻；进度条起点用
   started_at: string | null
   finished_at: string | null
   virtual_users: number
   ramp_up_seconds: number
-  duration_seconds: number
+  duration_seconds: number      // 用户配的"压测时长"（仅 steady 期）
+  max_wall_sec: number          // 全程预估秒数（ramp+steady+cool_down，scheduler 算）；进度条分母用
   total_requests: number
   avg_rps: number
   p99_ms: number
@@ -233,16 +235,26 @@ export interface TaskRun {
   last_heartbeat_at: string | null
   cancel_requested_at: string | null
   archived_at: string | null
+  // 启动时拷贝的 Step 2 配置 + jmx 指纹快照（migration 0017 起；旧 run 为空）。
+  // 前端用这些字段在切历史 run 时按"当时配置"显示 RunPlanSummary，并跟当前 task
+  // 对比给「脚本或线程组配置已变化」提示。
+  thread_groups_config_snapshot?: ThreadGroupConfig[]
+  jmx_hash_snapshot?: string
 }
 
-// § 12 S1 关键事件锚点：run 期间的状态切换 / 阈值破坏事件，前端时间轴 markLine 用
+// § 12 S1 关键事件锚点：run 期间的状态切换 / 阈值破坏事件。
+// phase 边界类（靠进度条 5 段染色表达）：ramp_done / hold_start / shutdown_start / first_sample
+// 突发/告警类（用色块画在进度条上）：first_error / first_5xx / error_rate_breached / p99_sla_breached / throughput_plateau
 export type RunEventType =
   | 'ramp_done'
   | 'hold_start'
   | 'shutdown_start'
+  | 'first_sample'
   | 'first_error'
+  | 'first_5xx'
   | 'error_rate_breached'
   | 'p99_sla_breached'
+  | 'throughput_plateau'
 
 export interface RunEvent {
   id: number
@@ -298,9 +310,14 @@ export interface RunMetricsTotals {
 
 export interface RunMetrics {
   overall: RunMetricsSeries
-  by_tg: Record<string, RunMetricsSeries>   // key = JMeter sample label / TG name
+  by_tg: Record<string, RunMetricsSeries>   // key = ThreadGroup testname（每个 enabled TG 一个 listener，按 TAG_thread_group 切片）
+  by_sampler: Record<string, RunMetricsSeries> // key = JMeter sample label（接口级，趋势曲线切线用）
+  sampler_thread_group: Record<string, string[]> // sampler → 所属 TG name 列表（跨 TG 同名 sampler 时不止一个）；前端按 selectedTg includes filter
   by_host: Record<string, RunMetricsSeries> // v1.2：key = agent pod_name；单机时只有 1 个 key
-  totals: RunMetricsTotals                  // 累计 KPI（KpiBar 用）
+  totals: RunMetricsTotals                  // 累计 KPI（KpiBar 全部 chip 用）
+  totals_by_tg: Record<string, RunMetricsTotals>  // 按 TG 切片的累计 KPI；key 跟 by_tg 对齐
+  tg_planned_users: Record<string, number>  // TG name → 计划线程数（峰值）；累计 chip / 静态线兜底用
+  tg_planned_meta?: Record<string, { kind: TGKind; params: Record<string, any> }>  // TG name → {kind, params}；前端按 plannedCurve 算 ramp-up 波动曲线
   last_ts: string                           // 下次轮询的 since 参数
   run: TaskRun                              // 后端附带最新 run 状态
 }
@@ -362,6 +379,7 @@ export interface ErrorAggregateRow {
   sample_message: string         // 该组首次出现的 responseMessage
   sample_failure_message: string // 该组首次出现的 failureMessage
   sample_url: string             // 该组首次出现的 URL
+  sample_response_body: string   // 该组首次出现的真实响应 body（errors.xml 双轨拿，已截断 ≤ 500 字）
 }
 
 export interface ErrorAggregatesResponse {

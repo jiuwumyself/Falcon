@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import os
+import random
 import shutil
 import signal
 import socket
@@ -60,8 +61,11 @@ _STOPTEST_PORT_BASE = 4445
 _STOPTEST_PORT_RANGE = 1000
 
 # graceful 取消超时 → SIGTERM → SIGKILL
-_GRACEFUL_TIMEOUT_SEC = 30
-_SIGTERM_TIMEOUT_SEC = 10
+# cancel 链路 worst case = HEARTBEAT(1s) + GRACEFUL + SIGTERM + SIGKILL(5s)
+# JMeter 收到 StopTestNow 正常 1-2s 就退；5s 还不退基本卡死了，没必要陪它继续磨。
+# 旧值 30/10 → 用户感觉点了取消等半天；改成 5/3 把 worst case 压到 ~14s。
+_GRACEFUL_TIMEOUT_SEC = 5
+_SIGTERM_TIMEOUT_SEC = 3
 
 # 心跳间隔 + duration 超时余量
 _HEARTBEAT_INTERVAL_SEC = 1.0
@@ -74,6 +78,18 @@ _EARLY_ABORT_CHECK_INTERVAL_SEC = 5
 _EARLY_ABORT_WINDOW_SEC = 30
 _EARLY_ABORT_THRESHOLD = 0.80
 _EARLY_ABORT_MIN_TOTAL = 50
+
+# § 12 S1 事件锚点 heartbeat 扫描间隔：每 N 秒扫一次 first_sample / first_error / first_5xx
+_RUNTIME_ANCHOR_INTERVAL_SEC = 5
+
+# 分布式：每 N 秒把每台 agent 的 errors.xml 增量拉回主控
+# 这样运行中前端 ErrorByEndpointTable 就能拿到真实失败 body（不再 100% HTTP_REASON 兜底）
+_ERRORS_XML_PULL_INTERVAL_SEC = 10
+
+# 分布式：每 N 秒把每台 agent 的 results.jtl 拉回主控 + 合并到 <run_dir>/results.jtl
+# 聚合端点（error-samples?aggregate=true / sampler-stats）扫的是主控本地 results.jtl，
+# 不拉 → 运行中聚合表只能等所有 agent 终态后才能出数据（用户看到的「暂无错误样本」）
+_PULL_JTL_INTERVAL_SEC = 10
 
 # 保留最新 N 个 run 目录，更老的自动归档为 tar.gz
 _RUN_KEEP_COUNT = 20
@@ -109,6 +125,8 @@ class RunExecutor:
         self._selected_lgs: list = []                          # list[LoadGenerator]
         self._agent_runs: dict[int, dict] = {}                  # lg_id → {agent_run_id, base_url, jtl_path}
         self._agent_runs_lock = threading.Lock()
+        # § 12 S1 实时锚点缓存：已写过的事件类型，heartbeat 跳过重复扫描
+        self._anchors_recorded: set[str] = set()
 
     # ── public ─────────────────────────────────────────────
 
@@ -187,6 +205,7 @@ class RunExecutor:
                     started_at=dj_timezone.now(),
                     last_heartbeat_at=dj_timezone.now(),
                 )
+                self._pre_record_phase_anchors()
                 exit_code = self._run_distributed()
             else:
                 # 本地兜底路径：原 v1.1 单机流程
@@ -198,6 +217,7 @@ class RunExecutor:
                     started_at=dj_timezone.now(),
                     last_heartbeat_at=dj_timezone.now(),
                 )
+                self._pre_record_phase_anchors()
                 self._proc = self._spawn_jmeter(run_jmx, stop_port)
                 self._update_run(pid=self._proc.pid)
                 exit_code = self._heartbeat_loop(self._proc)
@@ -218,8 +238,12 @@ class RunExecutor:
 
     # ── pre check ──────────────────────────────────────────
 
+    def _flush_pre_check_log(self, lines: list[str]) -> None:
+        """把当前累积的预检日志同步写回 DB，让前端 3s 轮询能看到逐项点亮。"""
+        self._update_run(pre_check_log='\n'.join(lines))
+
     def _pre_check(self) -> tuple[bool, str]:
-        """返回 (ok, 多行日志)。任一项失败 ok=False。"""
+        """返回 (ok, 多行日志)。任一项失败 ok=False。每跑完一项 flush 一次。"""
         lines: list[str] = []
         ok = True
 
@@ -236,6 +260,7 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             ok = False
             lines.append(f'❌ JMeter 安装失败: {e}')
+        self._flush_pre_check_log(lines)
 
         # 2) 脚本检查
         task = self.run.task
@@ -262,6 +287,7 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             ok = False
             lines.append(f'❌ 脚本检查失败: {e}')
+        self._flush_pre_check_log(lines)
 
         # 3) 磁盘空间
         try:
@@ -275,6 +301,7 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             ok = False
             lines.append(f'❌ 磁盘检查失败: {e}')
+        self._flush_pre_check_log(lines)
 
         # 4) InfluxDB
         try:
@@ -289,39 +316,102 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             ok = False
             lines.append(f'❌ InfluxDB 检查异常: {e}')
+        self._flush_pre_check_log(lines)
 
         # 5) Environment hosts TCP 探测
         # host_entries 兼容两种格式（同 _inject_dns_cache_manager）：
         #   - dict {"hostname": "...", "ip": "..."}
         #   - str "10.0.0.1 hostname.foo.com"（/etc/hosts 风格 + # 注释）
-        # 用 jmx_svc._parse_host_entry 统一规范化，避免 string 上调 .get 炸 AttributeError。
+        # 用 jmx_svc._parse_host_entry 统一规范化。
+        # 随机抽 10 条，只汇总通过 / 未通过数；不阻塞 ok（内网未开 80/443 也常见）。
         if task.environment_id and task.environment.host_entries:
-            # 海量 hosts 时 TCP 探测会拖慢 pre_check（用户那台环境有 1500+ 条），
-            # 这里只挑前 50 条做探测代表性即可——超过的话用户去 admin 自己分类拆环境。
-            entries = task.environment.host_entries[:50]
-            skipped = max(0, len(task.environment.host_entries) - 50)
-            for entry in entries:
+            parsed: list[tuple[str, str]] = []
+            for entry in task.environment.host_entries:
                 pair = jmx_svc._parse_host_entry(entry)
-                if not pair:
-                    continue
-                host, ip = pair
-                reachable = False
-                for port in (80, 443):
-                    try:
-                        with socket.create_connection((ip, port), timeout=2):
-                            reachable = True
-                            break
-                    except OSError:
-                        continue
-                if reachable:
-                    lines.append(f'✅ Environment {host} → {ip}: TCP 可达')
+                if pair:
+                    parsed.append(pair)
+            if not parsed:
+                lines.append('ℹ️  Environment hosts 全部无法解析，跳过 TCP 探测')
+            else:
+                sample_size = min(10, len(parsed))
+                sample = random.sample(parsed, sample_size)
+                passed = 0
+                failed = 0
+                for _host, ip in sample:
+                    reachable = False
+                    for port in (80, 443):
+                        try:
+                            with socket.create_connection((ip, port), timeout=2):
+                                reachable = True
+                                break
+                        except OSError:
+                            continue
+                    if reachable:
+                        passed += 1
+                    else:
+                        failed += 1
+                suffix = f'（共 {len(parsed)} 条，随机抽 {sample_size} 条）'
+                if failed == 0:
+                    lines.append(f'✅ Environment hosts: {passed}/{sample_size} TCP 可达 {suffix}')
                 else:
-                    # 不阻塞 ok（环境内网未开 80/443 的服务仍能被 JMeter 访问）
                     lines.append(
-                        f'⚠️  Environment {host} → {ip}: TCP 80/443 探测未通过（非致命）'
+                        f'⚠️  Environment hosts: {passed}/{sample_size} TCP 可达，'
+                        f'{failed} 未通过（非致命）{suffix}'
                     )
-            if skipped:
-                lines.append(f'ℹ️  Environment 还有 {skipped} 条 hosts 跳过探测（>50 条只抽样）')
+        self._flush_pre_check_log(lines)
+
+        # 6) 压力源（agent）
+        # 判定与 _select_load_generators 对齐：status=idle 且心跳 ≤ 3 min。
+        # 未选 agent / 全不可用时，按 settings.LOCAL_FALLBACK 决定是否拒绝。
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone as _tz  # noqa: PLC0415
+        from ..models import LoadGeneratorStatus  # noqa: PLC0415
+
+        local_fallback = bool(getattr(settings, 'LOCAL_FALLBACK', True))
+        selected = list(self.run.load_generators.all())
+
+        if not selected:
+            if local_fallback:
+                lines.append('✅ 压力源: 未选 agent，走本地 JMeter 兜底（LOCAL_FALLBACK=1）')
+            else:
+                ok = False
+                lines.append('❌ 压力源: 未选 agent，且本地兜底已关闭（LOCAL_FALLBACK=0）')
+        else:
+            cutoff = _tz.now() - timedelta(minutes=3)
+            usable = []
+            issues: list[str] = []
+            for lg in selected:
+                fresh = lg.last_heartbeat_at and lg.last_heartbeat_at >= cutoff
+                if lg.status == LoadGeneratorStatus.IDLE and fresh:
+                    usable.append(lg)
+                else:
+                    reason = '心跳过期' if not fresh else lg.status
+                    issues.append(f'{lg.pod_name}({reason})')
+
+            if usable:
+                capacity = sum(lg.max_vusers for lg in usable)
+                msg = f'✅ 压力源: {len(usable)}/{len(selected)} 台可用，容量合计 {capacity} VU'
+                if issues:
+                    msg += f'（不可用: {", ".join(issues)}）'
+                lines.append(msg)
+                if capacity < self.run.virtual_users:
+                    ok = False
+                    lines.append(
+                        f'❌ 压力源容量不足: 可用合计 {capacity} VU '
+                        f'< 任务需要 {self.run.virtual_users} VU'
+                    )
+            elif local_fallback:
+                lines.append(
+                    f'⚠️  压力源: 选了 {len(selected)} 台全不可用'
+                    f'（{", ".join(issues)}），将走本地兜底'
+                )
+            else:
+                ok = False
+                lines.append(
+                    f'❌ 压力源: 选了 {len(selected)} 台全不可用'
+                    f'（{", ".join(issues)}），本地兜底已关闭（LOCAL_FALLBACK=0）'
+                )
+        self._flush_pre_check_log(lines)
 
         return ok, '\n'.join(lines)
 
@@ -348,6 +438,82 @@ class RunExecutor:
         if token:
             h['Authorization'] = f'Bearer {token}'
         return h
+
+    def _pull_agent_jtls_and_merge(self, run_dir: Path) -> None:
+        """周期性把每台 agent 的 jtl 拉回主控 + merge 到 <run_dir>/results.jtl。
+
+        - 拉每台 agent /runs/:id/jtl，覆盖写 <run_dir>/<pod_name>.jtl
+        - 调 jtl_merger.merge_jtls 写到 <run_dir>/.results.jtl.tmp 再原子 replace
+          为 results.jtl（防聚合端点读到半写文件）
+        - 拉空 / 404 / 网络错都静默；只要至少一台 agent 有数据就能合并出非空 jtl
+        - 终态后 _run_distributed 仍会跑一次最终 merge（见下方代码），覆盖此处运行
+          中拿到的"截断"快照
+        """
+        with self._agent_runs_lock:
+            agent_runs = list(self._agent_runs.values())
+
+        jtl_paths: list[Path] = []
+        for info in agent_runs:
+            try:
+                r = requests.get(
+                    f'{info["base_url"]}/runs/{info["agent_run_id"]}/jtl',
+                    timeout=30, headers=self._agent_headers(), stream=True,
+                )
+                if r.status_code != 200:
+                    continue
+                target = info['jtl_path']
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_suffix('.jtl.tmp')
+                with tmp.open('wb') as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                tmp.replace(target)
+                jtl_paths.append(target)
+            except (requests.RequestException, OSError):
+                continue
+
+        if not jtl_paths:
+            return
+
+        merged_final = run_dir / 'results.jtl'
+        merged_tmp = run_dir / '.results.jtl.tmp'
+        try:
+            jtl_merger.merge_jtls(jtl_paths, merged_tmp)
+            merged_tmp.replace(merged_final)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: runtime jtl merge failed: {e}', file=sys.stderr)
+            try:
+                merged_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _pull_agent_errors_xml(self, run_dir: Path) -> None:
+        """把每台 agent 的 errors.xml 拉回主控 <run_dir>/errors_<pod>.xml。
+
+        - 覆盖写（不增量）：每个 agent 的 errors.xml 流式 append，每次 GET 拿当时
+          全量；views.error_samples 的 iterparse(recover=True) 能读未闭合 XML。
+        - 写盘走 .tmp + os.replace 原子切换，避免主控并发读到半写文件。
+        - 404 / 网络错 / IO 错都静默——拉不到时前端自然 fallback 到 HTTP_REASON。
+        """
+        with self._agent_runs_lock:
+            agent_runs = list(self._agent_runs.values())
+        for info in agent_runs:
+            try:
+                r = requests.get(
+                    f'{info["base_url"]}/runs/{info["agent_run_id"]}/errors-xml',
+                    timeout=15, headers=self._agent_headers(), stream=True,
+                )
+                if r.status_code != 200:
+                    continue
+                pod = info.get('pod_name') or 'agent'
+                err_path = run_dir / f'errors_{pod}.xml'
+                tmp_path = err_path.with_suffix('.xml.tmp')
+                with tmp_path.open('wb') as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                tmp_path.replace(err_path)
+            except (requests.RequestException, OSError):
+                continue
 
     def _run_distributed(self) -> int:
         """
@@ -436,6 +602,9 @@ class RunExecutor:
         )
         start_t = time.monotonic()
         last_abort_check = start_t
+        last_anchor_check = start_t
+        last_errors_pull = start_t
+        last_jtl_pull = start_t
         any_failed = False
         early_aborted = False
 
@@ -456,6 +625,28 @@ class RunExecutor:
                 pass
 
             now = time.monotonic()
+
+            # § 12 S1：实时锚点扫描（first_sample / first_error / first_5xx）
+            # 分布式时本地 results.jtl 还没合并 → JTL 扫描会自动 skip；first_error 走
+            # InfluxDB 查得到（所有 agent 写同一 measurement）。
+            if (now - last_anchor_check) > _RUNTIME_ANCHOR_INTERVAL_SEC:
+                last_anchor_check = now
+                self._record_runtime_anchors()
+
+            # 周期性拉 agent errors.xml 到主控（覆盖写 errors_<pod>.xml）。
+            # JMeter SimpleDataWriter 流式 append，运行中文件已有部分失败样本 body；
+            # 主控 aggregates 端点 iterparse(recover=True) 能读未闭合 XML。
+            # 不拉 → 运行中 body_index 空 → message 列 100% 走 HTTP_REASON 兜底。
+            if (now - last_errors_pull) > _ERRORS_XML_PULL_INTERVAL_SEC:
+                last_errors_pull = now
+                self._pull_agent_errors_xml(run_dir)
+
+            # 周期性拉 agent results.jtl 到主控 + merge 到 <run_dir>/results.jtl。
+            # 聚合端点（error-samples?aggregate / sampler-stats）扫的就是这个文件；
+            # 不拉 → 运行中聚合表只能等所有 agent 终态后才有数据（用户看到的「暂无错误样本」）。
+            if (now - last_jtl_pull) > _PULL_JTL_INTERVAL_SEC:
+                last_jtl_pull = now
+                self._pull_agent_jtls_and_merge(run_dir)
 
             # P0 #3 early abort gate（与单机版同逻辑）：grace 后查最近 30s 错误率
             if (
@@ -549,6 +740,10 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             print(f'[executor] WARN: jtl merge failed: {e}', file=sys.stderr)
 
+        # 终态后再拉一次 errors.xml（兜底：JMeter 最后几条失败样本可能还在 buffer 里）。
+        # 运行中已经周期性拉过（_ERRORS_XML_PULL_INTERVAL_SEC），这次相当于"最后一遍补刀"。
+        self._pull_agent_errors_xml(run_dir)
+
         # agent 端清理（删 work_dir，避免 disk leak）
         for info in agent_runs:
             try:
@@ -571,6 +766,7 @@ class RunExecutor:
             self.run.task,
             inject_environment_dns=bool(self.run.task.environment_id),
             inject_backend_listener=True,
+            inject_error_response_listener=True,  # 仅失败样本写 errors.xml 含 body
             run_id=self.run.run_id,
         )
         _atomic_write_bytes(run_jmx, xml)
@@ -650,6 +846,7 @@ class RunExecutor:
         )
         start_t = time.monotonic()
         last_abort_check = start_t
+        last_anchor_check = start_t
 
         while True:
             ret = proc.poll()
@@ -662,6 +859,11 @@ class RunExecutor:
                 return self._wait_or_kill(proc)
 
             now = time.monotonic()
+
+            # § 12 S1：实时锚点扫描（first_sample / first_error / first_5xx）
+            if (now - last_anchor_check) > _RUNTIME_ANCHOR_INTERVAL_SEC:
+                last_anchor_check = now
+                self._record_runtime_anchors()
 
             # P0 #3 early abort gate：grace 期后每 INTERVAL 秒查一次，命中即 cancel
             if (
@@ -852,6 +1054,91 @@ class RunExecutor:
                 print(f'[executor] WARN: pinpoint collect dispatch failed: {e}',
                       file=sys.stderr)
 
+    def _pre_record_phase_anchors(self) -> None:
+        """§ 12 S1：run 进入 RUNNING 后立即把 phase 边界事件预写入（基于 task config
+        + started_at 推算）。这样进度条第一时间就有精确边界，不靠 phaseSegments 的
+        本地 fallback。失败静默——锚点缺失不阻塞 run。"""
+        try:
+            if not self.run.started_at:
+                return
+            started_ms = int(self.run.started_at.timestamp() * 1000)
+            anchors = scheduler_svc.estimate_phase_anchors_sec(
+                self.run.task.thread_groups_config or []
+            )
+            if not anchors:
+                return
+            for event_type, sec_key in [
+                ('ramp_done', 'ramp_done_sec'),
+                ('hold_start', 'hold_start_sec'),
+                ('shutdown_start', 'shutdown_start_sec'),
+            ]:
+                sec = anchors.get(sec_key)
+                if sec is None or sec < 0:
+                    continue
+                if event_type in self._anchors_recorded:
+                    continue
+                self._record_event_anchor(
+                    event_type, started_ms + sec * 1000,
+                    metadata={'phase_offset_sec': sec},
+                )
+                self._anchors_recorded.add(event_type)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: pre-record phase anchors: {e}', file=sys.stderr)
+
+    def _record_runtime_anchors(self) -> None:
+        """§ 12 S1：heartbeat 里增量写 first_sample / first_error / first_5xx。
+        已写过的用 self._anchors_recorded 缓存，避免每次都开 JTL 文件。
+        分布式时 results.jtl 在 _on_finish 才合并，期间 JTL 扫描自然 skip；
+        first_error 仍能通过 InfluxDB 查到（每台 agent 都写同一 measurement）。"""
+        needs = {'first_sample', 'first_error', 'first_5xx'} - self._anchors_recorded
+        if not needs:
+            return
+
+        # first_error: 扫 InfluxDB error_count
+        if 'first_error' in needs:
+            try:
+                metrics = influxdb_svc.query_run_realtime(self.run.run_id)
+                err_pts = (metrics or {}).get('overall', {}).get('error_count') or []
+                for ts_ms, val in err_pts:
+                    if val and val > 0:
+                        self._record_event_anchor(
+                            'first_error', int(ts_ms),
+                            metadata={'error_count': int(val)},
+                        )
+                        self._anchors_recorded.add('first_error')
+                        break
+            except Exception as e:  # noqa: BLE001
+                print(f'[executor] WARN: first_error realtime scan: {e}', file=sys.stderr)
+
+        # first_sample / first_5xx: 扫本地 results.jtl 第一行 / 第一条 5xx
+        if {'first_sample', 'first_5xx'} & needs:
+            try:
+                import csv as _csv  # noqa: PLC0415
+                jtl_path = get_run_dir(self.run.run_id) / 'results.jtl'
+                if jtl_path.exists() and jtl_path.stat().st_size > 0:
+                    with jtl_path.open('r', encoding='utf-8', errors='replace') as f:
+                        reader = _csv.DictReader(f)
+                        for row in reader:
+                            ts = int(row.get('timeStamp') or 0)
+                            if ts <= 0:
+                                continue
+                            if 'first_sample' not in self._anchors_recorded:
+                                self._record_event_anchor('first_sample', ts)
+                                self._anchors_recorded.add('first_sample')
+                            if 'first_5xx' not in self._anchors_recorded:
+                                code = (row.get('responseCode') or '').strip()
+                                success = (row.get('success') or '').lower()
+                                if success != 'true' and code.startswith('5') and len(code) == 3:
+                                    self._record_event_anchor(
+                                        'first_5xx', ts,
+                                        metadata={'response_code': code},
+                                    )
+                                    self._anchors_recorded.add('first_5xx')
+                            if {'first_sample', 'first_5xx'}.issubset(self._anchors_recorded):
+                                break
+            except Exception as e:  # noqa: BLE001
+                print(f'[executor] WARN: first_sample/5xx realtime scan: {e}', file=sys.stderr)
+
     def _record_event_anchor(self, event_type: str, ts_ms: int, metadata: dict | None = None) -> None:
         """§ 12 S1：往 RunEventAnchor 写一条事件锚点。失败静默——事件锚点是辅助
         信号，不阻塞 run 终态。"""
@@ -921,6 +1208,44 @@ class RunExecutor:
                     break
         except Exception as e:  # noqa: BLE001
             print(f'[executor] WARN: first_error scan: {e}', file=sys.stderr)
+
+        # 3) first_sample + first_5xx：扫 results.jtl 第一行 / 第一条 5xx
+        try:
+            import csv as _csv  # noqa: PLC0415
+            jtl_path = get_run_dir(run.run_id) / 'results.jtl'
+            if jtl_path.exists() and jtl_path.stat().st_size > 0:
+                with jtl_path.open('r', encoding='utf-8', errors='replace') as f:
+                    reader = _csv.DictReader(f)
+                    saw_first_sample = False
+                    saw_first_5xx = False
+                    for row in reader:
+                        ts = int(row.get('timeStamp') or 0)
+                        if ts <= 0:
+                            continue
+                        if not saw_first_sample:
+                            if not RunEventAnchor.objects.filter(
+                                run=run, event_type='first_sample',
+                            ).exists():
+                                RunEventAnchor.objects.create(
+                                    run=run, event_type='first_sample', ts_ms=ts,
+                                )
+                            saw_first_sample = True
+                        if not saw_first_5xx:
+                            code = (row.get('responseCode') or '').strip()
+                            success = (row.get('success') or '').lower()
+                            if success != 'true' and code.startswith('5') and len(code) == 3:
+                                if not RunEventAnchor.objects.filter(
+                                    run=run, event_type='first_5xx',
+                                ).exists():
+                                    RunEventAnchor.objects.create(
+                                        run=run, event_type='first_5xx', ts_ms=ts,
+                                        metadata={'response_code': code},
+                                    )
+                                saw_first_5xx = True
+                        if saw_first_sample and saw_first_5xx:
+                            break
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: first_sample/5xx scan: {e}', file=sys.stderr)
 
     def _collect_pinpoint_safely(self, run) -> None:
         """daemon thread 入口；任何异常都吞掉，pinpoint_collector 自身已 fail-fast。"""

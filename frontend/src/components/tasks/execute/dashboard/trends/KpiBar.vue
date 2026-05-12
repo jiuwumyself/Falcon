@@ -1,188 +1,137 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type {
-  RunMetricsSeries, RunMetricsTotals, SeriesPoint, Task,
+  RunMetricsSeries, RunMetricsTotals, Task, TaskRun,
 } from '@/types/task'
-import { fmtBytesTotal, fmtInt } from './chartFactory'
-import { colorForErrorMetric, colorForErrorRate, SEMANTIC } from './semanticColors'
-import { pickPrimaryScenario, extraScenarioCount, listScenarios } from './scenarioCtx'
+import { fmtBytesTotal, fmtInt, statsOf } from './chartFactory'
+import { colorForErrorMetric, SEMANTIC } from './semanticColors'
 
-// 三段结构（Tufte 视觉重力 = 字号 + 空间）：
-//   ① 顶部场景徽章 chip（icon + label + 14% 透明度场景色）
-//   ② 主级（36px 巨字号）：错误率 + P95
-//   ③ 副级（24px）：RPS + 现在并发
-//   ④ 累计带（12px 单行）：5,138 req · 642 fail · 32 MB ↓ · 38 MB ↑
+// 单行紧凑：TG 切换 chip 组 + 累计 chips + 整体 RPS / P95。
+// 场景徽章已搬到 RunPlanSummary（进度条下方）；KpiBar 不再展示场景，避免重复。
+// 错误率（累计 + 60s）放在下面"总错误"卡片标题里，KpiBar 不再展示百分比。
 const props = defineProps<{
   task: Task | null
-  totals: RunMetricsTotals | null
-  series: RunMetricsSeries | null
+  run: TaskRun | null
+  totals: RunMetricsTotals | null     // 已是 selectedTg 过滤后的（父组件 effectiveTotals）
+  series: RunMetricsSeries | null     // 已是 selectedTg 过滤后的（父组件 effectiveOverall）
+  tgKeys: string[]                    // 全部 TG / sample label 列表（来自 metrics.by_tg keys）
+  selectedTg: string | null           // 当前选中；null = 全部
   isDark: boolean
 }>()
+const emit = defineEmits<{
+  (e: 'update:selectedTg', v: string | null): void
+}>()
 
-function lastOf(pts: SeriesPoint[] | undefined): number | null {
-  if (!pts || !pts.length) return null
-  return pts[pts.length - 1][1]
-}
-
-// 实时错误率：60s 滚动窗口（与 ErrorRateGauge 同算法）
-function lastWindowRate(
-  errorPts: SeriesPoint[] | undefined,
-  rpsPts: SeriesPoint[] | undefined,
-  windowMs = 60_000,
-): number | null {
-  if (!errorPts?.length || !rpsPts?.length) return null
-  const now = Math.max(
-    errorPts[errorPts.length - 1][0],
-    rpsPts[rpsPts.length - 1][0],
-  )
-  const cutoff = now - windowMs
-  let errSum = 0
-  let reqSum = 0
-  for (const [t, v] of errorPts) if (t >= cutoff) errSum += v
-  for (const [t, v] of rpsPts) if (t >= cutoff) reqSum += v
-  if (reqSum === 0) return null
-  return (errSum / reqSum) * 100
-}
-
-const primary = computed(() => props.isDark ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.85)')
-const muted = computed(() => props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.55)')
-
-// ── 主场景徽章 ────────────────────────────────────────────────
-const scenario = computed(() => pickPrimaryScenario(props.task))
-const extraN = computed(() => extraScenarioCount(props.task))
-const allScenarioLabels = computed(
-  () => listScenarios(props.task).map((s) => s.label).join(' / '),
-)
-
-// ── 主级 + 副级数字 ──────────────────────────────────────────
-const errorPct = computed(() =>
-  lastWindowRate(props.series?.error_count, props.series?.rps),
-)
-const errorPctText = computed(() =>
-  errorPct.value === null ? '—' : `${errorPct.value.toFixed(2)}%`,
-)
-const errorPctColor = computed(() =>
-  errorPct.value === null ? muted.value : colorForErrorRate(errorPct.value),
-)
-
-const p95 = computed(() => lastOf(props.series?.p95_ms))
-const p95Text = computed(() => p95.value === null ? '—' : `${Math.round(p95.value)} ms`)
-
-const rps = computed(() => lastOf(props.series?.rps))
-const rpsText = computed(() => rps.value === null ? '—' : rps.value.toFixed(1))
-
-const vu = computed(() => lastOf(props.series?.active_users))
-const vuText = computed(() => vu.value === null ? '—' : `${Math.round(vu.value)}`)
-
-// ── 累计折一行 ────────────────────────────────────────────────
-const cumulativeChips = computed(() => {
-  const t = props.totals
-  const totalCount = t?.total_count ?? 0
-  const totalErrors = t?.total_errors ?? 0
-  const recv = t?.total_bytes_recv ?? 0
-  const sent = t?.total_bytes_sent ?? 0
-  return [
-    { label: `${fmtInt(totalCount)} req`, color: muted.value },
-    {
-      label: `${fmtInt(totalErrors)} fail`,
-      color: colorForErrorMetric(totalErrors, muted.value),
-    },
-    { label: `${fmtBytesTotal(recv)} ↓`, color: muted.value },
-    { label: `${fmtBytesTotal(sent)} ↑`, color: muted.value },
-  ]
+// 平均 RPS / 整体 P95 直接用 statsOf 的 mean，跟趋势图右侧 stats 对齐口径。
+// 不再用 total_count / 总时长——那会把 ramp / shutdown 的 0 点稀释进去，跟图里 mean 对不上。
+const overallRps = computed<number | null>(() => {
+  const pts = props.series?.rps
+  if (!pts?.length) return null
+  return statsOf(pts).mean
 })
 
-// ── 卡片样式 ──────────────────────────────────────────────────
-const heroCardStyle = computed(() => ({
-  background: props.isDark ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.78)',
-  border: props.isDark ? '1px solid rgba(255,255,255,0.06)' : '1px solid rgba(0,0,0,0.06)',
-}))
-const subCardStyle = computed(() => ({
-  background: props.isDark ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.65)',
-  border: props.isDark ? '1px solid rgba(255,255,255,0.05)' : '1px solid rgba(0,0,0,0.05)',
-}))
+const overallP95 = computed<number | null>(() => {
+  const pts = props.series?.p95_ms
+  if (!pts?.length) return null
+  return statsOf(pts).mean
+})
+
+const muted = computed(() => props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.55)')
+
+interface Chip { label: string; color: string; title?: string }
+
+const chips = computed<Chip[]>(() => {
+  const t = props.totals
+  const out: Chip[] = []
+  if (t) {
+    out.push({ label: `${fmtInt(t.total_count ?? 0)} req`, color: muted.value })
+    out.push({
+      label: `${fmtInt(t.total_errors ?? 0)} fail`,
+      color: colorForErrorMetric(t.total_errors ?? 0, muted.value),
+    })
+    out.push({ label: `${fmtBytesTotal(t.total_bytes_recv ?? 0)} ↓`, color: muted.value })
+    out.push({ label: `${fmtBytesTotal(t.total_bytes_sent ?? 0)} ↑`, color: muted.value })
+  }
+  if (overallRps.value !== null) {
+    out.push({
+      label: `平均 RPS ${overallRps.value.toFixed(1)}`,
+      color: SEMANTIC.traffic,
+    })
+  }
+  if (overallP95.value !== null) {
+    out.push({
+      label: `整体 P95 ${Math.round(overallP95.value)} ms`,
+      color: muted.value,
+      title: '所有时序点的 P95 中位数',
+    })
+  }
+  return out
+})
 </script>
 
 <template>
-  <div class="flex flex-col gap-2">
-    <!-- ① 场景徽章（task null / 推断失败时不显示）-->
-    <div v-if="scenario" class="flex items-center gap-1.5">
-      <span
-        class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11.5px]"
+  <div
+    class="flex items-center flex-wrap gap-x-3 gap-y-1 px-1"
+  >
+    <!-- 多 TG 切换 chip 组：tgKeys.length > 1 时显示；点击切换 selectedTg。
+         单 TG / 无 TG 时不渲染 chip 组（TrendsLayout 已自动把 selectedTg 设为该
+         唯一 TG，"全部"按钮没意义）。chip key 是 ThreadGroup testname（per-TG listener
+         注入 TAG_thread_group，InfluxDB GROUP BY 切的就是这个 tag）。 -->
+    <template v-if="tgKeys.length > 1">
+      <button
+        type="button"
+        class="text-[10.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors flex-shrink-0"
         :style="{
-          background: `${scenario.color}24`,
-          color: scenario.color,
-          border: `1px solid ${scenario.color}40`,
+          color: selectedTg === null
+            ? (isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)')
+            : muted,
+          background: selectedTg === null
+            ? (isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)')
+            : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'),
+          border: `1px solid ${
+            selectedTg === null
+              ? (isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)')
+              : 'transparent'
+          }`,
         }"
-      >
-        <component :is="scenario.icon" :size="13" />
-        {{ scenario.label }}
-      </span>
-      <span
-        v-if="extraN > 0"
-        class="text-[10.5px] px-1.5 py-0.5 rounded"
-        :title="`全部 TG 场景：${allScenarioLabels}`"
+        title="所有线程组合计"
+        @click="emit('update:selectedTg', null)"
+      >全部</button>
+      <button
+        v-for="key in tgKeys"
+        :key="key"
+        type="button"
+        class="text-[10.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors max-w-[140px] truncate flex-shrink-0"
         :style="{
-          color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)',
-          background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+          color: selectedTg === key
+            ? (isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)')
+            : muted,
+          background: selectedTg === key
+            ? (isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)')
+            : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'),
+          border: `1px solid ${
+            selectedTg === key
+              ? (isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)')
+              : 'transparent'
+          }`,
         }"
-      >
-        +{{ extraN }} 个 TG
-      </span>
-    </div>
+        :title="`只看：${key}`"
+        @click="emit('update:selectedTg', key)"
+      >{{ key }}</button>
+    </template>
 
-    <!-- ② 主级巨字号：错误率 + P95（grid-cols-2） -->
-    <div class="grid grid-cols-2 gap-3">
-      <div class="rounded-xl px-5 py-3 flex flex-col items-center justify-center"
-           :style="heroCardStyle">
-        <div class="text-[11px] tracking-wide mb-1.5" :style="{ color: muted }">
-          实时错误率（60s 窗口）
-        </div>
-        <div
-          class="text-[36px] font-semibold leading-none tabular-nums"
-          :style="{ color: errorPctColor }"
-        >{{ errorPctText }}</div>
-      </div>
-      <div class="rounded-xl px-5 py-3 flex flex-col items-center justify-center"
-           :style="heroCardStyle">
-        <div class="text-[11px] tracking-wide mb-1.5" :style="{ color: muted }">
-          P95 延迟
-        </div>
-        <div
-          class="text-[36px] font-semibold leading-none tabular-nums"
-          :style="{ color: primary }"
-        >{{ p95Text }}</div>
-      </div>
-    </div>
+    <span class="text-[10.5px] tracking-wide opacity-70" :style="{ color: muted }">累计</span>
 
-    <!-- ③ 副级：RPS + 现在并发（grid-cols-2） -->
-    <div class="grid grid-cols-2 gap-3">
-      <div class="rounded-xl px-4 py-2 flex items-center justify-between"
-           :style="subCardStyle">
-        <span class="text-[11px]" :style="{ color: muted }">RPS</span>
-        <span class="text-[22px] font-semibold leading-none tabular-nums"
-              :style="{ color: SEMANTIC.traffic }">{{ rpsText }}</span>
-      </div>
-      <div class="rounded-xl px-4 py-2 flex items-center justify-between"
-           :style="subCardStyle">
-        <span class="text-[11px]" :style="{ color: muted }">现在并发</span>
-        <span class="text-[22px] font-semibold leading-none tabular-nums"
-              :style="{ color: SEMANTIC.saturation }">{{ vuText }}</span>
-      </div>
-    </div>
+    <span
+      v-for="(c, i) in chips"
+      :key="i"
+      class="text-[11.5px] tabular-nums"
+      :style="{ color: c.color }"
+      :title="c.title"
+    >{{ c.label }}</span>
 
-    <!-- ④ 累计带：折成一行小字 chip -->
-    <div class="flex items-center flex-wrap gap-x-3 gap-y-1 px-1 pt-1">
-      <span class="text-[10.5px] tracking-wide" :style="{ color: muted, opacity: 0.7 }">累计</span>
-      <span
-        v-for="(c, i) in cumulativeChips"
-        :key="i"
-        class="text-[11.5px] tabular-nums"
-        :style="{ color: c.color }"
-      >{{ c.label }}</span>
-      <span class="text-[10px] ml-auto" :style="{ color: muted, opacity: 0.5 }">
-        基于 InfluxDB 实时聚合（终态后以 JTL 为准）
-      </span>
-    </div>
+    <span class="text-[10px] ml-auto opacity-50" :style="{ color: muted }">
+      基于 InfluxDB（终态后以 JTL 为准）
+    </span>
   </div>
 </template>
