@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type {
-  ErrorAggregateRow, RunMetrics, RunMetricsSeries, Task, TaskRun,
+  RunMetrics, RunMetricsSeries, Task, TaskRun,
 } from '@/types/task'
-import { runsApi } from '@/lib/api'
 import { hasOnlyArrivals } from '@/lib/planSummary'
 import { plannedCurveAlignedToTimestamps, plannedCurve } from '@/lib/plannedCurve'
 import KpiBar from './KpiBar.vue'
@@ -14,7 +13,6 @@ import ConcurrencyRpsChart from './ConcurrencyRpsChart.vue'
 import RpsChart from './RpsChart.vue'
 import LatencyChart from './LatencyChart.vue'
 import NetworkChart from './NetworkChart.vue'
-import ErrorByEndpointTable from './ErrorByEndpointTable.vue'
 
 const props = defineProps<{
   task: Task
@@ -23,70 +21,10 @@ const props = defineProps<{
   isDark: boolean
 }>()
 
-const ERROR_POLL_MS = 10000
-const ERROR_LIMIT = 100   // aggregate 模式下 limit 控制聚合后行数（不是样本数），50-100 足够
-
-const TERMINAL_STATUSES: TaskRun['status'][] = [
-  'pre_check_failed', 'success', 'failed', 'timeout', 'cancelled',
-]
-
-const errorAggregates = ref<ErrorAggregateRow[]>([])
-
-let errorTimer: number | null = null
+// v1.3 起 Trends 不再承载错误数据：聚合表 + 单条样本下钻都搬进 Errors tab，
+// Trends 专注 6 张时序图（看大盘 / 趋势 / 形状）。
 
 const activeRunId = computed(() => props.run?.run_id || null)
-const isTerminal = computed(
-  () => !!props.run && TERMINAL_STATUSES.includes(props.run.status),
-)
-
-async function fetchErrorAggregates() {
-  const id = activeRunId.value
-  if (!id) {
-    errorAggregates.value = []
-    return
-  }
-  try {
-    const res = await runsApi.errorAggregates(id, { limit: ERROR_LIMIT })
-    errorAggregates.value = res.aggregates
-  } catch {
-    // 同上
-  }
-}
-
-function startTimers() {
-  stopTimers()
-  void fetchErrorAggregates()
-  if (!isTerminal.value) {
-    errorTimer = window.setInterval(fetchErrorAggregates, ERROR_POLL_MS)
-  }
-}
-
-function stopTimers() {
-  if (errorTimer != null) {
-    clearInterval(errorTimer)
-    errorTimer = null
-  }
-}
-
-onMounted(startTimers)
-onUnmounted(stopTimers)
-
-// run 切换 / 终态切换都重启轮询
-watch(
-  [activeRunId, isTerminal],
-  ([id, terminal]) => {
-    errorAggregates.value = []
-    if (!id) {
-      stopTimers()
-      return
-    }
-    void fetchErrorAggregates()
-    stopTimers()
-    if (!terminal) {
-      errorTimer = window.setInterval(fetchErrorAggregates, ERROR_POLL_MS)
-    }
-  },
-)
 
 const overall = computed(() => props.metrics?.overall ?? null)
 const byTg = computed(() => props.metrics?.by_tg ?? {})
@@ -372,11 +310,6 @@ const heroStyle = computed(() => ({
         :vu="effectiveOverall?.active_users || []"
         :is-dark="isDark"
       />
-    </div>
-
-    <!-- 6. 错误统计表（按 接口 + code + message 三键聚合，count desc 排序） -->
-    <div class="rounded-xl p-3 min-h-0 h-[320px]" :style="sectionStyle">
-      <ErrorByEndpointTable :rows="errorAggregates" :is-dark="isDark" />
     </div>
 
     <!-- 占位提示（首次 mount + 未拉到任何数据） -->

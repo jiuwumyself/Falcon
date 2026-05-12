@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { FileJson, Info, Link2, MessageSquare, Tag } from 'lucide-vue-next'
-import type { ErrorAggregateRow } from '@/types/task'
+import { computed, ref } from 'vue'
+import { ChevronDown, ChevronRight, FileJson, Info, Link2, MessageSquare, Tag } from 'lucide-vue-next'
+import { runsApi } from '@/lib/api'
+import type { ErrorAggregateRow, ErrorSample } from '@/types/task'
 import { fmtInt } from './chartFactory'
 import { colorForHttpCode, SEMANTIC } from './semanticColors'
+import SampleList from './SampleList.vue'
 
 // 「接口 + code + message」三键聚合表（替换原 ErrorTransactionTable + ErrorMessageTable）。
 // 后端 errorAggregates endpoint key=(code, label, msg_norm)，每组真实 count。
 // 前端按 count desc 排序；message 走 HTTP_REASON fallback；URL 进 hover tooltip。
+//
+// v1.3 起支持行展开：点行 → 拉该 (sampler, response_code) 的 ≤20 条样本 →
+// 行下方滑出 SampleList（含时间戳 + body 二级展开），把"中→细"下钻做在同一个表里。
 
 const props = defineProps<{
   rows: ErrorAggregateRow[]
+  runId: string | null    // null 时表只读（不能点行展开）
   isDark: boolean
 }>()
 
@@ -58,6 +64,42 @@ function urlPath(url: string): string {
     if (i < 0) return url
     const j = url.indexOf('/', i + 3)
     return j < 0 ? '' : url.slice(j)
+  }
+}
+
+// 展开行状态：key = label|response_code|msg_norm（跟后端聚合 key 同源）
+const expandedKey = ref<string | null>(null)
+const samplesCache = ref<Map<string, ErrorSample[]>>(new Map())
+const samplesLoading = ref<Set<string>>(new Set())
+
+function rowKey(r: { label: string; responseCode: string; primary: string }): string {
+  return `${r.label}|${r.responseCode}|${r.primary.slice(0, 50)}`
+}
+
+async function toggleRow(r: DisplayRow) {
+  const key = rowKey(r)
+  // 折叠
+  if (expandedKey.value === key) {
+    expandedKey.value = null
+    return
+  }
+  expandedKey.value = key
+  // 已缓存 / runId 缺失 → 不再拉
+  if (samplesCache.value.has(key) || !props.runId) return
+  // 首次展开拉样本：按 sampler + 精确 response_code 过滤；limit 20 个够看出模式
+  samplesLoading.value.add(key)
+  try {
+    const res = await runsApi.errorSamples(props.runId, {
+      sampler: r.label,
+      responseCode: r.responseCode,
+      limit: 20,
+    })
+    samplesCache.value.set(key, res.samples)
+  } catch {
+    // 失败也写入 cache，避免反复点反复拉；展示空态
+    samplesCache.value.set(key, [])
+  } finally {
+    samplesLoading.value.delete(key)
   }
 }
 
@@ -190,6 +232,7 @@ const BODY_ICON = {
       <table class="w-full text-[11.5px] tabular-nums">
         <thead class="sticky top-0" :style="{ background: isDark ? '#0f0f12' : '#f9f9fa' }">
           <tr :style="{ color: headerColor }">
+            <th class="pb-2 px-1 w-[24px]"></th>
             <th class="text-left font-medium pb-2 px-2">接口</th>
             <th class="text-left font-medium pb-2 px-2 w-[68px]">code</th>
             <th class="pb-2 px-1 w-[28px]"></th>
@@ -198,62 +241,88 @@ const BODY_ICON = {
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="(row, i) in displayRows"
-            :key="i"
-            :style="{
-              color: cellColor,
-              borderTop: `1px solid ${dividerColor}`,
-            }"
-          >
-            <!-- 接口 -->
-            <td class="py-1.5 px-2 max-w-[260px]">
-              <span class="truncate block" :title="row.label">{{ row.label }}</span>
-            </td>
-            <!-- code -->
-            <td
-              class="py-1.5 px-2 font-medium"
-              :style="{ color: codeColor(row.responseCode) }"
+          <template v-for="(row, i) in displayRows" :key="i">
+            <tr
+              class="cursor-pointer"
+              :style="{
+                color: cellColor,
+                borderTop: `1px solid ${dividerColor}`,
+                background: expandedKey === rowKey(row)
+                  ? (isDark ? 'rgba(239,68,68,0.06)' : 'rgba(239,68,68,0.04)')
+                  : 'transparent',
+              }"
+              @click="toggleRow(row)"
+              @mouseenter="(ev) => { if (expandedKey !== rowKey(row)) (ev.currentTarget as HTMLElement).style.background = isDark ? 'rgba(255,255,255,0.025)' : 'rgba(0,0,0,0.02)' }"
+              @mouseleave="(ev) => { if (expandedKey !== rowKey(row)) (ev.currentTarget as HTMLElement).style.background = 'transparent' }"
             >
-              {{ row.responseCode || '0' }}
-            </td>
-            <!-- source icon：拿到 body 时高亮 FileJson；否则按 primary 来源走 -->
-            <td class="py-1.5 px-1 align-middle">
-              <component
-                :is="row.hasBody ? BODY_ICON.icon : PRIMARY_META[row.primarySource].icon"
-                :size="13"
-                :stroke-width="2"
-                :title="row.hasBody ? BODY_ICON.tooltip : PRIMARY_META[row.primarySource].tooltip"
-                :style="{
-                  color: row.hasBody
-                    ? (isDark ? 'rgba(134,239,172,0.85)' : 'rgba(22,163,74,0.85)')
-                    : (row.primarySource === 'message'
-                        ? (isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)')
-                        : (isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)')),
-                  display: 'inline-block',
-                }"
-              />
-            </td>
-            <!-- message：primary 一行 + 可选 secondary（body）小字一行 -->
-            <td class="py-1.5 px-2 max-w-[320px]">
-              <div class="flex flex-col gap-0.5 min-w-0">
-                <span
-                  class="truncate"
-                  :title="row.url && row.primarySource !== 'url' ? `${row.primary}\nURL: ${row.url}` : row.primary"
-                >{{ row.primary }}</span>
-                <span
-                  v-if="row.secondary"
-                  class="truncate text-[10.5px]"
-                  :style="{ color: subColor }"
-                  :title="row.secondary"
-                >{{ row.secondary }}</span>
-              </div>
-            </td>
-            <!-- count -->
-            <td class="py-1.5 px-2 text-right" :style="{ color: SEMANTIC.errors }">
-              {{ fmtInt(row.count) }}
-            </td>
-          </tr>
+              <!-- chevron 列 -->
+              <td class="py-1.5 px-1 align-middle">
+                <component
+                  :is="expandedKey === rowKey(row) ? ChevronDown : ChevronRight"
+                  :size="12"
+                  :color="isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'"
+                />
+              </td>
+              <!-- 接口 -->
+              <td class="py-1.5 px-2 max-w-[260px]">
+                <span class="truncate block" :title="row.label">{{ row.label }}</span>
+              </td>
+              <!-- code -->
+              <td
+                class="py-1.5 px-2 font-medium"
+                :style="{ color: codeColor(row.responseCode) }"
+              >
+                {{ row.responseCode || '0' }}
+              </td>
+              <!-- source icon：拿到 body 时高亮 FileJson；否则按 primary 来源走 -->
+              <td class="py-1.5 px-1 align-middle">
+                <component
+                  :is="row.hasBody ? BODY_ICON.icon : PRIMARY_META[row.primarySource].icon"
+                  :size="13"
+                  :stroke-width="2"
+                  :title="row.hasBody ? BODY_ICON.tooltip : PRIMARY_META[row.primarySource].tooltip"
+                  :style="{
+                    color: row.hasBody
+                      ? (isDark ? 'rgba(134,239,172,0.85)' : 'rgba(22,163,74,0.85)')
+                      : (row.primarySource === 'message'
+                          ? (isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)')
+                          : (isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)')),
+                    display: 'inline-block',
+                  }"
+                />
+              </td>
+              <!-- message：primary 一行 + 可选 secondary（body）小字一行 -->
+              <td class="py-1.5 px-2 max-w-[320px]">
+                <div class="flex flex-col gap-0.5 min-w-0">
+                  <span
+                    class="truncate"
+                    :title="row.url && row.primarySource !== 'url' ? `${row.primary}\nURL: ${row.url}` : row.primary"
+                  >{{ row.primary }}</span>
+                  <span
+                    v-if="row.secondary"
+                    class="truncate text-[10.5px]"
+                    :style="{ color: subColor }"
+                    :title="row.secondary"
+                  >{{ row.secondary }}</span>
+                </div>
+              </td>
+              <!-- count -->
+              <td class="py-1.5 px-2 text-right" :style="{ color: SEMANTIC.errors }">
+                {{ fmtInt(row.count) }}
+              </td>
+            </tr>
+            <!-- 展开行：SampleList 占满 6 列宽 -->
+            <tr v-if="expandedKey === rowKey(row)">
+              <td colspan="6" class="px-2 pb-2"
+                  :style="{ background: isDark ? 'rgba(239,68,68,0.03)' : 'rgba(239,68,68,0.02)' }">
+                <SampleList
+                  :samples="samplesCache.get(rowKey(row)) ?? []"
+                  :loading="samplesLoading.has(rowKey(row))"
+                  :is-dark="isDark"
+                />
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </div>

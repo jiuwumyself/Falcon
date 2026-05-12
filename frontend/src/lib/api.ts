@@ -149,6 +149,7 @@ export const runsApi = {
     if (q.limit != null) params.set('limit', String(q.limit))
     if (q.sampler) params.set('sampler', q.sampler)
     if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
+    if (q.responseCode) params.set('response_code', q.responseCode)
     const qs = params.toString() ? `?${params.toString()}` : ''
     return api<ErrorSamplesResponse>(`/runs/${runId}/error-samples/${qs}`)
   },

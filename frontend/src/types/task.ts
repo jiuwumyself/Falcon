@@ -390,8 +390,9 @@ export interface ErrorAggregatesResponse {
 export interface ErrorSamplesQuery {
   limit?: number
   sampler?: string
-  codeBucket?: ErrorCodeBucket
-  aggregate?: boolean   // true → 走 ErrorAggregatesResponse 形状
+  codeBucket?: ErrorCodeBucket   // 5 桶粗粒度（4xx/5xx/assertion/timeout/all）
+  responseCode?: string          // 精确 code（如 '500'）；下钻聚合行用，跟 codeBucket 互补
+  aggregate?: boolean            // true → 走 ErrorAggregatesResponse 形状
 }
 
 // 响应时间拆解：扫 JTL 算 Connect / 服务端处理 / 客户端接收三段时序

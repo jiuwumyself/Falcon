@@ -1186,6 +1186,10 @@ class RunViewSet(viewsets.GenericViewSet):
             limit = 50
         sampler = request.query_params.get('sampler') or ''
         code_bucket = (request.query_params.get('code_bucket') or 'all').lower()
+        # 精确 code 过滤（下钻聚合行用）：code_bucket 太宽（401/404/422 都归 4xx），
+        # 用户在聚合表看到一行精确 code=500 要看具体样本时，应按 500 严格匹配，
+        # 不应被 4xx/5xx 桶宽过滤。空值 = 不过滤；保留 code_bucket 给粗粒度场景用。
+        response_code = (request.query_params.get('response_code') or '').strip()
 
         def bucket_of(code: str, msg: str) -> str:
             if code.startswith('Non HTTP'):
@@ -1261,6 +1265,8 @@ class RunViewSet(viewsets.GenericViewSet):
                     url = row.get('URL') or ''  # 需要 -Jjmeter.save.saveservice.url=true（新版 executor 默认开）
                     bucket = bucket_of(code, fmsg or msg)
                     if code_bucket != 'all' and bucket != code_bucket:
+                        continue
+                    if response_code and code != response_code:
                         continue
                     total += 1
                     if aggregate:

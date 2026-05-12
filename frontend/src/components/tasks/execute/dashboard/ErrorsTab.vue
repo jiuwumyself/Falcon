@@ -1,13 +1,66 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import ErrorDetailList from '../ErrorDetailList.vue'
-import type { TaskRun } from '@/types/task'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { runsApi } from '@/lib/api'
+import type { ErrorAggregateRow, TaskRun } from '@/types/task'
+import ErrorByEndpointTable from './trends/ErrorByEndpointTable.vue'
 
 const props = defineProps<{
   run: TaskRun | null
   runId: string | null
   isDark: boolean
 }>()
+
+// 聚合表数据：v1.3 起 ErrorsTab 自己拉 + 自治轮询；TrendsLayout 不再管错误数据
+const AGGREGATE_LIMIT = 100
+const POLL_MS = 10_000
+const TERMINAL_STATUSES = [
+  'pre_check_failed', 'success', 'failed', 'timeout', 'cancelled',
+] as const
+const aggregates = ref<ErrorAggregateRow[]>([])
+let timer: number | null = null
+
+async function fetchAggregates() {
+  if (!props.runId) {
+    aggregates.value = []
+    return
+  }
+  try {
+    const res = await runsApi.errorAggregates(props.runId, { limit: AGGREGATE_LIMIT })
+    aggregates.value = res.aggregates
+  } catch {
+    // 失败保留旧数据，下一轮再试
+  }
+}
+
+function startPoll() {
+  stopPoll()
+  void fetchAggregates()
+  const status = props.run?.status
+  // 终态 run 不需要继续轮询（聚合数据已经定型）
+  if (status && (TERMINAL_STATUSES as readonly string[]).includes(status)) return
+  timer = window.setInterval(fetchAggregates, POLL_MS)
+}
+
+function stopPoll() {
+  if (timer != null) {
+    clearInterval(timer)
+    timer = null
+  }
+}
+
+watch(
+  () => [props.runId, props.run?.status] as const,
+  () => {
+    aggregates.value = []
+    if (!props.runId) {
+      stopPoll()
+      return
+    }
+    startPoll()
+  },
+  { immediate: true },
+)
+onUnmounted(stopPoll)
 
 // § 12 S2：失败原因 5 类分桶 chips。终态时显示（error_breakdown 由 _on_finish 填）；
 // 运行中 / 无错误时不渲染该 section。
@@ -86,9 +139,13 @@ const showBreakdown = computed(() => buckets.value.length > 0)
         </span>
       </div>
     </div>
-    <!-- 原 ErrorDetailList：错误明细表 -->
-    <div class="flex-1 min-h-0 overflow-y-auto">
-      <ErrorDetailList :run-id="runId" :is-dark="isDark" />
+    <!-- 聚合表：按 接口×code×msg 分组 + 行内下钻样本（含 body）-->
+    <div class="flex-1 min-h-0 overflow-y-auto p-3">
+      <ErrorByEndpointTable
+        :rows="aggregates"
+        :run-id="runId"
+        :is-dark="isDark"
+      />
     </div>
   </div>
 </template>
