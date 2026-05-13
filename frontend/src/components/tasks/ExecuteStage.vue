@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { AlertTriangle } from 'lucide-vue-next'
 import { ApiError, runsApi, tasksApi } from '@/lib/api'
 import type { Environment, RunEvent, RunMetrics, Task, TaskRun } from '@/types/task'
 import RunControlBar from './execute/RunControlBar.vue'
@@ -9,6 +10,12 @@ import StartRunModal from './execute/StartRunModal.vue'
 const props = defineProps<{
   task: Task
   isDark: boolean
+}>()
+
+// 跳回上一步（Step 2 config）的事件，stale banner 里的链接触发
+// 父组件 TaskCreateWizard 监听，切 currentStep
+defineEmits<{
+  (e: 'jumpStep', stepId: 'upload' | 'config' | 'execute' | 'analyze' | 'report'): void
 }>()
 
 const runs = ref<TaskRun[]>([])
@@ -117,6 +124,12 @@ watch(selectedRunId, () => {
 function onStartClick() {
   // 不直接启动，先弹 modal 选机器（必选）
   errorMessage.value = ''
+  // 兜底拦：banner 已显示 stale 警告 + RunControlBar 按钮也置灰；但用户从 dashboard
+  // 其他位置触发 emit 时这里再拦一道，避免起 run 被后端 409 才返
+  if (props.task.config_stale) {
+    errorMessage.value = '线程组配置已过期：你在 Step 1 改过 TG 启用状态或类型，请回 Step 2 重新保存后再开始'
+    return
+  }
   startModalOpen.value = true
 }
 
@@ -133,9 +146,10 @@ async function onConfirmStart(loadGeneratorIds: number[]) {
     await fetchMetrics()
   } catch (e) {
     if (e instanceof ApiError) {
-      errorMessage.value = e.status === 409
-        ? '该任务已有运行中的 run，请先停止'
-        : e.humanMessage
+      // 409 有多种原因：已有活跃 run / 线程组配置过期 等。后端 detail 文案已经
+      // 准确描述（humanMessage 会把 `{"detail": "..."}` 解析出来），不要前端再
+      // hardcode 文案覆盖——之前一律显示"该任务已在运行"导致 stale 拦截误报。
+      errorMessage.value = e.humanMessage
     } else {
       errorMessage.value = String(e)
     }
@@ -207,6 +221,31 @@ onUnmounted(stopPolling)
       {{ errorMessage }}
     </div>
 
+    <!-- Step 2 配置过期 banner：用户在 Step 1 切了 TG enabled/kind 但没回 Step 2
+         重新保存。banner 黄色（警告 ≠ 错误），点链接回 Step 2 -->
+    <div
+      v-if="task.config_stale"
+      class="rounded-lg px-3 py-2 text-[12.5px] flex-shrink-0 flex items-start gap-2"
+      :style="{
+        background: 'rgba(245,158,11,0.1)',
+        border: '1px solid rgba(245,158,11,0.28)',
+        color: '#f59e0b',
+      }"
+    >
+      <AlertTriangle :size="14" class="mt-0.5 flex-shrink-0" />
+      <div class="flex-1">
+        <div class="font-medium mb-0.5">线程组配置已过期，无法开始</div>
+        <div class="text-[11.5px] opacity-90">
+          你在 Step 1 改过线程组的启用状态或类型，但 Step 2 保存的还是旧版本。
+          <a
+            class="underline cursor-pointer ml-1"
+            @click="$emit('jumpStep', 'config')"
+          >回 Step 2 重新保存</a>
+          后再开始执行。
+        </div>
+      </div>
+    </div>
+
     <!-- 顶部控制条（两行：上=控制条 / 下=任务简介）+ 事件锚点叠在进度条上 -->
     <RunControlBar
       :selected-run="selectedRun"
@@ -216,6 +255,7 @@ onUnmounted(stopPolling)
       :environment="taskEnvironment"
       :duration-seconds="task.duration_seconds || 0"
       :busy="busy"
+      :start-disabled="task.config_stale"
       :is-dark="isDark"
       @start="onStartClick"
       @stop="onStop"

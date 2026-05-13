@@ -486,6 +486,7 @@ const panelGlass = computed(() => ({
                 v-if="uploadedTask"
                 :task="uploadedTask"
                 :is-dark="isDark"
+                @jump-step="(id: string) => { const i = STEPS.findIndex((s) => s.id === id); if (i >= 0) currentStep = i }"
               />
             </template>
 

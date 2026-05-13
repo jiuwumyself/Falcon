@@ -753,6 +753,16 @@ class TaskViewSet(viewsets.ModelViewSet):
                 {'detail': '请先完成 Step 2 任务配置再执行'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # 检测 Step 1 改过 TG enabled / kind 但没回 Step 2 重新保存的情况
+        # serializer 同源调用，前端 banner / disable 按钮也吃这个值；后端起 run
+        # 双保险，避免前端漏拦时跑了过期配置
+        from .services.jmx import detect_thread_groups_config_stale  # noqa: PLC0415
+        if detect_thread_groups_config_stale(instance):
+            return Response(
+                {'detail': '线程组配置已过期：你在 Step 1 改过 TG 启用状态或类型，'
+                           '请回 Step 2 重新保存后再开始'},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # v1.2 多机调度：前端可选传 load_generator_ids 指定哪些 agent 来跑
         # 不传 / 空 → executor 走 LOCAL_FALLBACK 本机执行（开发态友好）

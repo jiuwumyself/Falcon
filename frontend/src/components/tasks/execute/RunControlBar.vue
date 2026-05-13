@@ -18,6 +18,7 @@ const props = defineProps<{
   environment: Environment | null
   durationSeconds: number      // task.duration_seconds，回退兜底
   busy: boolean
+  startDisabled?: boolean      // config_stale 时上层 disable 开始按钮；兜底默认 false
   isDark: boolean
 }>()
 
@@ -492,9 +493,10 @@ onBeforeUnmount(() => document.removeEventListener('click', clickOutsideHandler)
     <div class="flex items-center gap-1.5 flex-shrink-0">
       <button
         v-if="!isActive"
-        class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50"
+        class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
         :style="{ background: '#10b981', color: '#fff' }"
-        :disabled="busy"
+        :disabled="busy || startDisabled"
+        :title="startDisabled ? '线程组配置已过期，请回 Step 2 重新保存' : ''"
         @click="emit('start')"
       >
         <Loader v-if="busy" :size="12" class="animate-spin" />

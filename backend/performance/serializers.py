@@ -39,6 +39,10 @@ class TaskSerializer(serializers.ModelSerializer):
     csv_bindings = TaskCsvBindingSerializer(many=True, read_only=True)
     status = serializers.SerializerMethodField()
     active_run_id = serializers.SerializerMethodField()
+    # 检测 Step 2 入库的 thread_groups_config 是否跟 jmx 当前启用 TG 同步：
+    # 用户在 Step 1 toggle 了 TG enabled / 改了类型但没回 Step 2 重新保存时
+    # 为 true。前端 ExecuteStage 据此显示警告 banner 并 disable "开始" 按钮。
+    config_stale = serializers.SerializerMethodField()
 
     class Meta:
         model = Task
@@ -47,14 +51,21 @@ class TaskSerializer(serializers.ModelSerializer):
             'jmx_filename', 'jmx_hash',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
             'thread_groups_config', 'environment', 'service_names',
-            'csv_bindings', 'status', 'active_run_id',
+            'csv_bindings', 'status', 'active_run_id', 'config_stale',
             'owner', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'jmx_filename', 'jmx_hash', 'thread_groups_config',
-            'csv_bindings', 'status', 'active_run_id',
+            'csv_bindings', 'status', 'active_run_id', 'config_stale',
             'owner', 'created_at', 'updated_at',
         ]
+
+    def get_config_stale(self, obj: Task) -> bool:
+        from .services.jmx import detect_thread_groups_config_stale  # noqa: PLC0415
+        try:
+            return detect_thread_groups_config_stale(obj)
+        except Exception:  # noqa: BLE001
+            return False
 
     def _latest_run(self, obj: Task):
         return obj.runs.order_by('-id').first()

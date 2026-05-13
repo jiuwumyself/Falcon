@@ -37,6 +37,10 @@ export interface Task {
   csv_bindings: TaskCsvBinding[]
   status: TaskStatus
   active_run_id: string | null  // 后端 Step 3 加：有活跃 run 时直接给前端 run_id
+  // Step 2 入库的 thread_groups_config 跟 jmx 当前启用 TG 是否同步：
+  // 用户在 Step 1 toggle 了 TG enabled / 改了 kind 但没回 Step 2 重新保存 → true。
+  // 前端 ExecuteStage 据此显示警告 banner + disable "开始" 按钮；后端起 run 也会 409 拦截。
+  config_stale: boolean
   owner: number | null
   created_at: string
   updated_at: string
