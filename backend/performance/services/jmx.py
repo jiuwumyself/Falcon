@@ -509,16 +509,18 @@ def list_thread_groups(xml_bytes: bytes) -> list[dict[str, Any]]:
 def detect_thread_groups_config_stale(task) -> bool:
     """检测 task.thread_groups_config 跟 jmx 当前启用 TG 是否同步。
 
-    场景：Step 1 用户 toggle 了 TG 的 enabled / 改了 TG 类型，但没回 Step 2
-    重新保存。这时 thread_groups_config 跟 jmx 现状失配 → Step 3 起 run 时
-    跑的是过期配置（build_run_xml 按 config 派活，可能 patch 到已禁用的 TG
-    或漏掉新启用的 TG）。
+    场景：Step 1 用户 toggle 了 TG 的 enabled 状态，但没回 Step 2 重新保存。
+    这时 thread_groups_config 跟 jmx 现状失配 → Step 3 起 run 时跑的是过期
+    配置（build_run_xml 按 config 派活，可能 patch 到已禁用的 TG 或漏掉新启
+    用的 TG）。
 
-    比对原则：
-      - 看"启用的 TG"集合 by (path, kind)。禁用 TG 不参与（用户切禁用是
-        Step 1 的正常操作；config 里也不应该有它们）
-      - 启用集合不一致 / 同 path 的 kind 改了 → stale
-      - 参数差异**不算 stale**（参数是 config 的责任，jmx 不写参数）
+    比对原则（**只比 path，不比 kind**）：
+      - 看启用 TG 的 path 集合：jmx 中 enabled=True 的 path 应该跟 config 里
+        saved 的 path 一一对应
+      - kind 差异**不算 stale**：单文件模型下 jmx 永远是原始 kind，Step 2 选
+        场景 = 在 config 里换 kind（build_run_xml 运行时替换）。这是预期行为，
+        不能误标
+      - 参数差异**不算 stale**：参数是 config 的责任，jmx 不写参数
 
     返回：True = stale，需要让用户回 Step 2 重新保存；False = 同步 OK 或
     无法判定（jmx 读失败 / config 为空兜底"安全可跑"）。
@@ -531,15 +533,13 @@ def detect_thread_groups_config_stale(task) -> bool:
         tgs = list_thread_groups(xml)
     except Exception:  # noqa: BLE001
         return False   # jmx 读不到时不拦，避免 false positive 卡用户
-    jmx_enabled = {
-        (t.get('path') or '', t.get('kind') or '')
-        for t in tgs if t.get('enabled')
+    jmx_enabled_paths = {
+        (t.get('path') or '') for t in tgs if t.get('enabled')
     }
-    cfg_set = {
-        (c.get('path') or '', c.get('kind') or '')
-        for c in cfg if isinstance(c, dict)
+    cfg_paths = {
+        (c.get('path') or '') for c in cfg if isinstance(c, dict)
     }
-    return jmx_enabled != cfg_set
+    return jmx_enabled_paths != cfg_paths
 
 
 def validate_thread_group_params(kind: str, params: dict[str, Any]) -> None:
