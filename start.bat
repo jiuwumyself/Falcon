@@ -1,3 +1,4 @@
+# Windows 启动脚本
 @echo off
 REM Falcon one-click startup (Windows)
 REM Backend :8000 + Frontend :5173
