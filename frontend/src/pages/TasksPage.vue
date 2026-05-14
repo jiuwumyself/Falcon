@@ -11,9 +11,19 @@ const initialTask = ref<Task | null>(null)
 const loadError = ref('')
 
 const defaultBiz = computed(() => (route.query.biz as BizCategory) || undefined)
+// URL ?step=<id> → wizard 启动时定位到该步；刷新 / 重打开保持
+const initialStep = computed(() =>
+  typeof route.query.step === 'string' ? route.query.step : null,
+)
 
 function handleClose() {
   router.push('/performance')
+}
+
+// wizard 切 step → 把 ?step=<id> 写回 URL（replace 不留 history 栈，避免回退按钮一直在 wizard 内）
+function onStepChange(stepId: string) {
+  if (route.query.step === stepId) return
+  router.replace({ query: { ...route.query, step: stepId } })
 }
 
 onMounted(async () => {
@@ -36,8 +46,10 @@ onMounted(async () => {
       <p v-if="loadError" class="text-[12px] text-red-500 px-3 py-2">{{ loadError }}</p>
       <TaskCreateWizard
         :initial-task="initialTask"
+        :initial-step="initialStep"
         :default-biz="defaultBiz"
         @close="handleClose"
+        @step-change="onStepChange"
       />
     </div>
   </div>

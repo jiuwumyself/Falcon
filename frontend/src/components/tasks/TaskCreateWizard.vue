@@ -14,8 +14,13 @@ import ExecuteStage from './ExecuteStage.vue'
 const props = defineProps<{
   defaultBiz?: BizCategory
   initialTask?: Task | null    // 编辑模式：从列表点进来时传入
+  initialStep?: string | null  // URL ?step=<id> 持久化的当前步骤；优先于"最远完成的 Step"
 }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'created', task: Task): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'created', task: Task): void
+  (e: 'stepChange', stepId: string): void  // currentStep 变化时同步 URL
+}>()
 
 const { theme } = useTheme()
 const isDark = computed(() => theme.value === 'dark')
@@ -53,14 +58,53 @@ function showToast(text: string) {
   toastTimer = setTimeout(() => { toast.value = null }, 2500)
 }
 
-// 编辑入口：传入 initialTask 时把它当成"已上传任务"并跳到最远完成的 Step
+// 编辑入口：传入 initialTask 时把它当成"已上传任务"。
+// 当前 step 优先级：
+//   1. URL ?step=<id>（刷新场景）
+//   2. localStorage `falcon-task-${id}-step`（从列表点开 / 跨标签切换场景）
+//   3. 最远完成的 Step（thread_groups_config 非空 → 1，否则 0）
 function applyInitialTask(t: Task | null | undefined) {
   if (!t) return
   uploadedTask.value = t
-  currentStep.value = (t.thread_groups_config?.length ?? 0) > 0 ? 1 : 0
+  const fromUrl = stepIndexFromId(props.initialStep)
+  const fromStorage = stepIndexFromId(readLastStep(t.id))
+  if (fromUrl !== null) {
+    currentStep.value = fromUrl
+  } else if (fromStorage !== null) {
+    currentStep.value = fromStorage
+    // 把 storage 值回写 URL，刷新一次即可统一来源
+    emit('stepChange', STEPS[fromStorage].id)
+  } else {
+    currentStep.value = (t.thread_groups_config?.length ?? 0) > 0 ? 1 : 0
+  }
+}
+function stepIndexFromId(id: string | null | undefined): number | null {
+  if (!id) return null
+  const i = STEPS.findIndex((s) => s.id === id)
+  return i >= 0 ? i : null
+}
+function lastStepKey(taskId: number): string {
+  return `falcon-task-${taskId}-step`
+}
+function readLastStep(taskId: number): string | null {
+  try {
+    return localStorage.getItem(lastStepKey(taskId))
+  } catch { return null }
+}
+function writeLastStep(taskId: number, stepId: string): void {
+  try { localStorage.setItem(lastStepKey(taskId), stepId) } catch { /* quota / private mode */ }
 }
 applyInitialTask(props.initialTask)
 watch(() => props.initialTask, (t) => applyInitialTask(t), { immediate: false })
+
+// currentStep 变化 → 通知父组件同步 URL ?step= + 写入 localStorage
+watch(currentStep, (i) => {
+  const s = STEPS[i]
+  if (!s) return
+  emit('stepChange', s.id)
+  const tid = uploadedTask.value?.id
+  if (tid) writeLastStep(tid, s.id)
+})
 
 function triggerPicker() {
   if (uploading.value) return
