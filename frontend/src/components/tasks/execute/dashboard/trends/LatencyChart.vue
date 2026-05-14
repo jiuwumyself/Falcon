@@ -14,6 +14,7 @@ import {
 } from './chartFactory'
 import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
 import { LATENCY_BREAKDOWN, SEMANTIC } from './semanticColors'
+import HoverTip from './HoverTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -210,10 +211,15 @@ watch(chartRef, (v) => {
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-1.5">
           <span class="w-0.5 h-3.5 rounded-full" :style="{ background: SEMANTIC.latency }" />
-          <span class="text-[11.5px]"
-                :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-            延迟 · ms
-          </span>
+          <HoverTip
+            :tip="'核心问题：用户感受到的响应时间是多长？尾延迟有多差？\n\n判读条件：\n· P99 / P50 比 > 3 → 长尾严重，少数请求拖累用户体验\n· P99 缓慢上升 → 内存泄漏 / 连接池 leak（soak 场景重点关注）\n· P99 陡升 → 系统逼近极限（load/stress 拐点信号）\n· 周期性峰 → GC pause / 锁竞争 / 定时任务干扰'"
+            :is-dark="isDark"
+          >
+            <span class="text-[11.5px]"
+                  :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
+              延迟 · ms
+            </span>
+          </HoverTip>
         </div>
         <!-- 剔除失败样本 toggle：三种 mode 全支持
              - 总览 P50/P95/P99 → 切到 p50/95/99_ok_ms

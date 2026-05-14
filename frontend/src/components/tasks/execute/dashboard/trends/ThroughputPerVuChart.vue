@@ -9,6 +9,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 import type { SeriesPoint } from '@/types/task'
 import { buildSeriesOption, CONNECT_GROUP, statsOf } from './chartFactory'
+import HoverTip from './HoverTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -80,13 +81,15 @@ watch(chartRef, (v) => {
 <template>
   <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-1 mb-1">
-      <div
-        class="text-[11.5px]"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-        title="人均吞吐量 = RPS / 活跃 VU。该曲线下跌时表示加用户但系统跟不上"
+      <HoverTip
+        :tip="'核心问题：每多加一个 VU 系统能多榨多少 RPS 出来？\n\n判读条件：\n· 平稳水平 → 线性扩展段，加 VU 仍能成比例提升\n· 缓慢下滑 → 系统开始饱和，但还能扛\n· 急速下滑 → 已过拐点，加 VU 反而拖累\n· 比「总 RPS 不再涨」更早 5-10s 出现拐点信号'"
+        :is-dark="isDark"
       >
-        人均吞吐量
-      </div>
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }">
+          人均吞吐量
+        </span>
+      </HoverTip>
       <div
         class="text-[10.5px] tabular-nums"
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"

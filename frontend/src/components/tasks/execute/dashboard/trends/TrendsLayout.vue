@@ -3,13 +3,12 @@ import { computed, ref, watch } from 'vue'
 import type {
   RunMetrics, RunMetricsSeries, Task, TaskRun,
 } from '@/types/task'
-import { hasOnlyArrivals } from '@/lib/planSummary'
 import { plannedCurveAlignedToTimestamps, plannedCurve } from '@/lib/plannedCurve'
 import KpiBar from './KpiBar.vue'
 import ErrorCountChart from './ErrorCountChart.vue'
 import ConcurrencyChart from './ConcurrencyChart.vue'
 import ThroughputPerVuChart from './ThroughputPerVuChart.vue'
-import ConcurrencyRpsChart from './ConcurrencyRpsChart.vue'
+import ScenarioContextChart from './ScenarioContextChart.vue'
 import RpsChart from './RpsChart.vue'
 import LatencyChart from './LatencyChart.vue'
 import NetworkChart from './NetworkChart.vue'
@@ -111,11 +110,16 @@ const effectiveOverall = computed(() => {
   }
   return overall.value
 })
-// Arrivals（吞吐量）压测模式：VU 由 JMeter 自适应 → "并发-吞吐"/"RPS 抖动"散点图无意义
-// 隐藏整张卡。混合 TG（部分 Arrivals）→ hasOnlyArrivals 返 false → 仍渲染
-const hideConcurrencyRpsCard = computed(() =>
-  hasOnlyArrivals(props.task.thread_groups_config || []),
-)
+// 末位「场景上下文图」始终显示——内部按场景分发：
+//   baseline/load/soak → ConcurrencyRpsChart
+//   stress → ErrorBreakdownStackedChart
+//   spike → VuRpsDualAxisChart
+//   throughput → TargetRpsVsActualChart（专门为 Arrivals 场景设计，不再硬隐）
+// 旧 hasOnlyArrivals 隐藏逻辑已废弃：throughput 场景下展示目标 vs 实际对比，比硬隐有信息量
+const isTerminal = computed(() => {
+  const s = props.run?.status
+  return s ? ['pre_check_failed', 'success', 'failed', 'timeout', 'cancelled'].includes(s) : false
+})
 const effectiveTotals = computed(() => {
   if (selectedTg.value) {
     // 选中具体 TG：必须用 by_tg 切片，缺失（旧 run / 后端未升级）就给 0 totals，
@@ -302,12 +306,21 @@ const heroStyle = computed(() => ({
       </div>
     </div>
 
-    <!-- 5.5 并发-吞吐关系散点：看线性增长 / 平台期 / 性能拐点
-         Arrivals 场景（吞吐量）下 VU 由 JMeter 自适应，"并发-吞吐"无意义 → 隐藏 -->
-    <div v-if="!hideConcurrencyRpsCard" class="rounded-xl p-3 h-[220px]" :style="sectionStyle">
-      <ConcurrencyRpsChart
+    <!-- 5.5 场景上下文图：末位卡按 6 场景分发到不同组件
+         baseline/load/soak → ConcurrencyRpsChart（散点 / RPS 抖动）
+         stress → ErrorBreakdownStackedChart（5 桶堆叠）
+         spike → VuRpsDualAxisChart（双轴对比）
+         throughput → TargetRpsVsActualChart（目标 vs 实际）
+         多 TG 时切 selectedTg 跟随切图 -->
+    <div class="rounded-xl p-3 h-[220px]" :style="sectionStyle">
+      <ScenarioContextChart
+        :task="task"
+        :selected-tg="selectedTg"
         :rps="effectiveOverall?.rps || []"
         :vu="effectiveOverall?.active_users || []"
+        :run-id="activeRunId"
+        :is-terminal="isTerminal"
+        :x-range="xRange"
         :is-dark="isDark"
       />
     </div>

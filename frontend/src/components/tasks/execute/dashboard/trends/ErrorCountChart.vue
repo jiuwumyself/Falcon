@@ -13,6 +13,7 @@ import {
   lastWindowErrorRate, statsOf,
 } from './chartFactory'
 import { colorForErrorRate, SEMANTIC } from './semanticColors'
+import HoverTip from './HoverTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -89,12 +90,15 @@ watch(chartRef, (v) => {
 <template>
   <div class="flex flex-col h-full">
     <div class="flex items-center justify-between gap-2 px-1 mb-1">
-      <div
-        class="text-[11.5px]"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
+      <HoverTip
+        :tip="'核心问题：系统是否在正常服务？错误何时开始爆发？\n\n判读条件：\n· 累计 < 0.5% → 健康\n· 累计 0.5%-5% → 警戒，检查错误类型\n· 累计 > 5% → 严重，可能已挂\n· 60s 窗口陡升 → 实时事件（崩溃 / 限流触发 / 后端 panic）\n· 错误类型分布看 stress 场景末位 / Errors tab'"
+        :is-dark="isDark"
       >
-        总错误
-      </div>
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }">
+          总错误
+        </span>
+      </HoverTip>
       <div
         class="text-[10.5px] tabular-nums flex items-center gap-2 flex-wrap justify-end"
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"

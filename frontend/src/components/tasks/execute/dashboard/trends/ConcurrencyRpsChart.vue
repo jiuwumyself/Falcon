@@ -2,22 +2,28 @@
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { ScatterChart } from 'echarts/charts'
+import { ScatterChart, LineChart } from 'echarts/charts'
 import {
   GridComponent, TooltipComponent, TitleComponent, VisualMapComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { SeriesPoint } from '@/types/task'
+import HoverTip from './HoverTip.vue'
 
-use([ScatterChart, GridComponent, TooltipComponent, TitleComponent, VisualMapComponent, CanvasRenderer])
+use([ScatterChart, LineChart, GridComponent, TooltipComponent, TitleComponent, VisualMapComponent, CanvasRenderer])
 
 // 并发-RPS 关系散点图：横轴并发 VU / 纵轴 RPS / 每个时间点一个散点
 // 用时间维度做 visualMap 颜色梯度（早期淡 → 后期深），看出压力推进路径
 // 一眼看出：线性增长 / 平台期 / 性能拐点 / 系统崩盘
+//
+// showTrendLine（soak 场景开启）：恒定并发模式下额外叠一条 RPS vs time 线性回归
+// 直线 + 显示斜率（req/s/min）。soak 漂移诊断金标准：CV% 看抖动幅度，斜率看
+// "缓慢漂移"——CV% OK 但斜率显著 ≠ 0 = 长跑衰减（内存泄漏 / 连接池 leak）。
 const props = defineProps<{
   rps: SeriesPoint[]
   vu: SeriesPoint[]
   isDark: boolean
+  showTrendLine?: boolean
 }>()
 
 interface ScatterPoint { vu: number; rps: number; ts: number }
@@ -120,14 +126,33 @@ const option = computed(() => {
       axisLabel: { color: axisColor, fontSize: 10 },
       splitLine: { lineStyle: { color: gridLine } },
     },
-    series: [
-      {
-        type: 'scatter' as const,
-        symbolSize: 6,
-        data,
-        emphasis: { focus: 'self' as const },
-      },
-    ],
+    series: (() => {
+      const list: any[] = [
+        {
+          type: 'scatter' as const,
+          symbolSize: 6,
+          data,
+          emphasis: { focus: 'self' as const },
+        },
+      ]
+      // soak 模式：叠一条线性回归直线（仅 flat + showTrendLine + trend 算得出）
+      if (flat && props.showTrendLine && summary.value?.trend) {
+        const { slope, intercept, t0, t1 } = summary.value.trend
+        // slope 在 summary 里已是 req/s/min；恢复成 req/s/sec 算端点
+        const slopePerSec = slope / 60
+        const y0 = intercept
+        const y1 = intercept + slopePerSec * ((t1 - t0) / 1000)
+        list.push({
+          type: 'line' as const,
+          showSymbol: false,
+          data: [[t0, y0, t0], [t1, y1, t1]],
+          lineStyle: { color: '#f59e0b', width: 1.6, type: 'dashed' },
+          tooltip: { show: false },
+          z: 1,
+        })
+      }
+      return list
+    })(),
   }
 })
 
@@ -193,6 +218,36 @@ const summary = computed(() => {
   // 降级判定（仅压力梯度场景才有意义；恒定并发时 peakRpsAtVu === maxVu，自然 false）
   const degraded = peakRpsAtVu < maxVu && rpsAtMaxVu < rpsMax * 0.9
 
+  // 仅在 isFlatVu 且开启 showTrendLine 时算线性回归（soak 漂移诊断）
+  // RPS vs time 最小二乘拟合：slope（req/s/min）+ 起止两点坐标
+  let trend: { slope: number; intercept: number; t0: number; t1: number } | null = null
+  if (isFlatVu) {
+    // 中心化 t 防 Number 溢出 / 数值不稳
+    const t0 = pts[0].ts
+    let sxT = 0, sxY = 0, sxx = 0, sxy = 0
+    const n = pts.length
+    for (const p of pts) {
+      const x = (p.ts - t0) / 1000  // 秒
+      sxT += x
+      sxY += p.rps
+      sxx += x * x
+      sxy += x * p.rps
+    }
+    const meanX = sxT / n
+    const meanY = sxY / n
+    const denom = sxx - n * meanX * meanX
+    if (denom > 1e-9) {
+      const slopePerSec = (sxy - n * meanX * meanY) / denom
+      const intercept = meanY - slopePerSec * meanX
+      trend = {
+        slope: slopePerSec * 60,  // 转 req/s/min（用户友好）
+        intercept,
+        t0,
+        t1: pts[pts.length - 1].ts,
+      }
+    }
+  }
+
   return {
     isFlatVu,
     vuMean,
@@ -205,22 +260,59 @@ const summary = computed(() => {
     rpsStd,
     rpsCv,
     rpsP95,
+    trend,
   }
+})
+
+// tooltip 文案：分情况返字符串。Vue template 编译器对多行三元 + 反引号在 attribute
+// 里的解析有 bug，挪到 computed 里安全。
+const titleTooltip = computed(() => {
+  if (summary.value?.isFlatVu) {
+    if (props.showTrendLine) {
+      return [
+        '核心问题（稳定性 / soak）：长时间跑 RT/RPS 是否缓慢漂移？',
+        '',
+        '判读条件：',
+        '· CV ≤ 5% → 干净基线',
+        '· CV 5%-10% → 一般可接受',
+        '· CV > 10% → 抖动严重',
+        '· 回归斜率 |slope| < 0.05 → 平稳无漂移',
+        '· 0.05 ≤ |slope| < 0.2 → 轻微漂移，关注',
+        '· |slope| ≥ 0.2 → 显著漂移，疑似内存泄漏 / 连接池 leak',
+      ].join('\n')
+    }
+    return [
+      '核心问题（基准）：在轻负载下系统的"裸"稳定度如何？将来对比的参照系',
+      '',
+      '判读条件：',
+      '· CV ≤ 5% → 干净基线，可作回归测试参考点',
+      '· CV 5%-10% → 一般可接受',
+      '· CV > 10% → 有问题，可能 GC 撞 / 后端 worker 不稳',
+      '· P95 / 均值 > 1.3 → 长尾严重，不适合做基线',
+    ].join('\n')
+  }
+  return [
+    '核心问题（负载 / 压力）：阶梯加 VU 到哪 RPS 不再增长 = 系统拐点',
+    '',
+    '判读条件：',
+    '· 散点直线斜向上 → 线性可扩展段',
+    '· 散点平贴一条水平 → 平台期，到瓶颈',
+    '· 散点下行 → 崩溃前兆（加 VU 反而 RPS 降）',
+    '· ⚠ 标记 = 加 VU 后 RPS 反而比峰值低 10%+ → 已退化',
+    '· 颜色越深越靠后，方便看推进路径',
+  ].join('\n')
 })
 </script>
 
 <template>
   <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-1 mb-1">
-      <div
-        class="text-[11.5px]"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-        :title="summary?.isFlatVu
-          ? `并发恒定 ${Math.round(summary.vuMean)} VU（稳定性测试场景）—— 散点坍缩成竖线，看 RPS 抖动统计；时序看上方 RPS 大图`
-          : '散点 = 时间点 (VU, RPS)；颜色越深越靠后；线性增长 → 平台期 → 性能拐点 / 崩盘'"
-      >
-        {{ summary?.isFlatVu ? 'RPS 抖动（并发恒定）' : '并发-吞吐关系' }}
-      </div>
+      <HoverTip :tip="titleTooltip" :is-dark="isDark">
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }">
+          {{ summary?.isFlatVu ? 'RPS 抖动（并发恒定）' : '并发-吞吐关系' }}
+        </span>
+      </HoverTip>
       <div
         v-if="summary"
         class="text-[10.5px] tabular-nums"
@@ -234,6 +326,15 @@ const summary = computed(() => {
           {{ Math.round(summary.vuMean) }} VU · 均值 {{ summary.rpsMean.toFixed(0) }} ·
           抖动 ±{{ summary.rpsStd.toFixed(0) }} ({{ (summary.rpsCv * 100).toFixed(1) }}%) ·
           P95 {{ summary.rpsP95.toFixed(0) }}
+          <span
+            v-if="props.showTrendLine && summary.trend"
+            :style="{
+              color: Math.abs(summary.trend.slope) < 0.05
+                ? '#10b981'
+                : (Math.abs(summary.trend.slope) < 0.2 ? '#f59e0b' : '#ef4444'),
+            }"
+            :title="'线性回归斜率：每分钟 RPS 变化量。\n|slope| <0.05 平稳；0.05-0.20 轻微漂移；>0.20 显著漂移（疑似内存/连接池泄漏）'"
+          >· 斜率 {{ summary.trend.slope >= 0 ? '+' : '' }}{{ summary.trend.slope.toFixed(2) }} req/s/min</span>
         </template>
         <template v-else-if="summary.degraded">
           ⚠ 加 VU 不涨吞吐（峰值 {{ summary.peakRps.toFixed(0) }} @ {{ summary.peakRpsAtVu }} VU）

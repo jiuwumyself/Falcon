@@ -13,6 +13,7 @@ import {
 } from './chartFactory'
 import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
 import { SEMANTIC } from './semanticColors'
+import HoverTip from './HoverTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -120,10 +121,15 @@ watch(chartRef, (v) => {
     <!-- 左侧 ribbon 标识替代居中标题：去 chartjunk + 节省纵向空间 -->
     <div class="flex items-center gap-1.5 mb-1.5">
       <span class="w-0.5 h-3.5 rounded-full" :style="{ background: SEMANTIC.traffic }" />
-      <span class="text-[11.5px]"
-            :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-        RPS · req/s
-      </span>
+      <HoverTip
+        :tip="'核心问题：系统的真实吞吐能力是多少？\n\n判读条件：\n· 线性增长 → 系统未饱和\n· 平台期（横线）→ 已到瓶颈，加 VU 不再涨\n· 下降 → 崩溃前兆 / 错误吞掉成功请求\n· 周期性抖动 → 可能 GC 撞 / 后端节流'"
+        :is-dark="isDark"
+      >
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
+          RPS · req/s
+        </span>
+      </HoverTip>
     </div>
     <div class="flex-1 min-h-0 grid grid-cols-[1fr_220px] gap-3">
       <VChart

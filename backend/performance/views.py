@@ -1004,6 +1004,63 @@ class RunViewSet(viewsets.GenericViewSet):
             'receive_ms': receive_pts,
         })
 
+    @action(detail=True, methods=['get'], url_path='error-breakdown-timeseries')
+    def error_breakdown_timeseries(self, request, run_id=None):
+        """扫 JTL 按秒聚合错误类型 5 桶时序（4xx / 5xx / timeout / connect_error /
+        assertion / other），让 stress 场景末位图运行中也能看到错误类型转移。
+
+        终态 `TaskRun.error_breakdown` 只有总数；本端点给的是**时序**：每秒一个点，
+        每个桶一条时序。前端 ErrorBreakdownStackedChart 堆叠面积图渲染。
+
+        返回 shape：
+          {
+            "4xx":           [[ts_ms, count], ...],
+            "5xx":           [[ts_ms, count], ...],
+            "timeout":       [[ts_ms, count], ...],
+            "connect_error": [[ts_ms, count], ...],
+            "assertion":     [[ts_ms, count], ...],
+            "other":         [[ts_ms, count], ...],
+          }
+        """
+        import csv as _csv
+        from .services.jmeter_runner import classify_jtl_error, empty_error_breakdown  # noqa: PLC0415
+        run = self.get_object()
+        jtl = get_runs_dir() / run.run_id / 'results.jtl'
+        buckets_template = empty_error_breakdown()
+        if not jtl.exists() or jtl.stat().st_size == 0:
+            return Response({k: [] for k in buckets_template})
+
+        # 按秒聚合：bucket_sec_ms → {bucket_name: count}
+        per_sec: dict[int, dict[str, int]] = {}
+        try:
+            with jtl.open('r', encoding='utf-8', errors='replace') as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    if (row.get('success') or '').lower() == 'true':
+                        continue
+                    try:
+                        ts = int(row.get('timeStamp') or 0)
+                    except ValueError:
+                        continue
+                    if ts <= 0:
+                        continue
+                    bucket_name = classify_jtl_error(row)
+                    sec_ms = (ts // 1000) * 1000
+                    slot = per_sec.get(sec_ms)
+                    if slot is None:
+                        slot = dict(buckets_template)
+                        per_sec[sec_ms] = slot
+                    slot[bucket_name] = slot.get(bucket_name, 0) + 1
+        except OSError as e:
+            return Response({'detail': f'read jtl: {e}'}, status=500)
+
+        out: dict[str, list[list[int]]] = {k: [] for k in buckets_template}
+        for ts in sorted(per_sec.keys()):
+            slot = per_sec[ts]
+            for bname in out:
+                out[bname].append([ts, slot.get(bname, 0)])
+        return Response(out)
+
     @action(detail=True, methods=['get'], url_path='log')
     def log(self, request, run_id=None):
         run = self.get_object()

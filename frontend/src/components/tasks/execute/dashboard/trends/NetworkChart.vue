@@ -13,6 +13,7 @@ import {
 } from './chartFactory'
 import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
 import { SEMANTIC } from './semanticColors'
+import HoverTip from './HoverTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -159,10 +160,15 @@ watch(chartRef, (v) => {
     <!-- 左侧 ribbon 标识：紫色 saturation 类（流量/吞吐资源占用语义），与 RPS/延迟 ribbon 对齐 -->
     <div class="flex items-center gap-1.5 mb-1.5">
       <span class="w-0.5 h-3.5 rounded-full" :style="{ background: SEMANTIC.saturation }" />
-      <span class="text-[11.5px]"
-            :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-        网络流量（接收） · KB/s
-      </span>
+      <HoverTip
+        :tip="'核心问题：是不是被网卡 / 带宽限住了？\n\n判读条件：\n· 大多数业务场景这张图跟 RPS 同形（信噪比低）\n· stress 场景下「系统挂前网卡被打满」才有诊断价值\n· 字节数远高于 RPS × 平均响应体大小 → 可能附件 / 大返回包\n· 接收高但 RPS 低 → 单请求返回包巨大，看接口设计'"
+        :is-dark="isDark"
+      >
+        <span class="text-[11.5px]"
+              :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
+          网络流量（接收） · KB/s
+        </span>
+      </HoverTip>
     </div>
     <div class="flex-1 min-h-0 grid grid-cols-[1fr_220px] gap-3">
       <VChart
