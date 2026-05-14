@@ -127,6 +127,10 @@ class RunExecutor:
         self._agent_runs_lock = threading.Lock()
         # § 12 S1 实时锚点缓存：已写过的事件类型，heartbeat 跳过重复扫描
         self._anchors_recorded: set[str] = set()
+        # falcon 层运行事件累积（spawn / cancel / 超时 / 终态决策等）。
+        # cancel() 由 web 线程调用，需要锁保护并发追加。
+        self._runtime_log_lines: list[str] = []
+        self._runtime_log_lock = threading.Lock()
 
     # ── public ─────────────────────────────────────────────
 
@@ -143,6 +147,7 @@ class RunExecutor:
     def cancel(self) -> None:
         """触发 graceful cancel；线程会在心跳里看到这个 flag 走清理路径。"""
         self._cancelled.set()
+        self._append_runtime_log('WARN', '收到 cancel 信号（用户请求取消）')
         # 立即写 cancel_requested_at + status=cancelling
         from ..models import TaskRun, RunStatus  # noqa: PLC0415
         TaskRun.objects.filter(pk=self.run.pk).filter(
@@ -153,6 +158,7 @@ class RunExecutor:
         )
         # 单机：子进程在跑则发 stoptest
         if self._proc and self._proc.poll() is None and self.run.stop_port:
+            self._append_runtime_log('INFO', f'发送 StopTestNow 到本地 JMeter @ :{self.run.stop_port}')
             self._send_stoptest()
         # 多机：广播 cancel 到所有 agent
         with self._agent_runs_lock:
@@ -164,8 +170,11 @@ class RunExecutor:
                     timeout=5,
                     headers=self._agent_headers(),
                 )
-            except requests.RequestException:
-                pass
+                self._append_runtime_log('INFO', f'已广播 cancel 到 agent {info.get("pod_name", lg_id)}')
+            except requests.RequestException as e:
+                self._append_runtime_log(
+                    'WARN', f'广播 cancel 到 agent {info.get("pod_name", lg_id)} 失败：{e}',
+                )
 
     # ── worker thread main ─────────────────────────────────
 
@@ -175,17 +184,27 @@ class RunExecutor:
         close_old_connections()
         try:
             from ..models import RunStatus  # noqa: PLC0415
+            self._append_runtime_log(
+                'INFO',
+                f'run 启动：task={self.run.task.title!r} '
+                f'vu={self.run.virtual_users} '
+                f'ramp={self.run.ramp_up_seconds}s '
+                f'duration={self.run.duration_seconds}s',
+            )
             # 1) 预检
             ok, log = self._pre_check()
             self._update_run(pre_check_log=log)
             if not ok:
+                self._append_runtime_log('ERROR', '预检未通过 → 终止 run')
                 self._update_run(
                     status=RunStatus.PRE_CHECK_FAILED,
                     error_message='环境检测未通过，详情见 pre_check_log',
                     finished_at=dj_timezone.now(),
                 )
                 return
+            self._append_runtime_log('INFO', '预检全部通过')
             if self._cancelled.is_set():
+                self._append_runtime_log('WARN', '预检完成但已收到 cancel → 直接终止')
                 self._update_run(
                     status=RunStatus.CANCELLED,
                     finished_at=dj_timezone.now(),
@@ -199,6 +218,10 @@ class RunExecutor:
             self._update_run(status=RunStatus.PENDING)
 
             if distributed:
+                pods = ', '.join(lg.pod_name for lg in self._selected_lgs)
+                self._append_runtime_log(
+                    'INFO', f'分布式模式：{len(self._selected_lgs)} 台 agent → {pods}',
+                )
                 # 分布式路径（v1.2）：多 agent 并行
                 self._update_run(
                     status=RunStatus.RUNNING,
@@ -208,6 +231,7 @@ class RunExecutor:
                 self._pre_record_phase_anchors()
                 exit_code = self._run_distributed()
             else:
+                self._append_runtime_log('INFO', '本地模式：JMeter 子进程兜底（未选 agent）')
                 # 本地兜底路径：原 v1.1 单机流程
                 run_jmx = self._build_and_write_run_jmx()
                 stop_port = self._allocate_stop_port()
@@ -220,13 +244,20 @@ class RunExecutor:
                 self._pre_record_phase_anchors()
                 self._proc = self._spawn_jmeter(run_jmx, stop_port)
                 self._update_run(pid=self._proc.pid)
+                self._append_runtime_log(
+                    'INFO',
+                    f'JMeter 子进程已启动 pid={self._proc.pid} '
+                    f'stop_port={stop_port}',
+                )
                 exit_code = self._heartbeat_loop(self._proc)
+                self._append_runtime_log('INFO', f'JMeter 子进程退出 exit_code={exit_code}')
 
             # 5) 总结 + 归档（两路径共用）
             self._on_finish(exit_code)
         except Exception:  # noqa: BLE001
             from ..models import RunStatus  # noqa: PLC0415
             err = traceback.format_exc()
+            self._append_runtime_log('ERROR', f'worker 线程异常：{err.splitlines()[-1] if err else "unknown"}')
             self._update_run(
                 status=RunStatus.FAILED,
                 error_message=err[-2000:],
@@ -242,80 +273,142 @@ class RunExecutor:
         """把当前累积的预检日志同步写回 DB，让前端 3s 轮询能看到逐项点亮。"""
         self._update_run(pre_check_log='\n'.join(lines))
 
+    def _append_runtime_log(self, level: str, msg: str) -> None:
+        """追加一行 falcon 层运行事件日志并 flush 回 DB。
+
+        格式：`HH:MM:SS.mmm | LEVEL | message`
+        level: INFO / WARN / ERROR
+        线程安全：用 lock 保护 _runtime_log_lines；cancel() 也走这里。
+        """
+        now = dj_timezone.localtime().strftime('%H:%M:%S.%f')[:-3]
+        line = f'{now} | {level:5s} | {msg}'
+        with self._runtime_log_lock:
+            self._runtime_log_lines.append(line)
+            snapshot = '\n'.join(self._runtime_log_lines)
+        self._update_run(runtime_log=snapshot)
+
     def _pre_check(self) -> tuple[bool, str]:
-        """返回 (ok, 多行日志)。任一项失败 ok=False。每跑完一项 flush 一次。"""
+        """返回 (ok, 多行日志)。任一项失败 ok=False。每跑完一项 flush 一次。
+
+        每项格式：`<emoji> <标题> (<耗时>ms)` + 缩进的子项 `   ├─ ✅ ...`/`   └─ ...`
+        """
+        from .jmeter import JMETER_VERSION  # noqa: PLC0415
         lines: list[str] = []
         ok = True
+        overall_t0 = time.monotonic()
+        head_time = dj_timezone.localtime().strftime('%H:%M:%S.%f')[:-3]
+        lines.append(f'[预检] 开始 {head_time}')
+        self._flush_pre_check_log(lines)
+
+        def _ms(t0: float) -> int:
+            return int((time.monotonic() - t0) * 1000)
 
         # 1) JMeter 二进制
+        t0 = time.monotonic()
         try:
             ensure_jmeter_installed()
             ensure_plugins_installed()
             jbin = get_jmeter_bin()
             if not jbin.exists():
                 ok = False
-                lines.append(f'❌ JMeter 二进制缺失: {jbin}')
+                lines.append(f'❌ JMeter 二进制缺失 ({_ms(t0)}ms)')
+                lines.append(f'   └─ 路径: {jbin}')
             else:
-                lines.append(f'✅ JMeter: {jbin}')
+                lines.append(f'✅ JMeter {JMETER_VERSION} ({_ms(t0)}ms)')
+                lines.append(f'   └─ {jbin}')
         except Exception as e:  # noqa: BLE001
             ok = False
-            lines.append(f'❌ JMeter 安装失败: {e}')
+            lines.append(f'❌ JMeter 安装失败 ({_ms(t0)}ms)')
+            lines.append(f'   └─ {e}')
         self._flush_pre_check_log(lines)
 
-        # 2) 脚本检查
+        # 2) 脚本检查（拆 3 子项）
+        t0 = time.monotonic()
         task = self.run.task
+        sub_lines: list[str] = []
+        sub_ok = True
         try:
             jmx_path = task.jmx_path()
             if not jmx_path.exists():
-                ok = False
-                lines.append(f'❌ JMX 文件不存在: {jmx_path}')
+                sub_ok = False
+                sub_lines.append(f'❌ JMX 原件不存在: {jmx_path}')
             else:
-                lines.append(f'✅ JMX 原件: {jmx_path.name}')
+                size_kb = jmx_path.stat().st_size / 1024
+                sub_lines.append(f'✅ JMX 原件: {jmx_path.name} ({size_kb:.1f} KB)')
             if not task.thread_groups_config:
-                ok = False
-                lines.append('❌ Step 2 任务配置为空，请先完成场景配置')
+                sub_ok = False
+                sub_lines.append('❌ Step 2 任务配置为空，请先完成场景配置')
             else:
-                lines.append(f'✅ Step 2 配置: {len(task.thread_groups_config)} 个 ThreadGroup')
+                tg_count = len(task.thread_groups_config)
+                scenarios = ', '.join(
+                    cfg.get('scenario', '?') for cfg in task.thread_groups_config
+                )
+                sub_lines.append(f'✅ Step 2 配置: {tg_count} 个 ThreadGroup [{scenarios}]')
             # build_run_xml 试运行
-            jmx_svc.build_run_xml(
-                task,
-                inject_environment_dns=bool(task.environment_id),
-                inject_backend_listener=True,
-                run_id=self.run.run_id,
-            )
-            lines.append('✅ 可执行 XML 组装通过')
+            try:
+                xml = jmx_svc.build_run_xml(
+                    task,
+                    inject_environment_dns=bool(task.environment_id),
+                    inject_backend_listener=True,
+                    run_id=self.run.run_id,
+                )
+                sub_lines.append(f'✅ 可执行 XML 组装通过 ({len(xml) / 1024:.1f} KB)')
+            except Exception as e:  # noqa: BLE001
+                sub_ok = False
+                sub_lines.append(f'❌ 可执行 XML 组装失败: {e}')
         except Exception as e:  # noqa: BLE001
+            sub_ok = False
+            sub_lines.append(f'❌ 脚本检查异常: {e}')
+        if not sub_ok:
             ok = False
-            lines.append(f'❌ 脚本检查失败: {e}')
+        lines.append(
+            f'{"✅" if sub_ok else "❌"} 脚本检查 ({_ms(t0)}ms)'
+        )
+        for i, sl in enumerate(sub_lines):
+            prefix = '   └─' if i == len(sub_lines) - 1 else '   ├─'
+            lines.append(f'{prefix} {sl}')
         self._flush_pre_check_log(lines)
 
         # 3) 磁盘空间
+        t0 = time.monotonic()
         try:
             usage = shutil.disk_usage(get_runs_dir())
             free_mb = usage.free // (1024 * 1024)
+            free_gb = usage.free / (1024 ** 3)
             if free_mb < 100:
                 ok = False
-                lines.append(f'❌ 磁盘空间不足: 剩余 {free_mb} MB < 100 MB')
+                lines.append(f'❌ 磁盘空间不足 ({_ms(t0)}ms)')
+                lines.append(f'   └─ 剩余 {free_mb} MB < 100 MB · {get_runs_dir()}')
             else:
-                lines.append(f'✅ 磁盘空间: 剩余 {free_mb} MB')
+                lines.append(f'✅ 磁盘空间 剩余 {free_gb:.1f} GB ({_ms(t0)}ms)')
+                lines.append(f'   └─ {get_runs_dir()}')
         except Exception as e:  # noqa: BLE001
             ok = False
-            lines.append(f'❌ 磁盘检查失败: {e}')
+            lines.append(f'❌ 磁盘检查失败 ({_ms(t0)}ms)')
+            lines.append(f'   └─ {e}')
         self._flush_pre_check_log(lines)
 
         # 4) InfluxDB
+        t0 = time.monotonic()
         try:
             if influxdb_svc.ping():
-                lines.append(f'✅ InfluxDB: {settings.INFLUXDB_URL} ({settings.INFLUXDB_DB})')
+                lines.append(f'✅ InfluxDB 可达 ({_ms(t0)}ms)')
+                lines.append(
+                    f'   └─ {settings.INFLUXDB_URL} '
+                    f'(db={settings.INFLUXDB_DB}, '
+                    f'retention={getattr(settings, "INFLUXDB_RETENTION", "?")})'
+                )
             else:
                 ok = False
+                lines.append(f'❌ InfluxDB 不可达 ({_ms(t0)}ms)')
                 lines.append(
-                    f'❌ InfluxDB 不可达: {getattr(settings, "INFLUXDB_URL", "(未配置)")} '
-                    '请确认服务已启动且数据库存在（manage.py setup_influxdb）'
+                    f'   └─ {getattr(settings, "INFLUXDB_URL", "(未配置)")} '
+                    f'· 请确认服务已启动且数据库存在（manage.py setup_influxdb）'
                 )
         except Exception as e:  # noqa: BLE001
             ok = False
-            lines.append(f'❌ InfluxDB 检查异常: {e}')
+            lines.append(f'❌ InfluxDB 检查异常 ({_ms(t0)}ms)')
+            lines.append(f'   └─ {e}')
         self._flush_pre_check_log(lines)
 
         # 5) Environment hosts TCP 探测
@@ -324,6 +417,7 @@ class RunExecutor:
         #   - str "10.0.0.1 hostname.foo.com"（/etc/hosts 风格 + # 注释）
         # 用 jmx_svc._parse_host_entry 统一规范化。
         # 随机抽 10 条，只汇总通过 / 未通过数；不阻塞 ok（内网未开 80/443 也常见）。
+        t0 = time.monotonic()
         if task.environment_id and task.environment.host_entries:
             parsed: list[tuple[str, str]] = []
             for entry in task.environment.host_entries:
@@ -331,12 +425,13 @@ class RunExecutor:
                 if pair:
                     parsed.append(pair)
             if not parsed:
-                lines.append('ℹ️  Environment hosts 全部无法解析，跳过 TCP 探测')
+                lines.append(f'ℹ️  Environment hosts 全部无法解析 ({_ms(t0)}ms)')
+                lines.append(f'   └─ Environment: {task.environment.name}，跳过 TCP 探测')
             else:
                 sample_size = min(10, len(parsed))
                 sample = random.sample(parsed, sample_size)
                 passed = 0
-                failed = 0
+                failed_pairs: list[str] = []
                 for _host, ip in sample:
                     reachable = False
                     for port in (80, 443):
@@ -349,20 +444,30 @@ class RunExecutor:
                     if reachable:
                         passed += 1
                     else:
-                        failed += 1
-                suffix = f'（共 {len(parsed)} 条，随机抽 {sample_size} 条）'
+                        failed_pairs.append(f'{_host}({ip})')
+                failed = len(failed_pairs)
                 if failed == 0:
-                    lines.append(f'✅ Environment hosts: {passed}/{sample_size} TCP 可达 {suffix}')
+                    lines.append(
+                        f'✅ Environment hosts {passed}/{sample_size} TCP 可达 '
+                        f'({_ms(t0)}ms)'
+                    )
+                    lines.append(f'   └─ Environment: {task.environment.name}（共 {len(parsed)} 条）')
                 else:
                     lines.append(
-                        f'⚠️  Environment hosts: {passed}/{sample_size} TCP 可达，'
-                        f'{failed} 未通过（非致命）{suffix}'
+                        f'⚠️  Environment hosts {passed}/{sample_size} TCP 可达 '
+                        f'({_ms(t0)}ms · 非致命)'
                     )
-        self._flush_pre_check_log(lines)
+                    lines.append(f'   ├─ Environment: {task.environment.name}（共 {len(parsed)} 条）')
+                    lines.append(f'   └─ 不可达 {failed}：{", ".join(failed_pairs[:5])}{"…" if failed > 5 else ""}')
+            self._flush_pre_check_log(lines)
+        else:
+            lines.append(f'ℹ️  Environment 未配置，跳过 hosts 探测 ({_ms(t0)}ms)')
+            self._flush_pre_check_log(lines)
 
         # 6) 压力源（agent）
         # 判定与 _select_load_generators 对齐：status=idle 且心跳 ≤ 3 min。
         # 未选 agent / 全不可用时，按 settings.LOCAL_FALLBACK 决定是否拒绝。
+        t0 = time.monotonic()
         from datetime import timedelta  # noqa: PLC0415
         from django.utils import timezone as _tz  # noqa: PLC0415
         from ..models import LoadGeneratorStatus  # noqa: PLC0415
@@ -372,45 +477,70 @@ class RunExecutor:
 
         if not selected:
             if local_fallback:
-                lines.append('✅ 压力源: 未选 agent，走本地 JMeter 兜底（LOCAL_FALLBACK=1）')
+                lines.append(f'✅ 压力源 走本地 JMeter 兜底 ({_ms(t0)}ms)')
+                lines.append('   └─ 未选 agent，LOCAL_FALLBACK=1')
             else:
                 ok = False
-                lines.append('❌ 压力源: 未选 agent，且本地兜底已关闭（LOCAL_FALLBACK=0）')
+                lines.append(f'❌ 压力源未配置 ({_ms(t0)}ms)')
+                lines.append('   └─ 未选 agent，且本地兜底已关闭（LOCAL_FALLBACK=0）')
         else:
             cutoff = _tz.now() - timedelta(minutes=3)
             usable = []
-            issues: list[str] = []
+            agent_lines: list[str] = []
             for lg in selected:
                 fresh = lg.last_heartbeat_at and lg.last_heartbeat_at >= cutoff
+                hb_ago = (
+                    int((_tz.now() - lg.last_heartbeat_at).total_seconds())
+                    if lg.last_heartbeat_at else None
+                )
+                hb_str = f'{hb_ago}s 前' if hb_ago is not None else '从未'
                 if lg.status == LoadGeneratorStatus.IDLE and fresh:
                     usable.append(lg)
+                    agent_lines.append(
+                        f'✅ {lg.pod_name}: idle, max={lg.max_vusers} VU, 心跳 {hb_str}'
+                    )
                 else:
                     reason = '心跳过期' if not fresh else lg.status
-                    issues.append(f'{lg.pod_name}({reason})')
-
-            if usable:
-                capacity = sum(lg.max_vusers for lg in usable)
-                msg = f'✅ 压力源: {len(usable)}/{len(selected)} 台可用，容量合计 {capacity} VU'
-                if issues:
-                    msg += f'（不可用: {", ".join(issues)}）'
-                lines.append(msg)
-                if capacity < self.run.virtual_users:
-                    ok = False
-                    lines.append(
-                        f'❌ 压力源容量不足: 可用合计 {capacity} VU '
-                        f'< 任务需要 {self.run.virtual_users} VU'
+                    agent_lines.append(
+                        f'❌ {lg.pod_name}: {reason}, max={lg.max_vusers} VU, 心跳 {hb_str}'
                     )
+
+            capacity = sum(lg.max_vusers for lg in usable)
+            if usable and capacity >= self.run.virtual_users:
+                head = (
+                    f'✅ 压力源 {len(usable)}/{len(selected)} 台可用，容量合计 '
+                    f'{capacity} VU ({_ms(t0)}ms)'
+                )
+            elif usable and capacity < self.run.virtual_users:
+                ok = False
+                head = (
+                    f'❌ 压力源容量不足 {capacity}/{self.run.virtual_users} VU '
+                    f'({_ms(t0)}ms)'
+                )
             elif local_fallback:
-                lines.append(
-                    f'⚠️  压力源: 选了 {len(selected)} 台全不可用'
-                    f'（{", ".join(issues)}），将走本地兜底'
+                head = (
+                    f'⚠️  压力源 0/{len(selected)} 台可用 → 走本地兜底 '
+                    f'({_ms(t0)}ms)'
                 )
             else:
                 ok = False
-                lines.append(
-                    f'❌ 压力源: 选了 {len(selected)} 台全不可用'
-                    f'（{", ".join(issues)}），本地兜底已关闭（LOCAL_FALLBACK=0）'
+                head = (
+                    f'❌ 压力源 0/{len(selected)} 台可用 '
+                    f'(本地兜底已关闭 LOCAL_FALLBACK=0) ({_ms(t0)}ms)'
                 )
+            lines.append(head)
+            for i, al in enumerate(agent_lines):
+                prefix = '   └─' if i == len(agent_lines) - 1 else '   ├─'
+                lines.append(f'{prefix} {al}')
+        self._flush_pre_check_log(lines)
+
+        # 总结
+        total_ms = int((time.monotonic() - overall_t0) * 1000)
+        if ok:
+            lines.append(f'[预检] 全部通过 (耗时 {total_ms}ms)')
+        else:
+            lines.append(f'[预检] 未通过 (耗时 {total_ms}ms)')
+        self._flush_pre_check_log(lines)
         self._flush_pre_check_log(lines)
 
         return ok, '\n'.join(lines)
@@ -603,7 +733,15 @@ class RunExecutor:
                 )
                 r.raise_for_status()
                 data = r.json()
+                self._append_runtime_log(
+                    'INFO',
+                    f'shard 派发成功 → agent {shard.pod_name} '
+                    f'(vu={shard.vusers}, agent_run_id={data.get("run_id")})',
+                )
             except (requests.RequestException, ValueError) as e:
+                self._append_runtime_log(
+                    'ERROR', f'shard 派发失败 → agent {shard.pod_name}：{e}',
+                )
                 self._update_run(error_message=f'agent {shard.pod_name} POST /runs 失败: {e}')
                 return 1
             with self._agent_runs_lock:
@@ -687,6 +825,7 @@ class RunExecutor:
                 if abort_msg:
                     early_aborted = True
                     self._early_aborted = True
+                    self._append_runtime_log('ERROR', f'early abort 触发：{abort_msg.splitlines()[0]}')
                     self._record_event_anchor(
                         'error_rate_breached',
                         ts_ms=int(time.time() * 1000),
@@ -713,6 +852,11 @@ class RunExecutor:
 
             if max_wall and (now - start_t) > max_wall:
                 # duration 超时：广播 cancel，标 timeout
+                self._append_runtime_log(
+                    'WARN',
+                    f'分布式 duration 超时兜底（实际 {int(now - start_t)}s > 上限 {int(max_wall)}s）'
+                    f'→ 广播 cancel 给 {len(pending)} 台 agent',
+                )
                 self._update_run(status=RunStatus.CANCELLING)
                 for lg_id, info in pending:
                     try:
@@ -738,8 +882,13 @@ class RunExecutor:
                 if not st.get('is_running'):
                     info['finished'] = True
                     info['exit_code'] = st.get('exit_code')
-                    if (st.get('exit_code') or 0) != 0:
+                    ec = st.get('exit_code') or 0
+                    if ec != 0:
                         any_failed = True
+                    self._append_runtime_log(
+                        'INFO' if ec == 0 else 'WARN',
+                        f'agent {info.get("pod_name", lg_id)} 退出 exit_code={ec}',
+                    )
 
             time.sleep(_HEARTBEAT_INTERVAL_SEC)
 
@@ -902,6 +1051,7 @@ class RunExecutor:
                 abort_msg = self._check_early_abort()
                 if abort_msg:
                     self._early_aborted = True
+                    self._append_runtime_log('ERROR', f'early abort 触发：{abort_msg.splitlines()[0]}')
                     self._record_event_anchor(
                         'error_rate_breached',
                         ts_ms=int(time.time() * 1000),
@@ -919,6 +1069,9 @@ class RunExecutor:
 
             if max_wall and (now - start_t) > max_wall:
                 # duration 超时兜底：强制 graceful 停
+                self._append_runtime_log(
+                    'WARN', f'duration 超时兜底（实际 {int(now - start_t)}s > 上限 {int(max_wall)}s）→ 强制 stop',
+                )
                 self._update_run(status=RunStatus.CANCELLING)
                 self._send_stoptest()
                 exit_code = self._wait_or_kill(proc)
@@ -1049,6 +1202,14 @@ class RunExecutor:
                 )
 
         TaskRun.objects.filter(pk=run.pk).update(**status_update)
+        final_status = status_update.get('status', '?')
+        total = summary.get('total_requests') or 0
+        err_rate = summary.get('error_rate') or 0
+        self._append_runtime_log(
+            'INFO',
+            f'终态决策：status={final_status} '
+            f'(total_samples={total}, error_rate={err_rate:.2f}%, exit_code={exit_code})',
+        )
 
         # § 12 S1：写阶段事件锚点（ramp_done / hold_start / shutdown_start）+
         # 扫 InfluxDB 补 first_error。同步写表，体量小（< 10 条），失败静默不阻塞。

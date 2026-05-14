@@ -113,7 +113,7 @@ class TaskRunSerializer(serializers.ModelSerializer):
             'max_wall_sec',
             'total_requests', 'avg_rps', 'p99_ms', 'error_rate',
             'error_breakdown',  # § 12 S2 失败原因 5 类分桶
-            'error_message', 'pre_check_log',
+            'error_message', 'pre_check_log', 'runtime_log',
             'pid', 'stop_port', 'last_heartbeat_at',
             'cancel_requested_at', 'archived_at',
             'thread_groups_config_snapshot', 'jmx_hash_snapshot',

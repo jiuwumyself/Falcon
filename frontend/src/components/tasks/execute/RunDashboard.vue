@@ -10,7 +10,7 @@ import ErrorsTab from './dashboard/ErrorsTab.vue'
 import ServicePanelsTab from './dashboard/ServicePanelsTab.vue'
 import TracePanelsTab from './dashboard/TracePanelsTab.vue'
 import JvmTab from './dashboard/JvmTab.vue'
-import PreCheckTab from './dashboard/PreCheckTab.vue'
+import RunLogTab from './dashboard/RunLogTab.vue'
 import ReportTab from './dashboard/ReportTab.vue'
 
 const props = defineProps<{
@@ -20,7 +20,7 @@ const props = defineProps<{
   isDark: boolean
 }>()
 
-type TabId = 'trends' | 'samplers' | 'errors' | 'service' | 'trace' | 'jvm' | 'precheck' | 'report'
+type TabId = 'trends' | 'samplers' | 'errors' | 'service' | 'trace' | 'jvm' | 'runlog' | 'report'
 
 const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'trends', label: '指标趋势', icon: Activity },
@@ -31,7 +31,7 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'trace', label: '链路面板', icon: GitBranch },
   // G4：JVM tab v1（plan §4.5），位于"链路面板"之后；dump 按钮 disabled 等 Arthas
   { id: 'jvm', label: 'JVM', icon: Cpu },
-  { id: 'precheck', label: '预检日志', icon: FileText },
+  { id: 'runlog', label: '运行日志', icon: FileText },
   { id: 'report', label: '查看报告', icon: FileSearch },
 ]
 
@@ -94,9 +94,10 @@ const isTerminal = computed(() =>
                       :task="task" :run="run" :is-dark="isDark" />
       <JvmTab v-else-if="active === 'jvm'"
               :task="task" :run="run" :is-dark="isDark" />
-      <PreCheckTab v-else-if="active === 'precheck'"
-                   :log="run?.pre_check_log || ''"
-                   :is-dark="isDark" />
+      <RunLogTab v-else-if="active === 'runlog'"
+                 :run="run"
+                 :is-terminal="isTerminal"
+                 :is-dark="isDark" />
       <ReportTab v-else-if="active === 'report'"
                  :run="run" :is-dark="isDark" />
     </div>

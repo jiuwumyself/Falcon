@@ -320,6 +320,10 @@ class TaskRun(models.Model):
 
     # Step 3 子进程编排相关
     pre_check_log = models.TextField(blank=True)
+    # falcon 层运行事件日志（spawn jmeter / cancel 信号 / 超时兜底 / 分布式调度 /
+    # 终态决策等）。每行 `HH:MM:SS.mmm | LEVEL | message` 由 executor._append_runtime_log
+    # 追加。JMeter 子进程自己的 stdout/log 仍在 runs/<run_id>/jmeter.log。
+    runtime_log = models.TextField(blank=True)
     pid = models.PositiveIntegerField(null=True, blank=True)
     stop_port = models.PositiveIntegerField(null=True, blank=True)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)

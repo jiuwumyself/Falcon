@@ -234,6 +234,10 @@ export interface TaskRun {
   error_message: string
   // Step 3 子进程编排相关
   pre_check_log: string
+  // falcon 层运行事件日志（spawn jmeter / cancel 信号 / 超时兜底 / 分布式调度 /
+  // 终态决策等）。每行 `HH:MM:SS.mmm | LEVEL | message`。JMeter 子进程的 stdout
+  // 仍在 runs/<run_id>/jmeter.log（走 runsApi.log()）。
+  runtime_log: string
   pid: number | null
   stop_port: number | null
   last_heartbeat_at: string | null
