@@ -924,8 +924,10 @@ class RunViewSet(viewsets.GenericViewSet):
         executor = executor_svc.get_executor(run.run_id)
         if executor is None:
             # 进程内没找到 executor（web 进程重启后 zombie）→ 直接标 failed
+            from django.utils import timezone as dj_timezone
             TaskRun.objects.filter(pk=run.pk).update(
                 status=RunStatus.FAILED,
+                finished_at=dj_timezone.now(),
                 error_message='Web 进程重启或子线程已丢失，无法 graceful 取消；自动标记为 failed',
             )
             run.refresh_from_db()
