@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { SeriesPoint, Task, ThreadGroupConfig } from '@/types/task'
+import type {
+  RunMetricsSeries, ScenarioId, SeriesPoint, Task, TGKind,
+} from '@/types/task'
 import {
   scenarioById, inferScenarioFromKind, type ScenarioDef,
 } from './scenarioCtx'
@@ -9,107 +11,181 @@ import ErrorBreakdownStackedChart from './ErrorBreakdownStackedChart.vue'
 import VuRpsDualAxisChart from './VuRpsDualAxisChart.vue'
 import TargetRpsVsActualChart from './TargetRpsVsActualChart.vue'
 
-// 末位「场景上下文图」容器：按当前选中 TG（或第一个 TG）解析场景 → 渲染对应图。
+// 末位「场景上下文图」容器：按当前选中 TG 的场景分发渲染。
 //
-// 多 TG 联动：当 selectedTg 非空时，按该 TG 的 scenario 选图；为空（合计模式）
-// 走 thread_groups_config[0]。这样在 KpiBar 切 TG 时末位图跟着切。
+// 分发逻辑：
+//   - selectedTg 非空 → 用 tg_planned_meta[selectedTg].scenario 决定图 +
+//     用 byTg[selectedTg] 切片 rps/vu（不再用合计值，避免单 TG 切片图
+//     拿合计数据失真）
+//   - selectedTg = null（全部）→
+//       · 所有 TG scenario 同质 → 用该 scenario
+//       · 混合场景 → 顶部加提示「多场景混合，建议切具体 TG」+ 退到散点图
+//   - meta 缺失（老 run / snapshot 空）→ 兜底走 inferScenarioFromKind +
+//     thread_groups_config[0]
 //
 // 场景 → 图映射：
-//   baseline   → ConcurrencyRpsChart (isFlatVu 分支自动触发 RPS 抖动模式)
+//   baseline   → ConcurrencyRpsChart (isFlatVu 分支自动触发 RPS 抖动)
 //   load       → ConcurrencyRpsChart (非 flat 散点：看拐点)
-//   stress     → ErrorBreakdownStackedChart (5 桶堆叠：看错误类型转移)
+//   stress     → ErrorBreakdownStackedChart (5 桶堆叠：错误类型转移)
 //   soak       → ConcurrencyRpsChart (showTrendLine：抖动 + 线性回归漂移)
-//   spike      → VuRpsDualAxisChart (双轴时序：看 VU/RPS 跟随)
-//   throughput → TargetRpsVsActualChart (目标线对比)
+//   spike      → VuRpsDualAxisChart (双轴时序：VU/RPS 跟随)
+//   throughput → TargetRpsVsActualChart (目标 vs 实际)
 const props = defineProps<{
   task: Task
   selectedTg: string | null
+  // 全部模式 (selectedTg=null) 的合计 rps/vu
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  // 单 TG 选中时切片来源（key = TG testname）
+  byTg: Record<string, RunMetricsSeries>
+  // 后端按 testname 给的 {kind, params, scenario}
+  tgPlannedMeta: Record<string, { kind: TGKind; params: Record<string, any>; scenario?: ScenarioId | null }>
   runId: string | null
   isTerminal: boolean
   xRange?: [number, number] | null
   isDark: boolean
 }>()
 
-// 通过 selectedTg（TG 名 = testname）反向找配置项
-function findTgConfig(): ThreadGroupConfig | null {
-  const cfgs = props.task.thread_groups_config || []
-  if (!cfgs.length) return null
-  if (props.selectedTg) {
-    // selectedTg 是 testname；task.thread_groups_config 里只有 path/kind/params/scenario
-    // 没存 testname。最稳妥的兜底：当多 TG 时，selectedTg 选中后我们走"按场景排第几个"
-    // 的近似匹配——但 testname 和 path 没有直接映射。
-    // 退而求其次：单 TG 直接用第一项；多 TG 时如果 selectedTg 命中某个 cfg 的 testname
-    // （某些 run 里前端会同步），优先用；否则用第一项兜底。
-    const matched = cfgs.find((c) => (c.params as any)?.testname === props.selectedTg)
-    if (matched) return matched
-  }
-  return cfgs[0]
+interface ResolvedCtx {
+  scenario: ScenarioDef
+  rps: SeriesPoint[]
+  vu: SeriesPoint[]
+  targetRpsPerSec: number | null
+  mixed: boolean    // 多场景混合提示
 }
 
-const currentScenario = computed<ScenarioDef | null>(() => {
-  const cfg = findTgConfig()
-  if (!cfg) return null
-  const id = cfg.scenario ?? inferScenarioFromKind(cfg.kind)
-  return scenarioById(id)
+function resolveScenarioId(kind: TGKind, scenario?: ScenarioId | null): ScenarioId {
+  return scenario ?? inferScenarioFromKind(kind)
+}
+
+function targetRpsFromParams(scenarioId: ScenarioId, params: Record<string, any>): number | null {
+  if (scenarioId !== 'throughput') return null
+  const t = Number(params?.target_rps ?? 0)
+  if (!t || t <= 0) return null
+  const unit = (params?.unit as string) === 'M' ? 60 : 1
+  return t / unit
+}
+
+const ctx = computed<ResolvedCtx | null>(() => {
+  // —— 1. selectedTg 非空：lookup 单 TG meta + byTg 切片 ——
+  if (props.selectedTg) {
+    const meta = props.tgPlannedMeta?.[props.selectedTg]
+    if (meta) {
+      const id = resolveScenarioId(meta.kind, meta.scenario)
+      const slice = props.byTg?.[props.selectedTg]
+      return {
+        scenario: scenarioById(id),
+        // 切片优先用 byTg；没有就退到 props.rps/vu（合计）兜底
+        rps: slice?.rps ?? props.rps,
+        vu: slice?.active_users ?? props.vu,
+        targetRpsPerSec: targetRpsFromParams(id, meta.params),
+        mixed: false,
+      }
+    }
+    // meta 缺失：fall through 走 cfgs[0] 兜底
+  }
+
+  // —— 2. selectedTg 空（全部）或 meta 缺失 ——
+  // 优先用 tg_planned_meta 推断"同质 / 混合"，老 run 无 meta 时退到
+  // task.thread_groups_config 的 scenario 字段
+  const metaEntries = Object.entries(props.tgPlannedMeta || {})
+  if (metaEntries.length > 0) {
+    const ids = metaEntries.map(([, m]) =>
+      resolveScenarioId(m.kind, m.scenario),
+    )
+    const unique = Array.from(new Set(ids))
+    if (unique.length === 1) {
+      const id = unique[0]
+      // 同质场景：用第一个 TG 的 params 算 target（throughput 多 TG 时取第一个为代表）
+      const firstParams = metaEntries[0][1].params
+      return {
+        scenario: scenarioById(id),
+        rps: props.rps,
+        vu: props.vu,
+        targetRpsPerSec: targetRpsFromParams(id, firstParams),
+        mixed: false,
+      }
+    }
+    // 混合场景：通用散点图兜底 + 顶部提示
+    return {
+      scenario: scenarioById('load'),  // load 的散点解读最通用
+      rps: props.rps,
+      vu: props.vu,
+      targetRpsPerSec: null,
+      mixed: true,
+    }
+  }
+
+  // —— 3. meta 完全空（老 run / 还没拉 metrics）→ task.thread_groups_config 兜底 ——
+  const cfgs = props.task.thread_groups_config || []
+  if (!cfgs.length) return null
+  const cfg = cfgs[0]
+  const id = resolveScenarioId(cfg.kind, cfg.scenario)
+  return {
+    scenario: scenarioById(id),
+    rps: props.rps,
+    vu: props.vu,
+    targetRpsPerSec: targetRpsFromParams(id, cfg.params || {}),
+    mixed: cfgs.length > 1 && new Set(
+      cfgs.map((c) => resolveScenarioId(c.kind, c.scenario)),
+    ).size > 1,
+  }
 })
 
-// throughput 场景：从配置算出 per-sec 目标 RPS（unit 'M' → /60）
-const targetRpsPerSec = computed<number | null>(() => {
-  const cfg = findTgConfig()
-  if (!cfg) return null
-  if (currentScenario.value?.id !== 'throughput') return null
-  const target = Number(cfg.params?.target_rps ?? 0)
-  if (!target || target <= 0) return null
-  const unit = (cfg.params?.unit as string) === 'M' ? 60 : 1
-  return target / unit
-})
-
-// 走 ConcurrencyRpsChart 的场景列表（baseline / load / soak）
 const usesConcurrencyChart = computed(() =>
-  currentScenario.value && ['baseline', 'load', 'soak'].includes(currentScenario.value.id),
+  ctx.value && ['baseline', 'load', 'soak'].includes(ctx.value.scenario.id),
 )
-// soak 才开启回归线
-const showTrendLine = computed(() => currentScenario.value?.id === 'soak')
+const showTrendLine = computed(() => ctx.value?.scenario.id === 'soak')
 </script>
 
 <template>
   <div class="flex flex-col h-full">
-    <ConcurrencyRpsChart
-      v-if="usesConcurrencyChart"
-      :rps="rps"
-      :vu="vu"
-      :show-trend-line="showTrendLine"
-      :is-dark="isDark"
-    />
-    <ErrorBreakdownStackedChart
-      v-else-if="currentScenario?.id === 'stress'"
-      :run-id="runId"
-      :is-terminal="isTerminal"
-      :x-range="xRange ?? null"
-      :is-dark="isDark"
-    />
-    <VuRpsDualAxisChart
-      v-else-if="currentScenario?.id === 'spike'"
-      :rps="rps"
-      :vu="vu"
-      :x-range="xRange ?? null"
-      :is-dark="isDark"
-    />
-    <TargetRpsVsActualChart
-      v-else-if="currentScenario?.id === 'throughput'"
-      :rps="rps"
-      :target-rps-per-sec="targetRpsPerSec"
-      :x-range="xRange ?? null"
-      :is-dark="isDark"
-    />
-    <!-- 兜底：没有 scenario 信息时退到散点图 -->
-    <ConcurrencyRpsChart
-      v-else
-      :rps="rps"
-      :vu="vu"
-      :is-dark="isDark"
-    />
+    <div
+      v-if="ctx?.mixed"
+      class="text-[10.5px] px-2 py-1 mb-1 rounded"
+      :style="{
+        background: isDark ? 'rgba(245,158,11,0.1)' : 'rgba(245,158,11,0.08)',
+        color: '#f59e0b',
+      }"
+    >
+      多 TG 场景混合，末位图退到通用散点；切到具体 TG 查看对应场景图。
+    </div>
+    <div class="flex-1 min-h-0">
+      <ConcurrencyRpsChart
+        v-if="ctx && usesConcurrencyChart"
+        :rps="ctx.rps"
+        :vu="ctx.vu"
+        :show-trend-line="showTrendLine"
+        :is-dark="isDark"
+      />
+      <ErrorBreakdownStackedChart
+        v-else-if="ctx?.scenario.id === 'stress'"
+        :run-id="runId"
+        :is-terminal="isTerminal"
+        :x-range="xRange ?? null"
+        :is-dark="isDark"
+      />
+      <VuRpsDualAxisChart
+        v-else-if="ctx?.scenario.id === 'spike'"
+        :rps="ctx.rps"
+        :vu="ctx.vu"
+        :x-range="xRange ?? null"
+        :is-dark="isDark"
+      />
+      <TargetRpsVsActualChart
+        v-else-if="ctx?.scenario.id === 'throughput'"
+        :rps="ctx.rps"
+        :target-rps-per-sec="ctx.targetRpsPerSec"
+        :x-range="xRange ?? null"
+        :is-dark="isDark"
+      />
+      <!-- 兜底：没有任何 ctx 信息时退到散点图（不传 vu/rps 时图自处理空态）-->
+      <ConcurrencyRpsChart
+        v-else
+        :rps="rps"
+        :vu="vu"
+        :is-dark="isDark"
+      />
+    </div>
   </div>
 </template>

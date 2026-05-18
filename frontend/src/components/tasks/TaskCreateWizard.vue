@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { AnimatePresence, Motion } from 'motion-v'
 import {
   Upload, Sliders, Play, LineChart, FileText, X, Loader, RotateCcw, Check,
 } from 'lucide-vue-next'
-import { apiForm, ApiError } from '@/lib/api'
+import { apiForm, ApiError, tasksApi } from '@/lib/api'
 import { useTheme } from '@/composables/useTheme'
 import type { Task, BizCategory } from '@/types/task'
 import ScriptTree from './ScriptTree.vue'
@@ -105,6 +105,50 @@ watch(currentStep, (i) => {
   const tid = uploadedTask.value?.id
   if (tid) writeLastStep(tid, s.id)
 })
+
+// 任务标题 inline 编辑：点击标题 → input；Enter/blur 提交；Esc 取消
+const editingTitle = ref(false)
+const titleDraft = ref('')
+const titleSaving = ref(false)
+const titleError = ref('')
+const titleInput = ref<HTMLInputElement | null>(null)
+
+function startEditTitle() {
+  if (!uploadedTask.value || titleSaving.value) return
+  titleDraft.value = uploadedTask.value.title
+  titleError.value = ''
+  editingTitle.value = true
+  nextTick(() => {
+    titleInput.value?.focus()
+    titleInput.value?.select()
+  })
+}
+
+function cancelEditTitle() {
+  editingTitle.value = false
+  titleError.value = ''
+}
+
+async function commitEditTitle() {
+  if (!uploadedTask.value || !editingTitle.value) return
+  const next = titleDraft.value.trim()
+  const orig = uploadedTask.value.title
+  if (!next || next === orig) {
+    cancelEditTitle()
+    return
+  }
+  titleSaving.value = true
+  titleError.value = ''
+  try {
+    const updated = await tasksApi.update(uploadedTask.value.id, { title: next })
+    uploadedTask.value = updated
+    editingTitle.value = false
+  } catch (e) {
+    titleError.value = e instanceof ApiError ? e.humanMessage : String(e)
+  } finally {
+    titleSaving.value = false
+  }
+}
 
 function triggerPicker() {
   if (uploading.value) return
@@ -462,17 +506,42 @@ const panelGlass = computed(() => ({
               <div v-else class="h-full flex flex-col min-h-0">
                 <div class="flex items-start gap-3 mb-4 flex-shrink-0">
                   <div class="flex-1 min-w-0">
+                    <!-- 标题：未编辑 → 可点击 p；编辑中 → input -->
+                    <input
+                      v-if="editingTitle"
+                      ref="titleInput"
+                      v-model="titleDraft"
+                      type="text"
+                      maxlength="80"
+                      class="text-[15px] tracking-tight w-full bg-transparent outline-none border-b focus:border-current"
+                      :style="{
+                        color: isDark ? '#fff' : '#1a1a2e',
+                        borderColor: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)',
+                      }"
+                      :disabled="titleSaving"
+                      @keydown.enter.prevent="commitEditTitle"
+                      @keydown.esc.prevent="cancelEditTitle"
+                      @blur="commitEditTitle"
+                    />
                     <p
-                      class="text-[15px] tracking-tight truncate"
+                      v-else
+                      class="text-[15px] tracking-tight truncate cursor-text inline-block max-w-full hover:opacity-80"
                       :style="{ color: isDark ? '#fff' : '#1a1a2e' }"
+                      :title="'点击修改任务名称'"
+                      @click="startEditTitle"
                     >
                       {{ uploadedTask.title }}
                     </p>
                     <p
                       class="text-[11px] mt-0.5 truncate"
-                      :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
+                      :style="{
+                        color: titleError
+                          ? '#ef4444'
+                          : (isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)'),
+                      }"
                     >
-                      {{ uploadedTask.jmx_filename }} · 启用 / 禁用组件
+                      <template v-if="titleError">{{ titleError }}</template>
+                      <template v-else>{{ uploadedTask.jmx_filename }} · 启用 / 禁用组件</template>
                     </p>
                   </div>
                   <button

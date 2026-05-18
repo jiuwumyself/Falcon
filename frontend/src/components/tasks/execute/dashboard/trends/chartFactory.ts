@@ -66,6 +66,9 @@ export function buildSeriesOption(
   const gridBottom = opts.gridBottom ?? (hideXAxisLabel ? 8 : 28)
 
   return {
+    // 关掉 series 数据更新动画，避免 toggle 可见性 / 切换 excludeKo 时整图"重画"
+    // 闪烁。保留初始进场动画（animationDuration 默认值）。
+    animationDurationUpdate: 0,
     grid: {
       left: 60,
       right: 16,
@@ -127,6 +130,11 @@ export function buildSeriesOption(
     },
     series: series.map((s) => ({
       type: 'line' as const,
+      // id 用 spec.name —— 配合三张图 update-options 的 replaceMerge:['series']，
+      // echarts 按 id smart-merge：同 id series 复用实例只更新数据（不重画 / 不闪烁），
+      // 新 id 创建，旧 id 删除。这样切 TG 时旧 series 真正消失，toggle sampler 时
+      // 不变的 'all' 等 series 不会被重画。
+      id: s.name,
       name: s.name,
       data: s.data,
       smooth: true,

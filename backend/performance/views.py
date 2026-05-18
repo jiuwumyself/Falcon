@@ -1,6 +1,7 @@
 import hashlib
 import re
 import secrets
+import shutil
 from pathlib import Path
 
 from django.conf import settings
@@ -89,10 +90,15 @@ def _compute_tg_planned_users(run) -> dict:
 
 
 def _compute_tg_planned_meta(run) -> dict:
-    """按 ThreadGroup testname 返回 (kind, params)，前端 plannedCurve 用。
+    """按 ThreadGroup testname 返回 (kind, params, scenario)，前端 plannedCurve +
+    末位卡场景分发用。
 
-    跟 _compute_tg_planned_users 同源数据；kind+params **必须**来自 snapshot 配对，
-    不能混用当前 jmx 的 kind（详见 _compute_tg_planned_users 注释）。
+    跟 _compute_tg_planned_users 同源数据；字段都来自 snapshot 配对（详见
+    _compute_tg_planned_users 注释）。
+
+    scenario 给前端 ScenarioContextChart 用：selectedTg → 直接 lookup 该 TG 的
+    scenario，决定末位卡渲染哪个组件；老数据无 scenario 时返回 None，前端走
+    inferScenarioFromKind 兜底。
     """
     path_to_testname = _path_to_testname(run)
     snap_cfgs = run.thread_groups_config_snapshot or run.task.thread_groups_config or []
@@ -104,10 +110,11 @@ def _compute_tg_planned_meta(run) -> dict:
         path = entry.get('path') or ''
         kind = entry.get('kind') or 'ThreadGroup'
         params = entry.get('params') or {}
+        scenario = entry.get('scenario')  # 老数据无该字段 → None
         testname = path_to_testname.get(path) or path
         if not testname:
             continue
-        out[testname] = {'kind': kind, 'params': params}
+        out[testname] = {'kind': kind, 'params': params, 'scenario': scenario}
     return out
 
 
@@ -126,6 +133,29 @@ def _filter_tree_dicts(nodes: list, hidden_tags: frozenset) -> list:
 def _safe_path_token(path: str) -> str:
     """Component path → 文件名安全片段，例如 '0.0.3' → '0_0_3'。"""
     return _SAFE_PATH_RE.sub('_', path).strip('_') or 'root'
+
+
+def _purge_run_artifacts(run, *, soft_delete: bool) -> None:
+    """清掉单个 TaskRun 的所有物理痕迹：run_dir / archive.tar.gz / InfluxDB 时序数据。
+
+    给 RunViewSet.destroy 和 TaskViewSet.destroy（级联清 task 全部 run）共用。
+    soft_delete=True 时同时标 is_deleted（API 走这条）；False 则不动 run 行，仅清磁盘 /
+    InfluxDB（task 硬删时 cascade 会带走 run 行本身）。
+    """
+    if soft_delete and not run.is_deleted:
+        run.is_deleted = True
+        run.deleted_at = timezone.now()
+        run.save(update_fields=['is_deleted', 'deleted_at'])
+    rd = get_runs_dir() / run.run_id
+    if rd.exists():
+        shutil.rmtree(rd, ignore_errors=True)
+    archive = get_runs_dir() / f'{run.run_id}.tar.gz'
+    archive.unlink(missing_ok=True)
+    try:
+        influxdb_svc.delete_run_data(run.run_id)
+    except Exception:  # noqa: BLE001
+        # InfluxDB DELETE 失败不阻断：retention policy 自然 GC
+        pass
 
 
 def _unique_csv_for_binding(jmx_filename: str, component_path: str) -> str:
@@ -164,6 +194,24 @@ class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()  # TaskManager already excludes soft-deleted
     serializer_class = TaskSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    # —— 删除：先清所有关联 run 的物理痕迹 + InfluxDB 时序数据，再 task.delete() 软删
+    # 用户期望"任何数据都进行删除"，故级联清干净；Task / TaskRun 表行保留（软删
+    # 标记），需要彻底删 DB 行走 admin 的 hard_delete
+    def destroy(self, request, *args, **kwargs):
+        task = self.get_object()
+        active_runs = task.runs.filter(
+            status__in=[s.value for s in ACTIVE_RUN_STATUSES],
+        )
+        if active_runs.exists():
+            return Response(
+                {'detail': '任务有正在执行的 run，请先取消'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        for run in task.runs.all():
+            _purge_run_artifacts(run, soft_delete=True)
+        task.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     # —— 创建：上传 JMX，物理文件落 <JMETER_HOME>/scripts/<title>.jmx —— #
     def create(self, request, *args, **kwargs):
@@ -859,30 +907,13 @@ class RunViewSet(viewsets.GenericViewSet):
         - 活跃 run（pre_checking/pending/running/cancelling）→ 409 拒绝
         - GenericViewSet 没自带 destroy，DRF Router 仍会按 method=DELETE 路由到这里
         """
-        import shutil  # noqa: PLC0415
-
         run = self.get_object()
         if run.is_active:
             return Response(
                 {'detail': '该 run 仍在执行，先取消'},
                 status=status.HTTP_409_CONFLICT,
             )
-        run.is_deleted = True
-        run.deleted_at = timezone.now()
-        run.save(update_fields=['is_deleted', 'deleted_at'])
-
-        rd = get_runs_dir() / run.run_id
-        if rd.exists():
-            shutil.rmtree(rd, ignore_errors=True)
-        archive = get_runs_dir() / f'{run.run_id}.tar.gz'
-        archive.unlink(missing_ok=True)
-
-        try:
-            influxdb_svc.delete_run_data(run.run_id)
-        except Exception:  # noqa: BLE001
-            # InfluxDB DELETE 失败不阻断：retention policy 30d 自然 GC
-            pass
-
+        _purge_run_artifacts(run, soft_delete=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'], url_path='cancel')

@@ -26,6 +26,16 @@ function onStepChange(stepId: string) {
   router.replace({ query: { ...route.query, step: stepId } })
 }
 
+// wizard 新建上传成功 → 把 task.id 写回 URL。
+// 必须做这步：MainLayout 的 <RouterView :key="r.fullPath"> 让 ?step= 一变 TasksPage 就
+// 整体重建，重建后 onMounted 看 ?id 才能重拉 task 填回 initialTask；否则切 step 后
+// wizard 的 uploadedTask 会丢，回到 Step 1 又显示空 dropzone。
+function onCreated(task: Task) {
+  initialTask.value = task
+  if (route.query.id === String(task.id)) return
+  router.replace({ query: { ...route.query, id: String(task.id) } })
+}
+
 onMounted(async () => {
   const idParam = route.query.id
   if (typeof idParam === 'string' && idParam) {
@@ -50,6 +60,7 @@ onMounted(async () => {
         :default-biz="defaultBiz"
         @close="handleClose"
         @step-change="onStepChange"
+        @created="onCreated"
       />
     </div>
   </div>

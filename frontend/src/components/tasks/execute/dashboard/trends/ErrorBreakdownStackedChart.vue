@@ -94,6 +94,15 @@ const totalAll = computed(() => BUCKETS.reduce((s, b) => s + totals.value[b], 0)
 
 const hasData = computed(() => totalAll.value > 0)
 
+// 上面那行 chip 同时承担 legend 切换：点 chip 隐藏 / 显示对应桶曲线
+// 内置 echarts legend 已删，避免重复
+const visibleBuckets = ref<Record<Bucket, boolean>>({
+  '4xx': true, '5xx': true, timeout: true, connect_error: true, assertion: true, other: true,
+})
+function toggleBucket(b: Bucket) {
+  visibleBuckets.value[b] = !visibleBuckets.value[b]
+}
+
 const option = computed(() => {
   const axisColor = props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'
   const gridLine = props.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'
@@ -106,10 +115,6 @@ const option = computed(() => {
       backgroundColor: props.isDark ? 'rgba(20,20,22,0.92)' : 'rgba(255,255,255,0.95)',
       borderColor: props.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
       textStyle: { color: props.isDark ? '#fff' : '#000', fontSize: 11 },
-    },
-    legend: {
-      top: 0, right: 0, itemWidth: 8, itemHeight: 8, itemGap: 8,
-      textStyle: { color: axisColor, fontSize: 10 },
     },
     xAxis: {
       type: 'time' as const,
@@ -128,6 +133,7 @@ const option = computed(() => {
       axisLabel: { color: axisColor, fontSize: 10 },
       splitLine: { lineStyle: { color: gridLine } },
     },
+    // 隐藏的桶传空数组：堆叠图直接收缩；保留 BUCKET 数量稳定（避免 echarts 重建图）
     series: BUCKETS.map((b) => ({
       name: BUCKET_LABEL[b],
       type: 'line' as const,
@@ -136,7 +142,7 @@ const option = computed(() => {
       symbol: 'none',
       lineStyle: { width: 0.6, color: BUCKET_COLOR[b] },
       areaStyle: { color: BUCKET_COLOR[b], opacity: 0.85 },
-      data: data.value[b],
+      data: visibleBuckets.value[b] ? data.value[b] : [],
     })),
   }
 })
@@ -155,13 +161,19 @@ const option = computed(() => {
         </span>
       </HoverTip>
       <div
-        class="text-[10.5px] tabular-nums flex items-center gap-2 flex-wrap justify-end"
+        class="text-[10.5px] tabular-nums flex items-center gap-2 flex-nowrap justify-end overflow-x-auto no-scrollbar"
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
       >
         <span
           v-for="b in BUCKETS"
           :key="b"
-          :style="{ color: BUCKET_COLOR[b] }"
+          class="cursor-pointer select-none flex-shrink-0"
+          :style="{
+            color: BUCKET_COLOR[b],
+            opacity: visibleBuckets[b] ? 1 : 0.35,
+          }"
+          :title="visibleBuckets[b] ? '点击隐藏该桶曲线' : '点击显示该桶曲线'"
+          @click="toggleBucket(b)"
         >{{ BUCKET_LABEL[b] }} {{ totals[b] }}</span>
       </div>
     </div>

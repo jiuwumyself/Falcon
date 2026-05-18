@@ -101,6 +101,9 @@ def _empty_series() -> dict:
         'error_count': [],
         'bytes_recv': [],
         'bytes_sent': [],
+        # OK-only bytes：NetworkChart 剔除失败样本 toggle 用；同分位数策略不拆 KO
+        'bytes_recv_ok': [],
+        'bytes_sent_ok': [],
         'active_users': [],
     }
 
@@ -149,6 +152,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
             'overall': _empty_series(),
             'by_tg': {},
             'by_sampler': {},
+            'by_sampler_by_tg': {},
             'sampler_thread_group': {},
             'by_host': {},
             'totals': _empty_totals(),
@@ -223,7 +227,8 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     overall_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
-        "mean(\"pct99.0\") AS p99_ok_ms "
+        "mean(\"pct99.0\") AS p99_ok_ms, "
+        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='internal' AND \"statut\"='ok'{where_time} "
         "GROUP BY time(1s) fill(none)"
@@ -254,7 +259,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                 overall['p99_ms'].append([ts, float(r['p99_ms'])])
             last_ts = r['time']
 
-        # OK 单独分位数（剔除 KO 样本，给 AI 看真实业务延迟）
+        # OK 单独分位数 + OK 字节速率（剔除 KO 样本，给 AI 看真实业务延迟 / 网络流量）
         for r in client.query(overall_ok_q).get_points():
             ts = _ts_to_ms(r['time'])
             if r.get('p50_ok_ms') is not None:
@@ -263,6 +268,10 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                 overall['p95_ok_ms'].append([ts, float(r['p95_ok_ms'])])
             if r.get('p99_ok_ms') is not None:
                 overall['p99_ok_ms'].append([ts, float(r['p99_ok_ms'])])
+            if r.get('rb_ok') is not None:
+                overall['bytes_recv_ok'].append([ts, float(r['rb_ok'])])
+            if r.get('sb_ok') is not None:
+                overall['bytes_sent_ok'].append([ts, float(r['sb_ok'])])
 
         # KO 单独分位数（看错误样本的延迟特征——快速 4xx 还是慢超时）
         for r in client.query(overall_ko_q).get_points():
@@ -349,13 +358,20 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    # by_tg 的 OK-only 分位数（statut='ok' 切片）—— LatencyChart 剔除失败样本 toggle 用
+    # by_tg 的 OK-only 分位 + OK 字节速率（statut='ok' 切片）——
+    # LatencyChart / NetworkChart 剔除失败样本 toggle 用。
+    # ⚠ 不能用 transaction='all'：JMeter Backend Listener 只对 statut='all' 写
+    # transaction='all' 聚合行，statut='ok'/'ko' 每个 sampler 单独写一行。
+    # 故跨 sampler 取 mean 近似 TG 级 OK p99（不是数学严格的全局 p99，是
+    # JMeter-Influx 的天然限制；同 overall_ok_q 同款 workaround）。
     by_tg_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
-        "mean(\"pct99.0\") AS p99_ok_ms "
+        "mean(\"pct99.0\") AS p99_ok_ms, "
+        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
-        f"AND \"transaction\"='all' AND \"statut\"='ok'{where_time} "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ok'{where_time} "
         "GROUP BY time(1s), \"thread_group\" fill(none)"
     )
     try:
@@ -372,6 +388,10 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                     series['p95_ok_ms'].append([ts, float(r['p95_ok_ms'])])
                 if r.get('p99_ok_ms') is not None:
                     series['p99_ok_ms'].append([ts, float(r['p99_ok_ms'])])
+                if r.get('rb_ok') is not None:
+                    series['bytes_recv_ok'].append([ts, float(r['rb_ok'])])
+                if r.get('sb_ok') is not None:
+                    series['bytes_sent_ok'].append([ts, float(r['sb_ok'])])
     except Exception:  # noqa: BLE001
         pass
 
@@ -424,15 +444,21 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     #   并加小字提示「计划值（per-TG 实测不可拆）」。
 
     # 按 sample label（接口）切片：趋势曲线 hero 区想看到接口级别多线（哪个接口慢、
-    # 哪个接口出错）；KpiBar chip 走 by_tg（TG 级），互不替代。
-    # 每条 sample 行同时带 transaction（=sample label）和 thread_group tag（来自所属
-    # listener），GROUP BY 两者一次取齐 + 顺手记 sampler→TG 映射（前端按 selectedTg filter）。
-    by_sampler: dict[str, dict] = {}
-    # 改 list：同名 sample 跨 TG 时不覆盖，前端用 includes filter。
+    # 哪个接口出错）。两份聚合 + 一份映射，配合前端 effectiveTrendSplit 三种场景：
+    #   1. by_sampler  → 全部模式（不分 TG）：只按 transaction GROUP BY，同名 sampler
+    #      跨 TG 时 count/bytes mean 合一（旧版双维 GROUP BY 会让同 ts 出多点 → 折线
+    #      渲染异常，这里顺手修掉）
+    #   2. by_sampler_by_tg → 切 TG 模式：按 (transaction, thread_group) 双维 GROUP BY，
+    #      lookup [label][tg] 拿到该 TG 内该接口的真实切片
+    #   3. sampler_thread_group → label → 所属 TG 名列表，KpiBar 切 TG 后前端按
+    #      includes(tg) 过滤哪些 sampler 显示
     # 实测：用户 jmx 里"基准测试_学生端"和"压力拐点测试_学生端"两个 TG 共享相同
-    # 4 个 sample label（登录-学生端 / 当前班级任务列表-学生端 等），原 dict[str,str]
-    # 后写覆盖前写 → 前端 chip filter 时部分 TG 找不到该 sample → 错位显示。
+    # 4 个 sample label（登录-学生端 / 当前班级任务列表-学生端 等）。这是 2026-05-17
+    # 修复："切 TG 后趋势图仍显示全部数据"的根因。
+    by_sampler: dict[str, dict] = {}
+    by_sampler_by_tg: dict[str, dict[str, dict]] = {}
     sampler_thread_group: dict[str, list[str]] = {}
+    # — 全部模式聚合：单维 GROUP BY transaction，同 ts 一条值
     by_sampler_q = (
         "SELECT mean(\"count\") AS rps, "
         "mean(\"pct50.0\") AS p50_ms, "
@@ -442,19 +468,14 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='all'{where_time} "
-        "GROUP BY time(1s), \"transaction\", \"thread_group\" fill(none)"
+        "GROUP BY time(1s), \"transaction\" fill(none)"
     )
     try:
         for (_meas, tags), points in client.query(by_sampler_q).items():
             tx = (tags or {}).get('transaction') or ''
-            tg = (tags or {}).get('thread_group') or ''
             if not tx:
                 continue
             series = by_sampler.setdefault(tx, _empty_series())
-            if tg:
-                tg_list = sampler_thread_group.setdefault(tx, [])
-                if tg not in tg_list:
-                    tg_list.append(tg)
             for r in points:
                 ts = _ts_to_ms(r['time'])
                 if r.get('rps') is not None:
@@ -469,6 +490,107 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                     series['bytes_recv'].append([ts, float(r['rb'])])
                 if r.get('sb') is not None:
                     series['bytes_sent'].append([ts, float(r['sb'])])
+    except Exception:  # noqa: BLE001
+        pass
+    # — by_sampler OK 切片：LatencyChart / NetworkChart 全部模式剔除失败样本 toggle 用
+    by_sampler_ok_q = (
+        "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
+        "mean(\"pct95.0\") AS p95_ok_ms, "
+        "mean(\"pct99.0\") AS p99_ok_ms, "
+        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ok'{where_time} "
+        "GROUP BY time(1s), \"transaction\" fill(none)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_sampler_ok_q).items():
+            tx = (tags or {}).get('transaction') or ''
+            if not tx:
+                continue
+            series = by_sampler.setdefault(tx, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                if r.get('p50_ok_ms') is not None:
+                    series['p50_ok_ms'].append([ts, float(r['p50_ok_ms'])])
+                if r.get('p95_ok_ms') is not None:
+                    series['p95_ok_ms'].append([ts, float(r['p95_ok_ms'])])
+                if r.get('p99_ok_ms') is not None:
+                    series['p99_ok_ms'].append([ts, float(r['p99_ok_ms'])])
+                if r.get('rb_ok') is not None:
+                    series['bytes_recv_ok'].append([ts, float(r['rb_ok'])])
+                if r.get('sb_ok') is not None:
+                    series['bytes_sent_ok'].append([ts, float(r['sb_ok'])])
+    except Exception:  # noqa: BLE001
+        pass
+    # — 切 TG 模式聚合：双维 GROUP BY (transaction, thread_group)，同时落 sampler→TG 映射
+    by_sampler_by_tg_q = (
+        "SELECT mean(\"count\") AS rps, "
+        "mean(\"pct50.0\") AS p50_ms, "
+        "mean(\"pct95.0\") AS p95_ms, "
+        "mean(\"pct99.0\") AS p99_ms, "
+        "mean(\"rb\") AS rb, mean(\"sb\") AS sb "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='all'{where_time} "
+        "GROUP BY time(1s), \"transaction\", \"thread_group\" fill(none)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_sampler_by_tg_q).items():
+            tx = (tags or {}).get('transaction') or ''
+            tg = (tags or {}).get('thread_group') or ''
+            if not tx or not tg:
+                continue
+            tg_list = sampler_thread_group.setdefault(tx, [])
+            if tg not in tg_list:
+                tg_list.append(tg)
+            series = by_sampler_by_tg.setdefault(tx, {}).setdefault(tg, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                if r.get('rps') is not None:
+                    series['rps'].append([ts, float(r['rps'])])
+                if r.get('p50_ms') is not None:
+                    series['p50_ms'].append([ts, float(r['p50_ms'])])
+                if r.get('p95_ms') is not None:
+                    series['p95_ms'].append([ts, float(r['p95_ms'])])
+                if r.get('p99_ms') is not None:
+                    series['p99_ms'].append([ts, float(r['p99_ms'])])
+                if r.get('rb') is not None:
+                    series['bytes_recv'].append([ts, float(r['rb'])])
+                if r.get('sb') is not None:
+                    series['bytes_sent'].append([ts, float(r['sb'])])
+    except Exception:  # noqa: BLE001
+        pass
+    # — by_sampler_by_tg OK 切片：切 TG 模式下 LatencyChart / NetworkChart 剔除失败 toggle 用
+    by_sampler_by_tg_ok_q = (
+        "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
+        "mean(\"pct95.0\") AS p95_ok_ms, "
+        "mean(\"pct99.0\") AS p99_ok_ms, "
+        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ok'{where_time} "
+        "GROUP BY time(1s), \"transaction\", \"thread_group\" fill(none)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_sampler_by_tg_ok_q).items():
+            tx = (tags or {}).get('transaction') or ''
+            tg = (tags or {}).get('thread_group') or ''
+            if not tx or not tg:
+                continue
+            series = by_sampler_by_tg.setdefault(tx, {}).setdefault(tg, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                if r.get('p50_ok_ms') is not None:
+                    series['p50_ok_ms'].append([ts, float(r['p50_ok_ms'])])
+                if r.get('p95_ok_ms') is not None:
+                    series['p95_ok_ms'].append([ts, float(r['p95_ok_ms'])])
+                if r.get('p99_ok_ms') is not None:
+                    series['p99_ok_ms'].append([ts, float(r['p99_ok_ms'])])
+                if r.get('rb_ok') is not None:
+                    series['bytes_recv_ok'].append([ts, float(r['rb_ok'])])
+                if r.get('sb_ok') is not None:
+                    series['bytes_sent_ok'].append([ts, float(r['sb_ok'])])
     except Exception:  # noqa: BLE001
         pass
 
@@ -561,6 +683,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         'overall': overall,
         'by_tg': by_tg,
         'by_sampler': by_sampler,
+        'by_sampler_by_tg': by_sampler_by_tg,
         'sampler_thread_group': sampler_thread_group,
         'by_host': by_host,
         'totals': totals,

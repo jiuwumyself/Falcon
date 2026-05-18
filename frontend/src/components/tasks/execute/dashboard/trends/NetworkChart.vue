@@ -7,11 +7,11 @@ import {
   GridComponent, TooltipComponent, TitleComponent, LegendComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { RunMetricsSeries } from '@/types/task'
+import type { RunMetricsSeries, SeriesPoint } from '@/types/task'
 import {
   buildSeriesOption, CONNECT_GROUP, fmtBytesRate, statsOf, type SeriesSpec,
 } from './chartFactory'
-import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
+import { colorFor, widthFor } from './chartColors'
 import { SEMANTIC } from './semanticColors'
 import HoverTip from './HoverTip.vue'
 
@@ -20,40 +20,44 @@ use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent
 const props = withDefaults(defineProps<{
   overall: RunMetricsSeries | null
   byTg: Record<string, RunMetricsSeries>
+  samplerSelected: Record<string, boolean>
+  // 剔除失败样本：有 bytes_recv_ok 数据走 _ok，没有退回 bytes_recv（兼容旧 run）
+  excludeKo: boolean
   isDark: boolean
   /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
   compact?: boolean
 }>(), { compact: false })
 
+const emit = defineEmits<{
+  (e: 'toggleSampler', name: string): void
+}>()
+
 const chartRef = ref<any>(null)
 
 const txList = computed(() => Object.keys(props.byTg).sort())
 
-const initialized = ref(false)
-const legendSelected = ref<Record<string, boolean>>({})
+function isVisible(name: string): boolean {
+  if (name === 'all') return props.samplerSelected['all'] !== false
+  return props.samplerSelected[name] === true
+}
 
-watch(
-  txList,
-  (txs) => {
-    if (initialized.value) return
-    if (!txs.length && !props.overall?.bytes_recv.length) return
-    const recvByTx: Record<string, number> = {}
-    for (const tx of txs) {
-      recvByTx[tx] = statsOf(props.byTg[tx]?.bytes_recv || []).mean
-    }
-    legendSelected.value = pickDefaultSelected(txs, recvByTx, 5)
-    initialized.value = true
-  },
-  { immediate: true },
-)
+// excludeKo=true 时区分两种空：
+//   · bytes_recv_ok === undefined → 老后端没 OK 切片 → 退回 bytes_recv（兼容旧 run）
+//   · bytes_recv_ok === [] → 新后端但该 sample 100% 失败 → 返回空，曲线消失
+function recvFor(series: RunMetricsSeries | null | undefined): SeriesPoint[] {
+  if (!series) return []
+  if (!props.excludeKo) return series.bytes_recv || []
+  if (series.bytes_recv_ok === undefined) return series.bytes_recv || []
+  return series.bytes_recv_ok
+}
 
-const seriesSpecs = computed<SeriesSpec[]>(() => {
-  // 按"接收字节"做主线（参考 Grafana 模板）。表里同时显示 Mean / Max。
+const allSpecs = computed<SeriesSpec[]>(() => {
   const specs: SeriesSpec[] = []
-  if (props.overall?.bytes_recv.length) {
+  const allRecv = recvFor(props.overall)
+  if (allRecv.length) {
     specs.push({
       name: 'all',
-      data: props.overall.bytes_recv,
+      data: allRecv,
       color: colorFor('all'),
       lineWidth: widthFor('all'),
       area: true,
@@ -63,7 +67,7 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
     const series = props.byTg[tx]
     specs.push({
       name: tx,
-      data: series?.bytes_recv || [],
+      data: recvFor(series),
       color: colorFor(tx),
       lineWidth: widthFor(tx),
     })
@@ -71,14 +75,14 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
   return specs
 })
 
+// series 数组保持稳定，通过 legend.selected 控可见 → echarts 不重建图
 const option = computed(() => {
   const base = buildSeriesOption(
-    seriesSpecs.value,
+    allSpecs.value,
     props.isDark,
     'B/s',
-    { showLegend: true, hideXAxisLabel: props.compact },
+    { showLegend: false, hideXAxisLabel: props.compact },
   )
-  // Y 轴格式化成 KiB/MiB
   const yAxis = {
     ...(base as any).yAxis,
     axisLabel: {
@@ -86,18 +90,16 @@ const option = computed(() => {
       formatter: (v: number) => fmtBytesRate(v),
     },
   }
+  const selected: Record<string, boolean> = {}
+  for (const s of allSpecs.value) selected[s.name] = isVisible(s.name)
   return {
     ...base,
     yAxis,
     legend: {
-      ...base.legend,
-      selected: legendSelected.value,
-      type: 'scroll' as const,
+      show: false,
+      data: allSpecs.value.map((s) => s.name),
+      selected,
     },
-    series: base.series.map((s: any) => ({
-      ...s,
-      // tooltip 格式化也走 fmtBytesRate
-    })),
     tooltip: {
       ...base.tooltip,
       formatter: (params: any) => {
@@ -119,21 +121,12 @@ const option = computed(() => {
 })
 
 const tableRows = computed(() =>
-  seriesSpecs.value.map((s) => {
+  allSpecs.value.map((s) => {
     const st = statsOf(s.data)
-    return { name: s.name, color: s.color, mean: st.mean, max: st.max }
+    return { name: s.name, color: s.color, mean: st.mean, max: st.max, visible: isVisible(s.name) }
   }),
 )
 
-function toggleSeries(name: string) {
-  legendSelected.value = {
-    ...legendSelected.value,
-    [name]: !legendSelected.value[name],
-  }
-}
-
-// 表格单元只显示 KiB/s 数值（不带单位），统一行间标度——单位由 header "KB/s" 标注。
-// Y 轴 / tooltip 继续走 fmtBytesRate 自动换算（MiB/s · KiB/s）。
 function fmtKiB(bps: number): string {
   const kib = bps / 1024
   if (kib < 10) return kib.toFixed(2)
@@ -166,7 +159,7 @@ watch(chartRef, (v) => {
       >
         <span class="text-[11.5px]"
               :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-          网络流量（接收） · KB/s
+          网络流量（接收） · KB/s{{ excludeKo ? ' · 剔除失败' : '' }}
         </span>
       </HoverTip>
     </div>
@@ -174,13 +167,14 @@ watch(chartRef, (v) => {
       <VChart
         ref="chartRef"
         :option="option"
+        :update-options="{ notMerge: false, replaceMerge: ['series'] }"
         autoresize
         style="width: 100%; height: 100%"
       />
       <div class="overflow-y-auto no-scrollbar text-[11px] tabular-nums">
         <table class="w-full">
           <thead>
-            <tr :style="{ color: '#3b82f6' }">
+            <tr :style="{ color: SEMANTIC.saturation }">
               <th class="text-left font-medium pb-1.5"></th>
               <th class="text-right font-medium pb-1.5 px-1">Mean</th>
               <th class="text-right font-medium pb-1.5 pl-1">Max</th>
@@ -193,9 +187,9 @@ watch(chartRef, (v) => {
               class="cursor-pointer transition-opacity"
               :style="{
                 color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)',
-                opacity: legendSelected[row.name] === false ? 0.35 : 1,
+                opacity: row.visible ? 1 : 0.35,
               }"
-              @click="toggleSeries(row.name)"
+              @click="emit('toggleSampler', row.name)"
             >
               <td class="py-0.5 max-w-[110px]">
                 <div class="flex items-center gap-1.5 truncate">

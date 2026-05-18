@@ -7,11 +7,11 @@ import {
   GridComponent, TooltipComponent, TitleComponent, LegendComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { RunMetricsSeries } from '@/types/task'
+import type { RunMetricsSeries, SeriesPoint } from '@/types/task'
 import {
   buildSeriesOption, CONNECT_GROUP, statsOf, type SeriesSpec,
 } from './chartFactory'
-import { colorFor, widthFor, pickDefaultSelected } from './chartColors'
+import { colorFor, widthFor } from './chartColors'
 import { SEMANTIC } from './semanticColors'
 import HoverTip from './HoverTip.vue'
 
@@ -20,40 +20,63 @@ use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent
 const props = withDefaults(defineProps<{
   overall: RunMetricsSeries | null
   byTg: Record<string, RunMetricsSeries>
+  // 父组件共享 samplerSelected：visible=true 渲染该 series，其余隐藏（echarts legend.selected 接管）
+  samplerSelected: Record<string, boolean>
+  // 剔除失败样本：'all' 用精确 rps-error_count；per-sampler error_count 为空时
+  // 走 overall.error_rate 比例近似（rps * (1 - rate/100)）
+  excludeKo: boolean
   isDark: boolean
   /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
   compact?: boolean
 }>(), { compact: false })
 
+const emit = defineEmits<{
+  (e: 'toggleSampler', name: string): void
+}>()
+
 const chartRef = ref<any>(null)
 
 const txList = computed(() => Object.keys(props.byTg).sort())
 
-// 默认选中：all + RPS top 5 transaction（首屏不糊）
-const initialized = ref(false)
-const legendSelected = ref<Record<string, boolean>>({})
+/** rps - error_count 对齐扣减；同 1s 时间戳 map 查找 */
+function subtractErrors(rps: SeriesPoint[], errs: SeriesPoint[]): SeriesPoint[] {
+  if (!errs?.length) return rps
+  const errMap = new Map<number, number>()
+  for (const [t, v] of errs) errMap.set(t, v)
+  return rps.map(([t, v]) => [t, Math.max(0, v - (errMap.get(t) || 0))] as SeriesPoint)
+}
 
-watch(
-  txList,
-  (txs) => {
-    if (initialized.value) return
-    if (!txs.length && !props.overall?.rps.length) return
-    const rpsByTx: Record<string, number> = {}
-    for (const tx of txs) {
-      rpsByTx[tx] = statsOf(props.byTg[tx]?.rps || []).mean
-    }
-    legendSelected.value = pickDefaultSelected(txs, rpsByTx, 5)
-    initialized.value = true
-  },
-  { immediate: true },
-)
+/** 比例近似：rps * (1 - error_rate/100)，error_rate 来自 overall */
+function scaleByErrorRate(rps: SeriesPoint[], errRate: SeriesPoint[]): SeriesPoint[] {
+  if (!errRate?.length) return rps
+  const rateMap = new Map<number, number>()
+  for (const [t, v] of errRate) rateMap.set(t, v)
+  return rps.map(([t, v]) => [t, Math.max(0, v * (1 - (rateMap.get(t) || 0) / 100))] as SeriesPoint)
+}
 
-const seriesSpecs = computed<SeriesSpec[]>(() => {
+function rpsFor(series: RunMetricsSeries | null | undefined): SeriesPoint[] {
+  if (!series) return []
+  if (!props.excludeKo) return series.rps || []
+  // 该序列自带 error_count → 精确扣减
+  if (series.error_count?.length) {
+    return subtractErrors(series.rps || [], series.error_count)
+  }
+  // 退到 overall.error_rate 按比例近似（per-sampler 后端不拆 OK/KO）
+  return scaleByErrorRate(series.rps || [], props.overall?.error_rate || [])
+}
+
+function isVisible(name: string): boolean {
+  if (name === 'all') return props.samplerSelected['all'] !== false
+  return props.samplerSelected[name] === true
+}
+
+const allSpecs = computed<SeriesSpec[]>(() => {
   const specs: SeriesSpec[] = []
-  if (props.overall?.rps.length) {
+  const allRps = rpsFor(props.overall)
+  if (allRps.length) {
     specs.push({
       name: 'all',
-      data: props.overall.rps,
+      data: allRps,
       color: colorFor('all'),
       lineWidth: widthFor('all'),
       area: true,
@@ -63,7 +86,7 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
     const series = props.byTg[tx]
     specs.push({
       name: tx,
-      data: series?.rps || [],
+      data: rpsFor(series),
       color: colorFor(tx),
       lineWidth: widthFor(tx),
     })
@@ -71,36 +94,33 @@ const seriesSpecs = computed<SeriesSpec[]>(() => {
   return specs
 })
 
+// option：series 全集稳定（不增不减），通过 legend.selected 控制可见性 →
+// echarts 不重建图，只切换 series 显隐，避免点击 sampler 时整图重画
 const option = computed(() => {
   const base = buildSeriesOption(
-    seriesSpecs.value,
+    allSpecs.value,
     props.isDark,
     'req/s',
-    { showLegend: true, hideXAxisLabel: props.compact },
+    { showLegend: false, hideXAxisLabel: props.compact },
   )
+  const selected: Record<string, boolean> = {}
+  for (const s of allSpecs.value) selected[s.name] = isVisible(s.name)
   return {
     ...base,
     legend: {
-      ...base.legend,
-      selected: legendSelected.value,
-      type: 'scroll' as const,
+      show: false,
+      data: allSpecs.value.map((s) => s.name),
+      selected,
     },
   }
 })
 
 const tableRows = computed(() =>
-  seriesSpecs.value.map((s) => {
+  allSpecs.value.map((s) => {
     const st = statsOf(s.data)
-    return { name: s.name, color: s.color, ...st }
+    return { name: s.name, color: s.color, mean: st.mean, max: st.max, visible: isVisible(s.name) }
   }),
 )
-
-function toggleSeries(name: string) {
-  legendSelected.value = {
-    ...legendSelected.value,
-    [name]: !legendSelected.value[name],
-  }
-}
 
 onMounted(() => {
   if (chartRef.value && chartRef.value.chart) {
@@ -127,7 +147,7 @@ watch(chartRef, (v) => {
       >
         <span class="text-[11.5px]"
               :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-          RPS · req/s
+          RPS · req/s{{ excludeKo ? ' · 剔除失败' : '' }}
         </span>
       </HoverTip>
     </div>
@@ -135,6 +155,7 @@ watch(chartRef, (v) => {
       <VChart
         ref="chartRef"
         :option="option"
+        :update-options="{ notMerge: false, replaceMerge: ['series'] }"
         autoresize
         style="width: 100%; height: 100%"
       />
@@ -154,9 +175,9 @@ watch(chartRef, (v) => {
               class="cursor-pointer transition-opacity"
               :style="{
                 color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)',
-                opacity: legendSelected[row.name] === false ? 0.35 : 1,
+                opacity: row.visible ? 1 : 0.35,
               }"
-              @click="toggleSeries(row.name)"
+              @click="emit('toggleSampler', row.name)"
             >
               <td class="py-0.5 max-w-[110px]">
                 <div class="flex items-center gap-1.5 truncate">

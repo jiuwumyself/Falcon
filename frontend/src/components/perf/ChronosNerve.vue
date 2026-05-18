@@ -59,6 +59,25 @@ function onCreateClick() {
   }
   emit('create')
 }
+
+// 右键监听用 document capture 阶段：之前试过挂在 Motion / 容器 div 都不触发，
+// 怀疑 motion-v 或者外层 wrapper 在事件冒泡前就把 contextmenu 吃掉了。
+// capture phase 最早接收事件，绕过任何后续 stopPropagation；只对带 data-task-id
+// 的祖先节点起效，所以不会影响别处右键（如 wizard 内）的默认行为。
+function onDocContextmenu(e: MouseEvent) {
+  const row = (e.target as HTMLElement)?.closest('[data-task-id]') as HTMLElement | null
+  if (!row) return
+  e.preventDefault()
+  // 必须 stopPropagation：TaskContextMenu mount 时在 bubble 阶段挂了 document
+  // contextmenu close listener；如果让事件继续冒泡，右键新位置时菜单刚 emit 出来
+  // 就被同一事件的 close handler 关掉。
+  e.stopPropagation()
+  const id = row.dataset.taskId
+  if (!id) return
+  emit('contextTask', id, e.clientX, e.clientY)
+}
+onMounted(() => document.addEventListener('contextmenu', onDocContextmenu, true))
+onBeforeUnmount(() => document.removeEventListener('contextmenu', onDocContextmenu, true))
 </script>
 
 <template>
@@ -205,8 +224,8 @@ function onCreateClick() {
             @hover-end="emit('focus', null)"
             @mouseenter="emit('focus', t.id)"
             @mouseleave="emit('focus', null)"
+            :data-task-id="t.id"
             @click="emit('editTask', t.id)"
-            @contextmenu.prevent="(e: MouseEvent) => emit('contextTask', t.id, e.clientX, e.clientY)"
           >
             <!-- Timeline node -->
             <div

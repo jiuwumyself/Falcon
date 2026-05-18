@@ -306,6 +306,8 @@ export interface RunMetricsSeries {
   error_count: SeriesPoint[]   // 每秒失败数（总错误曲线 + by_tg 错误明细用）
   bytes_recv: SeriesPoint[]    // 每秒接收字节
   bytes_sent: SeriesPoint[]    // 每秒发送字节
+  bytes_recv_ok?: SeriesPoint[] // 仅 OK 样本的接收字节速率（NetworkChart 剔除失败用）
+  bytes_sent_ok?: SeriesPoint[] // 仅 OK 样本的发送字节速率（NetworkChart 剔除失败用）
   active_users: SeriesPoint[]
 }
 
@@ -319,13 +321,18 @@ export interface RunMetricsTotals {
 export interface RunMetrics {
   overall: RunMetricsSeries
   by_tg: Record<string, RunMetricsSeries>   // key = ThreadGroup testname（每个 enabled TG 一个 listener，按 TAG_thread_group 切片）
-  by_sampler: Record<string, RunMetricsSeries> // key = JMeter sample label（接口级，趋势曲线切线用）
+  by_sampler: Record<string, RunMetricsSeries> // key = sample label；全部模式接口级多线（单维 GROUP BY transaction，跨 TG 合一）
+  by_sampler_by_tg: Record<string, Record<string, RunMetricsSeries>> // [label][tg] 双键：切 TG 时拿该 TG 内该接口的真实切片
   sampler_thread_group: Record<string, string[]> // sampler → 所属 TG name 列表（跨 TG 同名 sampler 时不止一个）；前端按 selectedTg includes filter
   by_host: Record<string, RunMetricsSeries> // v1.2：key = agent pod_name；单机时只有 1 个 key
   totals: RunMetricsTotals                  // 累计 KPI（KpiBar 全部 chip 用）
   totals_by_tg: Record<string, RunMetricsTotals>  // 按 TG 切片的累计 KPI；key 跟 by_tg 对齐
   tg_planned_users: Record<string, number>  // TG name → 计划线程数（峰值）；累计 chip / 静态线兜底用
-  tg_planned_meta?: Record<string, { kind: TGKind; params: Record<string, any> }>  // TG name → {kind, params}；前端按 plannedCurve 算 ramp-up 波动曲线
+  tg_planned_meta?: Record<string, {
+    kind: TGKind
+    params: Record<string, any>
+    scenario?: ScenarioId | null   // snapshot 里的场景；老 run 无该字段时为 null/undefined，前端走 inferScenarioFromKind 兜底
+  }>  // TG name → {kind, params, scenario}；plannedCurve + ScenarioContextChart 末位卡分发都用它
   last_ts: string                           // 下次轮询的 since 参数
   run: TaskRun                              // 后端附带最新 run 状态
 }
