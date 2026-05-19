@@ -1173,6 +1173,14 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         run_dir = get_runs_dir() / run.run_id
 
+        # --- 缓存优先 ---
+        cached = run_dir / 'cached_sampler_stats.json'
+        if cached.exists():
+            try:
+                return Response(_json.loads(cached.read_text(encoding='utf-8')))
+            except (OSError, _json.JSONDecodeError):
+                pass
+
         # 优先 statistics.json（JMeter -e -o 自动出）
         stats_json = run_dir / 'report' / 'statistics.json'
         if stats_json.exists():
@@ -1199,11 +1207,19 @@ class RunViewSet(viewsets.GenericViewSet):
                     'avg_bytes': float(s.get('receivedKBytesPerSec', 0)) * 1024 / max(s.get('throughput', 1), 1),
                     'top_errors': [],  # statistics.json 不分错误类型；要细的看 error-samples
                 })
+            try:
+                cached.write_text(_json.dumps(results, ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
             return Response(results)
 
         # fallback：扫 jtl
         jtl = run_dir / 'results.jtl'
         if not jtl.exists() or jtl.stat().st_size == 0:
+            try:
+                cached.write_text(_json.dumps([], ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
             return Response([])
 
         agg: dict[str, dict] = {}
@@ -1258,6 +1274,10 @@ class RunViewSet(viewsets.GenericViewSet):
                 'avg_bytes': r['bytes_sum'] / r['total'] if r['total'] else 0,
                 'top_errors': [{'reason': k, 'count': v} for k, v in top],
             })
+        try:
+            cached.write_text(_json.dumps(out, ensure_ascii=False), encoding='utf-8')
+        except OSError:
+            pass
         return Response(out)
 
     @action(detail=True, methods=['get'], url_path='error-samples')
@@ -1272,11 +1292,35 @@ class RunViewSet(viewsets.GenericViewSet):
           → 用于 ErrorByEndpointTable，sum 永远 = 真实总错误数（不被 limit 影响）
         """
         import csv as _csv
+        import json as _json
         run = self.get_object()
         jtl = get_runs_dir() / run.run_id / 'results.jtl'
         aggregate = (request.query_params.get('aggregate') or '').lower() in ('1', 'true', 'yes')
+
+        # --- 缓存优先（仅对无额外过滤条件的查询做缓存）---
+        run_dir = get_runs_dir() / run.run_id
+        use_cache = not any([
+            request.query_params.get('sampler'),
+            request.query_params.get('code_bucket'),
+            request.query_params.get('response_code'),
+        ])
+        if use_cache:
+            cache_name = 'cached_error_samples_agg.json' if aggregate else 'cached_error_samples_detail.json'
+            cached = run_dir / cache_name
+            if cached.exists():
+                try:
+                    return Response(_json.loads(cached.read_text(encoding='utf-8')))
+                except (OSError, _json.JSONDecodeError):
+                    pass
+
         if not jtl.exists() or jtl.stat().st_size == 0:
-            return Response({'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0})
+            empty_resp = {'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0}
+            if use_cache:
+                try:
+                    cached.write_text(_json.dumps(empty_resp, ensure_ascii=False), encoding='utf-8')
+                except OSError:
+                    pass
+            return Response(empty_resp)
 
         try:
             limit = max(1, min(int(request.query_params.get('limit', 50)), 500))
@@ -1426,8 +1470,15 @@ class RunViewSet(viewsets.GenericViewSet):
 
         if aggregate:
             rows = sorted(agg.values(), key=lambda r: r['count'], reverse=True)[:limit]
-            return Response({'aggregates': rows, 'total': total})
-        return Response({'samples': samples, 'total': total})
+            resp_data = {'aggregates': rows, 'total': total}
+        else:
+            resp_data = {'samples': samples, 'total': total}
+        if use_cache:
+            try:
+                cached.write_text(_json.dumps(resp_data, ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
+        return Response(resp_data)
 
     @action(detail=True, methods=['get'], url_path='timeline')
     def timeline(self, request, run_id=None):
