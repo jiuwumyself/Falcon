@@ -1344,70 +1344,11 @@ class RunViewSet(viewsets.GenericViewSet):
                 return '4xx'
             return 'other'
 
-        # errors*.xml（双轨：仅失败样本 + body）。CSV 不带 body，body 必须从这里拿。
-        # 单机模式 = errors.xml；分布式 = errors_<pod>.xml（每台 agent 一份）。
-        # 解析建立 (label, responseCode) → 首条 responseData 索引（同组多条取头一条够用）。
-        #
-        # 性能上限：实测 1.2M 错误 run 的 errors*.xml 合计 3.7 GB，全量 iterparse 要
-        # 10+s，Vite 代理偶发 502，前端切 tab 空白。但同 (label, code) 组合通常 < 50
-        # 个，前几 KB 就采完了；超过 BODY_INDEX_KEY_LIMIT 个 unique key 就提前退出。
-        # 即使 unique 数量没满，扫到 SAMPLE_SCAN_LIMIT 条样本也强退（业务上下文不需要
-        # 完美收集，只是给聚合表配 body 兜底用）。
-        BODY_INDEX_KEY_LIMIT = 200
-        SAMPLE_SCAN_LIMIT = 50_000
-        run_dir = get_runs_dir() / run.run_id
+        # errors.xml 扫描已移至独立的 response-body 端点（按需加载）。
+        # 列表加载不再扫描 errors.xml，彻底消除 lxml iterparse 耗时导致的 502。
+        # body_index 置空；聚合表 / 明细表的 response_body 字段返回空字符串，
+        # 前端点击某行时调 response-body 端点按需拉取。
         body_index: dict[tuple[str, str], str] = {}
-        if run_dir.exists():
-            from lxml import etree as _etree  # noqa: PLC0415
-            scanned = 0
-            done_early = False
-            for errors_xml in sorted(run_dir.glob('errors*.xml')):
-                if done_early:
-                    break
-                if errors_xml.stat().st_size == 0:
-                    continue
-                try:
-                    # iterparse end 事件**先触发子元素**（responseData / cookies 等）
-                    # 再触发父元素 sample/httpSample。如果对子元素调 clear()，会把它
-                    # 们的 text 提前清掉 → 外层 sample.find('responseData').text 空。
-                    # 所以只在父级 sample/httpSample 上 clear()（自动级联清子元素）。
-                    # root 节点用 fast_iter 模式从 parent 删除已处理的 sample，防止
-                    # 流式解析时 root.testResults 无限增长爆内存。
-                    ctx = _etree.iterparse(
-                        str(errors_xml),
-                        events=('end',),
-                        recover=True,
-                    )
-                    for _ev, el in ctx:
-                        if el.tag not in ('sample', 'httpSample'):
-                            continue  # ← 子元素不要 clear，等父级 sample 一起清
-                        if (el.get('s') or '').lower() == 'true':
-                            pass
-                        else:
-                            lab = el.get('lb') or ''
-                            code = el.get('rc') or ''
-                            key = (lab, code)
-                            if key not in body_index:
-                                body_el = el.find('responseData')
-                                if body_el is not None:
-                                    txt = (body_el.text or '').strip()
-                                    if txt:
-                                        body_index[key] = txt[:500]  # 截断防表大
-                        # 释放：清子树 + 从 root 摘除（fast_iter 防内存爆）
-                        el.clear()
-                        parent = el.getparent()
-                        if parent is not None:
-                            parent.remove(el)
-                        # 早退：unique key 数量达上限 或 扫描样本数达上限
-                        scanned += 1
-                        if (
-                            len(body_index) >= BODY_INDEX_KEY_LIMIT
-                            or scanned >= SAMPLE_SCAN_LIMIT
-                        ):
-                            done_early = True
-                            break
-                except OSError:
-                    continue
 
         samples: list[dict] = []
         agg: dict[tuple[str, str], dict] = {}
@@ -1479,6 +1420,62 @@ class RunViewSet(viewsets.GenericViewSet):
             except OSError:
                 pass
         return Response(resp_data)
+
+    @action(detail=True, methods=['get'], url_path='response-body')
+    def response_body(self, request, run_id=None):
+        """按需从 errors.xml 拉取单条错误样本的 response body。
+
+        前端在错误明细表点击某行时调用，传 label + response_code 定位首条匹配样本。
+        只扫到第一个匹配 key 就退出，避免全量 iterparse。"""
+        label = (request.query_params.get('label') or '').strip()
+        code = (request.query_params.get('response_code') or '').strip()
+        if not label and not code:
+            return Response({'body': ''})
+
+        run = self.get_object()
+        run_dir = get_runs_dir() / run.run_id
+        if not run_dir.exists():
+            return Response({'body': ''})
+
+        from lxml import etree as _etree  # noqa: PLC0415
+        for errors_xml in sorted(run_dir.glob('errors*.xml')):
+            if errors_xml.stat().st_size == 0:
+                continue
+            try:
+                ctx = _etree.iterparse(
+                    str(errors_xml),
+                    events=('end',),
+                    recover=True,
+                )
+                for _ev, el in ctx:
+                    if el.tag not in ('sample', 'httpSample'):
+                        continue
+                    if (el.get('s') or '').lower() == 'true':
+                        el.clear()
+                        parent = el.getparent()
+                        if parent is not None:
+                            parent.remove(el)
+                        continue
+                    # 匹配 label + code
+                    lab = el.get('lb') or ''
+                    rc = el.get('rc') or ''
+                    matched = True
+                    if label and lab != label:
+                        matched = False
+                    if code and rc != code:
+                        matched = False
+                    if matched:
+                        body_el = el.find('responseData')
+                        txt = (body_el.text or '').strip() if body_el is not None else ''
+                        el.clear()
+                        return Response({'body': txt[:2000]})
+                    el.clear()
+                    parent = el.getparent()
+                    if parent is not None:
+                        parent.remove(el)
+            except OSError:
+                continue
+        return Response({'body': ''})
 
     @action(detail=True, methods=['get'], url_path='timeline')
     def timeline(self, request, run_id=None):

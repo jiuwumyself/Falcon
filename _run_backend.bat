@@ -7,10 +7,10 @@ cd /d "%~dp0backend"
 
 echo.
 echo [Falcon Backend] 当前目录: %CD%
-echo [Falcon Backend] 启动 waitress (4 threads) @ 8000 ...
+echo [Falcon Backend] 启动 waitress (8 threads) @ 8000 ...
 echo.
 
-venv\Scripts\python.exe -m waitress --host=0.0.0.0 --port=8000 --threads=4 config.wsgi:application
+venv\Scripts\python.exe -m waitress --host=0.0.0.0 --port=8000 --threads=8 config.wsgi:application
 
 echo.
 echo [Falcon Backend] 进程已退出。按任意键关闭窗口。
