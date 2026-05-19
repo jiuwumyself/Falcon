@@ -7,7 +7,7 @@ import {
 import { api, ApiError, tasksApi } from '@/lib/api'
 import type {
   Task, ThreadGroupInfo, ThreadGroupConfig, ThreadGroupsResponse,
-  ValidateResult, ValidateResponse, ExecutedTg, ScenarioId,
+  ValidateResult, ValidateResponse, ExecutedTg, ScenarioId, TGKind,
 } from '@/types/task'
 import ScenarioTabs from './config/ScenarioTabs.vue'
 import ThreadGroupPicker from './config/ThreadGroupPicker.vue'
@@ -40,6 +40,23 @@ const threadGroups = ref<ThreadGroupInfo[]>([])    // 仅启用的 TG
 const disabledNames = ref<string[]>([])            // 禁用的 TG 名字（仅展示提示）
 const configs = ref<ThreadGroupConfig[]>([])       // 各 TG 的当前配置（同 path 对齐）
 const currentPath = ref<string>('')                // 当前在编辑哪个 TG
+
+// 每个 TG 每个场景的"上次编辑值"快照，切走前存、切回时恢复，
+// 避免「场景切换 → 切回 → 参数被默认值覆盖」。session 级，不入库。
+const scenarioMemo = ref<Record<string, Partial<Record<ScenarioId, { kind: TGKind; params: Record<string, any> }>>>>({})
+
+function cloneParams(params: Record<string, any>): Record<string, any> {
+  return JSON.parse(JSON.stringify(params))
+}
+
+function memoSet(path: string, scenario: ScenarioId, kind: TGKind, params: Record<string, any>) {
+  if (!scenarioMemo.value[path]) scenarioMemo.value[path] = {}
+  scenarioMemo.value[path][scenario] = { kind, params: cloneParams(params) }
+}
+
+function memoGet(path: string, scenario: ScenarioId) {
+  return scenarioMemo.value[path]?.[scenario]
+}
 const environmentId = ref<number | null>(null)
 const serviceNames = ref<string[]>([])
 const serviceSaving = ref(false)
@@ -84,21 +101,26 @@ async function load() {
     const savedByPath = new Map<string, ThreadGroupConfig>()
     for (const c of r.saved_config) savedByPath.set(c.path, c)
 
+    scenarioMemo.value = {}
     configs.value = enabled.map((tg) => {
       const saved = savedByPath.get(tg.path)
       if (saved) {
         // 兼容老数据：没 scenario 字段就按 kind 反推
         const scenario = saved.scenario ?? inferScenarioFromKind(saved.kind)
-        return { ...saved, scenario }
+        const cfg: ThreadGroupConfig = { ...saved, scenario, params: cloneParams(saved.params) }
+        memoSet(tg.path, scenario, cfg.kind, cfg.params)
+        return cfg
       }
       // 新 TG：默认 load 场景
       const def = SCENARIOS.find((s) => s.id === 'load')!
-      return {
+      const cfg: ThreadGroupConfig = {
         path: tg.path,
         scenario: 'load',
         kind: def.kind,
-        params: { ...def.defaultParams },
+        params: cloneParams(def.defaultParams),
       }
+      memoSet(tg.path, 'load', cfg.kind, cfg.params)
+      return cfg
     })
 
     currentPath.value = enabled[0]?.path ?? ''
@@ -113,28 +135,41 @@ async function load() {
 
 watch(() => props.task.id, load, { immediate: true })
 
-// —— 场景切换：重写当前 TG 的 kind + params —— //
+// —— 场景切换：先快照当前 scenario 的参数，再从 memo 恢复 next 的参数（无则取默认）—— //
 function onScenarioChange(next: ScenarioId) {
-  const def = scenarioById(next)
   const i = configs.value.findIndex((c) => c.path === currentPath.value)
   if (i < 0) return
+  const cur = configs.value[i]
+  if (cur.scenario === next) return
+
+  // 1. 把当前 scenario 的最新编辑值存进 memo
+  if (cur.scenario) {
+    memoSet(cur.path, cur.scenario, cur.kind, cur.params)
+  }
+
+  // 2. 从 memo 恢复 next；没有则用场景默认
+  const cached = memoGet(cur.path, next)
+  const def = scenarioById(next)
   const arr = configs.value.slice()
   arr[i] = {
-    path: currentPath.value,
+    path: cur.path,
     scenario: next,
-    kind: def.kind,
-    params: { ...def.defaultParams },
+    kind: cached?.kind ?? def.kind,
+    params: cached ? cloneParams(cached.params) : cloneParams(def.defaultParams),
   }
   configs.value = arr
 }
 
-// —— 参数微调：保留当前 TG 的 scenario / kind —— //
+// —— 参数微调：保留当前 TG 的 scenario / kind，并同步进 memo —— //
 function onParamsChange(next: ThreadGroupConfig) {
   const i = configs.value.findIndex((c) => c.path === currentPath.value)
   if (i < 0) return
   const arr = configs.value.slice()
   arr[i] = next
   configs.value = arr
+  if (next.scenario) {
+    memoSet(next.path, next.scenario, next.kind, next.params)
+  }
 }
 
 // service_names 改变时单独 PATCH /tasks/:id/，与线程组配置解耦

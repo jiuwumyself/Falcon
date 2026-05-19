@@ -28,16 +28,22 @@ const props = defineProps<{
 
 interface ScatterPoint { vu: number; rps: number; ts: number }
 
-// 按 timestamp 对齐两条序列，O(N+M) 双指针
+// 按 timestamp 对齐两条序列，O(N+M) 双指针。
+// rps 来自 InfluxDB 1s 桶（地板时钟），vu 可能来自 dense plannedCurve（从
+// run.started_at 起算每 1s），两者时间戳通常差 < 1s 不严格等。exact get 会全 miss
+// 让散点图空，所以在 ±1.5s 窗口内做最近匹配。
 const points = computed<ScatterPoint[]>(() => {
   if (!props.rps.length || !props.vu.length) return []
-  const rpsMap = new Map<number, number>()
-  for (const [t, v] of props.rps) rpsMap.set(t, v)
+  const NEAR_MS = 1500
+  const vuArr = props.vu
   const out: ScatterPoint[] = []
-  for (const [t, vu] of props.vu) {
-    if (vu <= 0) continue
-    const r = rpsMap.get(t)
-    if (r == null) continue
+  let j = 0
+  for (const [t, r] of props.rps) {
+    while (j + 1 < vuArr.length && Math.abs(vuArr[j + 1][0] - t) <= Math.abs(vuArr[j][0] - t)) {
+      j++
+    }
+    const [vt, vu] = vuArr[j]
+    if (vu <= 0 || Math.abs(vt - t) > NEAR_MS) continue
     out.push({ vu, rps: r, ts: t })
   }
   return out

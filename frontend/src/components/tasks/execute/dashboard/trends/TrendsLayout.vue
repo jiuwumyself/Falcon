@@ -84,7 +84,15 @@ const effectiveOverall = computed(() => {
       // per-TG 实测并发 JMeter 拿不到（maxAT 全局）→ 用配置 kind+params 算计划曲线
       const m = meta?.[tg]
       if (m && startMs > 0) {
-        if (series.rps.length > 0) {
+        // rps 足够密时按 rps 时间戳对齐（ThroughputPerVuChart 的 Map 精确匹配能用上）；
+        // 稀疏 rps（hold=0 / shutdown 太快导致采到的样本 ≤ 4 个时）→ 退到 dense
+        // plannedCurve（1s 一个点），否则 active_users 只有 1-2 个点 echarts 画不出线，
+        // ConcurrencyChart 看上去是空的。
+        const RPS_DENSE_THRESHOLD = 5
+        const endMs = props.run?.finished_at
+          ? new Date(props.run.finished_at).getTime()
+          : Date.now()
+        if (series.rps.length >= RPS_DENSE_THRESHOLD) {
           const timestamps = series.rps.map(([t]) => t)
           return {
             ...series,
@@ -93,9 +101,6 @@ const effectiveOverall = computed(() => {
             ),
           }
         }
-        const endMs = props.run?.finished_at
-          ? new Date(props.run.finished_at).getTime()
-          : Date.now()
         return {
           ...series,
           active_users: plannedCurve(m.kind, m.params, startMs, endMs, 1000),

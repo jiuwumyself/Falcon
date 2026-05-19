@@ -368,14 +368,35 @@ def _scale_thread_groups_to_shard(
                 'unit': params.get('unit') or 'S',
             }
         elif kind == 'UltimateThreadGroup':
-            users = params.get('users') or 1
-            params = {
-                'users': max(1, math.ceil(int(users) * factor)),
-                'initial_delay': params.get('initial_delay') or 0,
-                'ramp_up': params.get('ramp_up') or 0,
-                'hold': params.get('hold') or 0,
-                'shutdown': params.get('shutdown') or 0,
-            }
+            # task.thread_groups_config 用的是多峰 `rows: [...]` 格式（jmx.py 的
+            # `list_thread_groups` 也是这么回出来的）。原实现拿 params.get('users')
+            # 当作单行兼容字段，多行配置时它一定是 None → 缩成 users=1 + 所有时间
+            # 字段=0 的退化 TG，每 agent 实际只跑 1 个瞬退 user。3 agent × 1 user =
+            # 3 个 spike sample 与 JTL 完全吻合。
+            rows = params.get('rows')
+            if isinstance(rows, list) and rows:
+                params = {
+                    'rows': [
+                        {
+                            'users': max(1, math.ceil(int(r.get('users') or 0) * factor)),
+                            'initial_delay': int(r.get('initial_delay') or 0),
+                            'ramp_up': int(r.get('ramp_up') or 0),
+                            'hold': int(r.get('hold') or 0),
+                            'shutdown': int(r.get('shutdown') or 0),
+                        }
+                        for r in rows if isinstance(r, dict)
+                    ],
+                }
+            else:
+                # 老单行兼容（极少见，仅手工脚本可能走到）
+                users = params.get('users') or 1
+                params = {
+                    'users': max(1, math.ceil(int(users) * factor)),
+                    'initial_delay': params.get('initial_delay') or 0,
+                    'ramp_up': params.get('ramp_up') or 0,
+                    'hold': params.get('hold') or 0,
+                    'shutdown': params.get('shutdown') or 0,
+                }
         elif kind == 'ArrivalsThreadGroup':
             rps = params.get('target_rps') or 1
             params = {

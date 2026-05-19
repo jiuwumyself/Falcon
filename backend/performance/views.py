@@ -1303,11 +1303,23 @@ class RunViewSet(viewsets.GenericViewSet):
         # errors*.xml（双轨：仅失败样本 + body）。CSV 不带 body，body 必须从这里拿。
         # 单机模式 = errors.xml；分布式 = errors_<pod>.xml（每台 agent 一份）。
         # 解析建立 (label, responseCode) → 首条 responseData 索引（同组多条取头一条够用）。
+        #
+        # 性能上限：实测 1.2M 错误 run 的 errors*.xml 合计 3.7 GB，全量 iterparse 要
+        # 10+s，Vite 代理偶发 502，前端切 tab 空白。但同 (label, code) 组合通常 < 50
+        # 个，前几 KB 就采完了；超过 BODY_INDEX_KEY_LIMIT 个 unique key 就提前退出。
+        # 即使 unique 数量没满，扫到 SAMPLE_SCAN_LIMIT 条样本也强退（业务上下文不需要
+        # 完美收集，只是给聚合表配 body 兜底用）。
+        BODY_INDEX_KEY_LIMIT = 200
+        SAMPLE_SCAN_LIMIT = 50_000
         run_dir = get_runs_dir() / run.run_id
         body_index: dict[tuple[str, str], str] = {}
         if run_dir.exists():
             from lxml import etree as _etree  # noqa: PLC0415
+            scanned = 0
+            done_early = False
             for errors_xml in sorted(run_dir.glob('errors*.xml')):
+                if done_early:
+                    break
                 if errors_xml.stat().st_size == 0:
                     continue
                 try:
@@ -1342,6 +1354,14 @@ class RunViewSet(viewsets.GenericViewSet):
                         parent = el.getparent()
                         if parent is not None:
                             parent.remove(el)
+                        # 早退：unique key 数量达上限 或 扫描样本数达上限
+                        scanned += 1
+                        if (
+                            len(body_index) >= BODY_INDEX_KEY_LIMIT
+                            or scanned >= SAMPLE_SCAN_LIMIT
+                        ):
+                            done_early = True
+                            break
                 except OSError:
                     continue
 

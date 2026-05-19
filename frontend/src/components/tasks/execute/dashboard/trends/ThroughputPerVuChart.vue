@@ -26,13 +26,21 @@ const chartRef = ref<any>(null)
 
 const derived = computed<SeriesPoint[]>(() => {
   if (!props.rps.length || !props.vu.length) return []
-  // 用 VU 的时间戳为基准（VU 序列通常更稀疏 + 稳定），map RPS 按时间最近匹配
-  const rpsMap = new Map<number, number>()
-  for (const [t, v] of props.rps) rpsMap.set(t, v)
+  // 按 RPS 时间戳为基准对齐 VU。RPS 来自 InfluxDB 1s 桶（地板对齐时钟），
+  // VU 可能来自 dense plannedCurve（从 run.started_at 起算每 1s 一个点）—
+  // 两者时间戳通常不严格相等，需要在 ±1.5s 窗口内做最近匹配，否则 exact get
+  // 永远 miss，整条人均吞吐量曲线全 0。
+  const NEAR_MS = 1500
+  const vuArr = props.vu
   const out: SeriesPoint[] = []
-  for (const [t, vu] of props.vu) {
-    if (vu <= 0) continue
-    const r = rpsMap.get(t) ?? 0
+  let j = 0
+  for (const [t, r] of props.rps) {
+    // 双指针推进：vuArr 按 ts 升序，找最接近 t 的 vu 点
+    while (j + 1 < vuArr.length && Math.abs(vuArr[j + 1][0] - t) <= Math.abs(vuArr[j][0] - t)) {
+      j++
+    }
+    const [vt, vu] = vuArr[j]
+    if (vu <= 0 || Math.abs(vt - t) > NEAR_MS) continue
     out.push([t, r / vu])
   }
   return out

@@ -18,6 +18,9 @@ use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent
 const props = defineProps<{
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  // 当 vu 是按 snapshot 兜底的计划曲线时传 true。跟随率失去实测含义 → 不计算；
+  // 图例和峰值标签前缀加"计划"
+  vuIsPlanned?: boolean
   xRange?: [number, number] | null
   isDark: boolean
 }>()
@@ -27,6 +30,7 @@ const peakRps = computed(() => props.rps.reduce((m, [, v]) => v > m ? v : m, 0))
 
 // 跟随性度量：vu 爬到 80% 峰值时 RPS 达到峰值 RPS 的百分比
 const followRatio = computed(() => {
+  if (props.vuIsPlanned) return null   // 计划 VU 没有"实测跟随"语义
   if (!peakVu.value || !peakRps.value) return null
   const target = peakVu.value * 0.8
   // 找 VU 首次 >= target 的时刻
@@ -47,7 +51,9 @@ const followRatio = computed(() => {
   return nearestRps / peakRps.value
 })
 
-const hasData = computed(() => props.rps.length > 0 && props.vu.length > 0)
+// RPS 或 VU 任一非空就出图（实测 RPS 极稀疏时，至少还能看计划 VU 曲线）
+const hasData = computed(() => props.rps.length > 0 || props.vu.length > 0)
+const vuSeriesName = computed(() => props.vuIsPlanned ? 'VU（计划）' : 'VU')
 
 const option = computed(() => {
   const axisColor = props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'
@@ -99,12 +105,16 @@ const option = computed(() => {
     ],
     series: [
       {
-        name: 'VU',
+        name: vuSeriesName.value,
         type: 'line' as const,
         yAxisIndex: 0,
-        step: 'end' as const,
+        step: props.vuIsPlanned ? undefined : ('end' as const),
         symbol: 'none',
-        lineStyle: { width: 2, color: '#94a3b8' },
+        lineStyle: {
+          width: 2,
+          color: '#94a3b8',
+          type: props.vuIsPlanned ? ('dashed' as const) : ('solid' as const),
+        },
         areaStyle: { color: '#94a3b8', opacity: 0.12 },
         data: props.vu,
       },
@@ -138,7 +148,7 @@ const option = computed(() => {
         class="text-[10.5px] tabular-nums"
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
       >
-        <span v-if="peakVu">峰值 {{ Math.round(peakVu) }} VU · {{ peakRps.toFixed(0) }} RPS</span>
+        <span v-if="peakVu">峰值 {{ Math.round(peakVu) }} VU{{ vuIsPlanned ? '（计划）' : '' }} · {{ peakRps.toFixed(0) }} RPS</span>
         <span
           v-if="followRatio !== null"
           :style="{ color: followRatio >= 0.8 ? '#10b981' : (followRatio >= 0.5 ? '#f59e0b' : '#ef4444') }"

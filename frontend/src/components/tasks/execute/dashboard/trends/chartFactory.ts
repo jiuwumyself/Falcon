@@ -138,7 +138,10 @@ export function buildSeriesOption(
       name: s.name,
       data: s.data,
       smooth: true,
-      symbol: 'none' as const,
+      // 稀疏 series（≤ 5 点）画圆点否则单点线不可见（hold=0 这类极短场景），
+      // 密集 series 维持原 'none' 风格避免圆点糊一片。
+      symbol: s.data.length <= 5 ? ('circle' as const) : ('none' as const),
+      symbolSize: 5,
       stack: s.stack,
       lineStyle: { color: s.color, width: s.lineWidth ?? 1.2 },
       itemStyle: { color: s.color },
