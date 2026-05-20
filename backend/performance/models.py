@@ -122,6 +122,13 @@ class Task(models.Model):
     # 多选语义：一个压测任务可能同时关联上下游多个服务（链路一起测）。
     service_names = models.JSONField(default=list, blank=True)
 
+    # prometheus_source: Step 2 选的 Prometheus 数据源，Step 3 查服务监控指标用。
+    # 与 service_names 一起在 Step 2 保存时写入；null = 未选数据源（降级为空面板）。
+    prometheus_source = models.ForeignKey(
+        'PrometheusDataSource', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='tasks',
+    )
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='tasks',

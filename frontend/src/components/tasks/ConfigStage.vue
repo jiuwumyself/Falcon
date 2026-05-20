@@ -59,6 +59,7 @@ function memoGet(path: string, scenario: ScenarioId) {
 }
 const environmentId = ref<number | null>(null)
 const serviceNames = ref<string[]>([])
+const prometheusSourceId = ref<number | null>(null)
 const serviceSaving = ref(false)
 const serviceError = ref('')
 const validateResults = ref<ValidateResult[]>([])
@@ -126,6 +127,7 @@ async function load() {
     currentPath.value = enabled[0]?.path ?? ''
     environmentId.value = r.environment ?? null
     serviceNames.value = Array.isArray(props.task.service_names) ? [...props.task.service_names] : []
+    prometheusSourceId.value = props.task.prometheus_source ?? null
   } catch (e) {
     loadError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
@@ -172,18 +174,41 @@ function onParamsChange(next: ThreadGroupConfig) {
   }
 }
 
-// service_names 改变时单独 PATCH /tasks/:id/，与线程组配置解耦
+// service_names / prometheus_source 改变时单独 PATCH /tasks/:id/，与线程组配置解耦
 async function onServiceNamesChange(next: string[]) {
   serviceNames.value = next
   serviceError.value = ''
   serviceSaving.value = true
   try {
-    const updated = await tasksApi.update(props.task.id, { service_names: next })
+    const updated = await tasksApi.update(props.task.id, {
+      service_names: next,
+      prometheus_source: prometheusSourceId.value,
+    })
     emit('task-updated', updated)
   } catch (e) {
     serviceError.value = e instanceof ApiError ? e.humanMessage : String(e)
   } finally {
     serviceSaving.value = false
+  }
+}
+
+async function onPrometheusSourceChange(sourceId: number | null) {
+  prometheusSourceId.value = sourceId
+  // 如果已有选中的服务，立即保存数据源变更
+  if (serviceNames.value.length || sourceId) {
+    serviceSaving.value = true
+    serviceError.value = ''
+    try {
+      const updated = await tasksApi.update(props.task.id, {
+        prometheus_source: sourceId,
+        service_names: serviceNames.value,
+      })
+      emit('task-updated', updated)
+    } catch (e) {
+      serviceError.value = e instanceof ApiError ? e.humanMessage : String(e)
+    } finally {
+      serviceSaving.value = false
+    }
   }
 }
 
@@ -324,8 +349,10 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
             </p>
             <ServicePicker
               :model-value="serviceNames"
+              :source-id="prometheusSourceId"
               :is-dark="isDark"
               @update:model-value="onServiceNamesChange"
+              @update:source-id="onPrometheusSourceChange"
             />
             <p v-if="serviceError" class="text-[11px] text-red-500 flex items-center gap-1">
               <AlertCircle :size="11" /> {{ serviceError }}

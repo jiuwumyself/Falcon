@@ -50,7 +50,7 @@ class TaskSerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'biz_category',
             'jmx_filename', 'jmx_hash',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
-            'thread_groups_config', 'environment', 'service_names',
+            'thread_groups_config', 'environment', 'service_names', 'prometheus_source',
             'csv_bindings', 'status', 'active_run_id', 'config_stale',
             'owner', 'created_at', 'updated_at',
         ]

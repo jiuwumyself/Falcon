@@ -1,19 +1,61 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, onBeforeUnmount } from 'vue'
-import { Server, Plus, X, Search, Info, Check } from 'lucide-vue-next'
-import { useServices } from '@/composables/useServices'
+import { computed, ref, nextTick, onBeforeUnmount, watch } from 'vue'
+import { Server, Plus, X, Search, Info, Check, Database } from 'lucide-vue-next'
+import { prometheusSourcesApi } from '@/lib/api'
+import type { PrometheusDataSource } from '@/types/task'
 
 const props = defineProps<{
   modelValue: string[]       // 已选的 service name 列表
+  sourceId: number | null    // 已选的 Prometheus 数据源 ID
   isDark: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: string[]): void
+  (e: 'update:sourceId', v: number | null): void
 }>()
 
-// G3：mock → 真 API（后端 Service 表）；composable 模块级 cache 共享
-const { services } = useServices()
+// ── Prometheus 数据源 + 服务发现 ──
+const sources = ref<PrometheusDataSource[]>([])
+const sourcesLoading = ref(false)
+const selectedSourceId = ref<number | null>(props.sourceId)
+const prometheusServices = ref<string[]>([])
+const servicesLoading = ref(false)
+
+// 初始化：拉数据源列表
+;(async () => {
+  sourcesLoading.value = true
+  try {
+    sources.value = await prometheusSourcesApi.list()
+    // 自动选第一个（如果 props.sourceId 为空）
+    if (sources.value.length && !selectedSourceId.value) {
+      selectedSourceId.value = sources.value[0].id
+    }
+  } catch {
+    // 数据源不可达 → services 留空
+  } finally {
+    sourcesLoading.value = false
+  }
+})()
+
+// 数据源切换时拉服务列表 + 通知父组件
+watch(selectedSourceId, async (id) => {
+  emit('update:sourceId', id)
+  if (!id) {
+    prometheusServices.value = []
+    return
+  }
+  servicesLoading.value = true
+  try {
+    const r = await prometheusSourcesApi.services(id)
+    prometheusServices.value = r.services
+  } catch {
+    prometheusServices.value = []
+  } finally {
+    servicesLoading.value = false
+  }
+})
+
 const open = ref(false)
 const query = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -21,15 +63,11 @@ const wrapper = ref<HTMLElement | null>(null)
 
 const selected = computed(() => new Set(props.modelValue))
 
-// 候选过滤：按名字 + 描述模糊匹配（大小写不敏感）；已选项也展示但带 ✓ 状态
+// 候选过滤：按名字模糊匹配（大小写不敏感）
 const candidates = computed(() => {
   const q = query.value.trim().toLowerCase()
-  if (!q) return services.value
-  return services.value.filter(
-    (s) =>
-      s.name.toLowerCase().includes(q) ||
-      s.description.toLowerCase().includes(q),
-  )
+  if (!q) return prometheusServices.value
+  return prometheusServices.value.filter((name) => name.toLowerCase().includes(q))
 })
 
 function toggle(name: string) {
@@ -67,6 +105,36 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
 
 <template>
   <div ref="wrapper" class="relative">
+    <!-- 数据源选择器 -->
+    <div class="flex items-center gap-1.5 mb-1.5">
+      <Database
+        :size="11"
+        :color="isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.45)'"
+      />
+      <select
+        v-model="selectedSourceId"
+        class="text-[11px] rounded px-1.5 py-0.5 outline-none"
+        :style="{
+          background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+          color: isDark ? '#fff' : '#1a1a2e',
+          border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`,
+        }"
+      >
+        <option v-if="sourcesLoading" :value="null">加载中…</option>
+        <option v-else-if="!sources.length" :value="null">未配置数据源</option>
+        <option
+          v-for="src in sources"
+          :key="src.id"
+          :value="src.id"
+        >{{ src.name }}</option>
+      </select>
+      <span
+        v-if="servicesLoading"
+        class="text-[10px]"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
+      >加载服务…</span>
+    </div>
+
     <!-- chips 容器 + 添加按钮 -->
     <div
       class="flex flex-wrap items-center gap-1.5 p-1.5 rounded-lg min-h-[34px]"
@@ -170,44 +238,31 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
         >无匹配服务</p>
 
         <button
-          v-for="s in candidates"
-          :key="s.id"
+          v-for="name in candidates"
+          :key="name"
           class="w-full flex items-start gap-2 px-3 py-1.5 text-[12px] cursor-pointer hover:bg-black/5"
           :style="{
-            color: selected.has(s.name)
+            color: selected.has(name)
               ? (isDark ? '#93c5fd' : '#2563eb')
               : (isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)'),
           }"
-          @click="toggle(s.name)"
+          @click="toggle(name)"
         >
           <span
             class="mt-0.5 flex items-center justify-center w-3.5 h-3.5 rounded-sm flex-shrink-0"
             :style="{
-              background: selected.has(s.name)
+              background: selected.has(name)
                 ? '#3b82f6'
                 : (isDark ? 'transparent' : 'transparent'),
-              border: `1px solid ${selected.has(s.name)
+              border: `1px solid ${selected.has(name)
                 ? '#3b82f6'
                 : (isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)')}`,
             }"
           >
-            <Check v-if="selected.has(s.name)" :size="10" color="#fff" />
+            <Check v-if="selected.has(name)" :size="10" color="#fff" />
           </span>
           <span class="flex-1 text-left min-w-0">
-            <span class="flex items-center gap-1.5">
-              <span class="truncate">{{ s.name }}</span>
-              <span
-                class="text-[9px] px-1.5 py-0.5 rounded flex-shrink-0"
-                :style="{
-                  background: isDark ? 'rgba(59,130,246,0.12)' : 'rgba(59,130,246,0.1)',
-                  color: '#3b82f6',
-                }"
-              >{{ s.grafana_panels.length }} 面板</span>
-            </span>
-            <span
-              class="block text-[10px] mt-0.5 truncate"
-              :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
-            >{{ s.description }}</span>
+            <span class="truncate">{{ name }}</span>
           </span>
         </button>
       </div>
@@ -221,7 +276,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
       >
         <span class="flex items-center gap-1">
           <Info :size="10" />
-          数据来自后端 Service 表，编辑走 admin
+          数据来自 Prometheus，数据源在 admin 配置
         </span>
         <span v-if="modelValue.length">已选 {{ modelValue.length }}</span>
       </div>

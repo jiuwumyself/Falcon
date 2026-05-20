@@ -1,6 +1,7 @@
 import type {
   Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
-  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, RunEvent,
+  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, PrometheusDataSource,
+  PrometheusMetricsResponse, PrometheusServiceList, RunEvent,
   RunMetrics, SamplerStat, Service, Task, TaskRun,
 } from '@/types/task'
 
@@ -218,5 +219,32 @@ export const loadGeneratorsApi = {
     }),
   systemMetrics: (id: number) =>
     api<SystemMetrics>(`/load-generators/${id}/system-metrics/`),
+}
+
+// ─── Prometheus 数据源 API ──────────────────────────────────────────
+export const prometheusSourcesApi = {
+  /** 数据源列表（Step 2 下拉框用） */
+  list: () => api<PrometheusDataSource[]>('/prometheus-sources/'),
+  /** 从指定数据源拉 job 列表（Step 2 服务多选） */
+  services: (sourceId: number, search?: string) => {
+    const qs = search ? `?search=${encodeURIComponent(search)}` : ''
+    return api<PrometheusServiceList>(`/prometheus-sources/${sourceId}/services/${qs}`)
+  },
+  /** 查询指定服务的监控指标时序（Step 3 面板） */
+  metrics: (sourceId: number, opts: {
+    job: string
+    start: string | number
+    end: string | number
+    step?: string
+    metrics?: string
+  }) => {
+    const params = new URLSearchParams()
+    params.set('job', opts.job)
+    params.set('start', String(opts.start))
+    params.set('end', String(opts.end))
+    if (opts.step) params.set('step', opts.step)
+    if (opts.metrics) params.set('metrics', opts.metrics)
+    return api<PrometheusMetricsResponse>(`/prometheus-sources/${sourceId}/metrics/?${params}`)
+  },
 }
 

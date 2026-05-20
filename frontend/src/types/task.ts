@@ -34,6 +34,7 @@ export interface Task {
   thread_groups_config: ThreadGroupConfig[]
   environment: number | null    // Environment id or null
   service_names: string[]       // Step 2 选的"被压测服务"名列表（v1.2，前端 mock；多选）
+  prometheus_source: number | null  // Step 2 选的 Prometheus 数据源 ID（Step 3 查指标用）
   csv_bindings: TaskCsvBinding[]
   status: TaskStatus
   active_run_id: string | null  // 后端 Step 3 加：有活跃 run 时直接给前端 run_id
@@ -520,3 +521,25 @@ export type ComponentDetail =
   | RegexExtractorDetail
   | JSONExtractorDetail
   | CsvDataSetDetail
+
+// ─── Prometheus 数据源 ─────────────────────────────────────────────
+
+export interface PrometheusDataSource {
+  id: number
+  name: string           // 如 ali-k8s-new、ali-k8s-online
+  url: string            // Prometheus API 根地址
+  enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PrometheusServiceList {
+  services: string[]     // job name 列表
+}
+
+export interface PrometheusMetricSeries {
+  display_name: string  // 如 "CPU 使用率 %"
+  data: { ts: number; value: number }[]
+}
+
+export type PrometheusMetricsResponse = Record<string, PrometheusMetricSeries>
