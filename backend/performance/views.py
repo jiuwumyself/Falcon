@@ -16,10 +16,11 @@ from django.utils import timezone
 
 from .models import (
     ACTIVE_RUN_STATUSES, Environment, LoadGenerator, LoadGeneratorStatus,
-    RunStatus, Service, Task, TaskCsvBinding, TaskRun,
+    PrometheusDataSource, RunStatus, Service, Task, TaskCsvBinding, TaskRun,
 )
 from .serializers import (
     EnvironmentSerializer, LoadGeneratorSerializer,
+    PrometheusDataSourceSerializer,
     RunEventAnchorSerializer, RunPinpointTraceSerializer, ServiceSerializer,
     TaskRunSerializer, TaskSerializer,
 )
@@ -1708,3 +1709,77 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
                 update_fields.append('status')
         lg.save(update_fields=update_fields)
         return Response(LoadGeneratorSerializer(lg).data)
+
+
+# ── Prometheus 监控数据源 ───────────────────────────────
+
+class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
+    """Prometheus 数据源列表（前端 Step 2 选择数据源用）。
+
+    只返回 enabled=True 的数据源。编辑走 admin。"""
+    queryset = PrometheusDataSource.objects.filter(enabled=True)
+    serializer_class = PrometheusDataSourceSerializer
+    pagination_class = None
+
+    @action(detail=True, methods=['get'], url_path='services')
+    def services(self, request, pk=None):
+        """从指定 Prometheus 数据源拉取所有 job 名（Step 2 服务多选下拉框）。
+
+        GET /api/performance/prometheus-sources/{id}/services/?search=xxx
+        """
+        ds: PrometheusDataSource = self.get_object()
+        from .services.prometheus import list_jobs, PrometheusAPIError  # noqa: PLC0415
+        try:
+            jobs = list_jobs(ds.url, auth_token=ds.auth_token)
+        except PrometheusAPIError as exc:
+            return Response(
+                {'detail': f'Prometheus API 调用失败: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        # 前端搜索过滤
+        search = (request.query_params.get('search') or '').strip().lower()
+        if search:
+            jobs = [j for j in jobs if search in j.lower()]
+        return Response({'services': jobs})
+
+    @action(detail=True, methods=['get'], url_path='metrics')
+    def metrics(self, request, pk=None):
+        """查询指定数据源中某服务的监控指标时序（Step 3 服务面板）。
+
+        GET /api/performance/prometheus-sources/{id}/metrics/?job=node-exporter&start=...&end=...&step=15s
+
+        job: 必填，Prometheus job 名
+        start / end: 必填，RFC3339 或 Unix 时间戳
+        step: 可选，默认 15s
+        metrics: 可选，逗号分隔的 metric key，默认查全部预置模板
+        """
+        ds: PrometheusDataSource = self.get_object()
+        job = (request.query_params.get('job') or '').strip()
+        if not job:
+            return Response(
+                {'detail': '缺少 job 参数'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        start = (request.query_params.get('start') or '').strip()
+        end = (request.query_params.get('end') or '').strip()
+        if not start or not end:
+            return Response(
+                {'detail': '缺少 start / end 时间参数'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        step = (request.query_params.get('step') or '15s').strip()
+        metric_keys_str = (request.query_params.get('metrics') or '').strip()
+        metric_keys = [k.strip() for k in metric_keys_str.split(',') if k.strip()] or None
+
+        from .services.prometheus import query_service_metrics, PrometheusAPIError  # noqa: PLC0415
+        try:
+            data = query_service_metrics(
+                ds.url, job, start, end, step,
+                auth_token=ds.auth_token, metric_keys=metric_keys,
+            )
+        except PrometheusAPIError as exc:
+            return Response(
+                {'detail': f'Prometheus API 调用失败: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(data)
