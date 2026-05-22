@@ -102,10 +102,23 @@ function toDatetimeLocal(d: Date): string {
 
 watch(showTimePicker, (show) => {
   if (show) {
-    const now = new Date()
-    const from = new Date(now.getTime() - effectiveRangeSeconds.value * 1000)
-    customFrom.value = toDatetimeLocal(from)
-    customTo.value = toDatetimeLocal(now)
+    // 只有在没有自定义范围时才重新初始化
+    // 如果已经有自定义范围，保持用户之前选择的值
+    if (!isCustomRange.value || !customFrom.value || !customTo.value) {
+      const now = new Date()
+      const from = new Date(now.getTime() - effectiveRangeSeconds.value * 1000)
+      customFrom.value = toDatetimeLocal(from)
+      customTo.value = toDatetimeLocal(now)
+      console.log('[ServicePanelsTab] 初始化时间选择器:', {
+        from: customFrom.value,
+        to: customTo.value
+      })
+    } else {
+      console.log('[ServicePanelsTab] 保持已有的自定义时间范围:', {
+        from: customFrom.value,
+        to: customTo.value
+      })
+    }
   }
 })
 
@@ -123,6 +136,13 @@ function applyCustomRange() {
   customRangeSeconds.value = Math.round(to - from)
   isCustomRange.value = true
   showTimePicker.value = false
+  
+  // 确保 customFrom 和 customTo 保持用户选择的值，不被 watch 覆盖
+  console.log('[ServicePanelsTab] 应用自定义时间范围:', {
+    from: customFrom.value,
+    to: customTo.value,
+    duration: customRangeSeconds.value
+  })
 }
 
 const effectiveRangeSeconds = computed(() =>
