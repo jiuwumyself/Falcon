@@ -1,5 +1,6 @@
 import type {
   Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
+  FluentBitMetricsResponse,
   LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, PrometheusDataSource,
   PrometheusMetricsResponse, PrometheusServiceList, RunEvent,
   RunMetrics, SamplerStat, Service, Task, TaskRun,
@@ -232,19 +233,22 @@ export const prometheusSourcesApi = {
   },
   /** 查询指定服务的监控指标时序（Step 3 面板） */
   metrics: (sourceId: number, opts: {
-    job: string
+    service: string
     start: string | number
     end: string | number
     step?: string
     metrics?: string
   }) => {
     const params = new URLSearchParams()
-    params.set('job', opts.job)
+    params.set('service', opts.service)
     params.set('start', String(opts.start))
     params.set('end', String(opts.end))
     if (opts.step) params.set('step', opts.step)
     if (opts.metrics) params.set('metrics', opts.metrics)
     return api<PrometheusMetricsResponse>(`/prometheus-sources/${sourceId}/metrics/?${params}`)
   },
+  /** 查询 fluent-bit 实时监控数据（所有 enabled 数据源汇总） */
+  fluentBit: () =>
+    api<FluentBitMetricsResponse>('/prometheus-sources/fluent-bit/'),
 }
 
