@@ -1723,14 +1723,14 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='services')
     def services(self, request, pk=None):
-        """从指定 Prometheus 数据源拉取所有 job 名（Step 2 服务多选下拉框）。
+        """从指定 Prometheus 数据源拉取所有业务容器名（Step 2 服务多选下拉框）。
 
         GET /api/performance/prometheus-sources/{id}/services/?search=xxx
         """
         ds: PrometheusDataSource = self.get_object()
-        from .services.prometheus import list_jobs, PrometheusAPIError  # noqa: PLC0415
+        from .services.prometheus import list_services, PrometheusAPIError  # noqa: PLC0415
         try:
-            jobs = list_jobs(ds.url, auth_token=ds.auth_token)
+            services = list_services(ds.url, auth_token=ds.auth_token)
         except PrometheusAPIError as exc:
             return Response(
                 {'detail': f'Prometheus API 调用失败: {exc}'},
@@ -1739,25 +1739,29 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
         # 前端搜索过滤
         search = (request.query_params.get('search') or '').strip().lower()
         if search:
-            jobs = [j for j in jobs if search in j.lower()]
-        return Response({'services': jobs})
+            services = [s for s in services if search in s.lower()]
+        return Response({'services': services})
 
     @action(detail=True, methods=['get'], url_path='metrics')
     def metrics(self, request, pk=None):
         """查询指定数据源中某服务的监控指标时序（Step 3 服务面板）。
 
-        GET /api/performance/prometheus-sources/{id}/metrics/?job=node-exporter&start=...&end=...&step=15s
+        GET /api/performance/prometheus-sources/{id}/metrics/?service=kg-ai-run&start=...&end=...&step=15s
 
-        job: 必填，Prometheus job 名
+        service: 必填，Prometheus container_name 标签值（容器名）
         start / end: 必填，RFC3339 或 Unix 时间戳
         step: 可选，默认 15s
         metrics: 可选，逗号分隔的 metric key，默认查全部预置模板
+
+        跨数据源 fallback：
+        当主数据源查询结果所有指标 data 均为空时，自动遍历其他 enabled 数据源，
+        直到找到有数据的结果或全部遍历完毕。适用于服务跨集群部署的场景。
         """
         ds: PrometheusDataSource = self.get_object()
-        job = (request.query_params.get('job') or '').strip()
-        if not job:
+        service = (request.query_params.get('service') or '').strip()
+        if not service:
             return Response(
-                {'detail': '缺少 job 参数'},
+                {'detail': '缺少 service 参数'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         start = (request.query_params.get('start') or '').strip()
@@ -1770,16 +1774,154 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
         step = (request.query_params.get('step') or '15s').strip()
         metric_keys_str = (request.query_params.get('metrics') or '').strip()
         metric_keys = [k.strip() for k in metric_keys_str.split(',') if k.strip()] or None
+        use_cache = request.query_params.get('no_cache', '0') != '1'  # 默认启用缓存
 
         from .services.prometheus import query_service_metrics, PrometheusAPIError  # noqa: PLC0415
-        try:
-            data = query_service_metrics(
-                ds.url, job, start, end, step,
-                auth_token=ds.auth_token, metric_keys=metric_keys,
-            )
-        except PrometheusAPIError as exc:
+
+        def _query(source: PrometheusDataSource) -> dict[str, dict] | None:
+            """查询单个数据源，失败返回 None。"""
+            try:
+                return query_service_metrics(
+                    source.url, service, start, end, step,
+                    auth_token=source.auth_token, metric_keys=metric_keys,
+                    use_cache=use_cache,
+                )
+            except PrometheusAPIError:
+                return None
+
+        def _has_data(data: dict[str, dict]) -> bool:
+            """判断查询结果是否有实际数据（任一指标 data 或 pods 非空）。"""
+            return any(v.get('data') or v.get('pods') for v in data.values())
+
+        # 先查主数据源
+        data = _query(ds)
+        if data is None:
             return Response(
-                {'detail': f'Prometheus API 调用失败: {exc}'},
+                {'detail': f'Prometheus API 调用失败: 数据源 {ds.name}'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        if _has_data(data):
+            return Response(data)
+
+        # 主数据源无数据 → fallback 其他 enabled 数据源
+        other_sources = PrometheusDataSource.objects.filter(
+            enabled=True,
+        ).exclude(pk=ds.pk)
+        for other in other_sources:
+            fallback_data = _query(other)
+            if fallback_data is not None and _has_data(fallback_data):
+                return Response(fallback_data)
+
+        # 所有数据源都无数据，返回主数据源的空结果
         return Response(data)
+
+    @action(detail=False, methods=['get'], url_path='fluent-bit')
+    def fluent_bit(self, request):
+        """Fluent-bit 尔时监控数据（所有 enabled 数据源汇总查询）。
+
+        GET /api/performance/prometheus-sources/fluent-bit/
+
+        返回每个 pod 的实时 CPU、内存、磁盘、网络指标（instant query）。
+        """
+        from .services.prometheus import instant_query, _detect_service_label, PrometheusAPIError  # noqa: PLC0415
+
+        # 主业务容器 PromQL——排除 sidecar（fluent-bit）和 pause 容器
+        CONTAINER_FILTER = 'container!="",container!="POD",container!="fluent-bit"'
+        FLUENT_BIT_QUERIES = [
+            ('cpu_pct', 'CPU %',
+             # 使用 container_spec_cpu_quota / 100000 作为分母（CPU limit，单位核）
+             # 注意：阿里云 ARMS Prometheus 的 instant query 不支持复杂的 or vector(x) 语法
+             # 故仅在 CPU limit > 0 时才除以 limit，否则结果直接为 usage（偏大但不会报错）
+             f'clamp_min(rate(container_cpu_usage_seconds_total{{{CONTAINER_FILTER}}}[2m])'
+             f' / on(pod) group_left clamp_min(container_spec_cpu_quota{{{CONTAINER_FILTER}}} / 100000, 0.001), 0) * 100'),
+            ('cpu_request_m', 'CPU 需求 (m)',
+             f'kube_pod_container_resource_requests{{resource="cpu",{CONTAINER_FILTER}}} * 1000'),
+            ('cpu_limit_m', 'CPU 限制 (m)',
+             f'kube_pod_container_resource_limits{{resource="cpu",{CONTAINER_FILTER}}} * 1000'),
+            ('mem_wss_pct', '内存 WSS %',
+             f'container_memory_working_set_bytes{{{CONTAINER_FILTER}}}'
+             ' / on(pod) group_left clamp_min(container_spec_memory_limit_bytes{' + CONTAINER_FILTER + '}, 1) * 100'),
+            ('mem_wss_mb', '内存 WSS (MB)',
+             f'container_memory_working_set_bytes{{{CONTAINER_FILTER}}} / 1048576'),
+            ('mem_rss_pct', '内存 RSS %',
+             f'container_memory_rss{{{CONTAINER_FILTER}}}'
+             ' / on(pod) group_left clamp_min(container_spec_memory_limit_bytes{' + CONTAINER_FILTER + '}, 1) * 100'),
+            ('mem_rss_mb', '内存 RSS (MB)',
+             f'container_memory_rss{{{CONTAINER_FILTER}}} / 1048576'),
+            ('mem_request_mb', '内存需求 (MB)',
+             f'kube_pod_container_resource_requests{{resource="memory",{CONTAINER_FILTER}}} / 1048576'),
+            ('mem_limit_mb', '内存限制 (MB)',
+             f'kube_pod_container_resource_limits{{resource="memory",{CONTAINER_FILTER}}} / 1048576'),
+            ('disk_usage_bytes', '磁盘',
+             # 容器文件系统使用量（bytes），前端自动换算为 GiB/MiB
+             f'container_fs_usage_bytes{{{CONTAINER_FILTER}}}'),
+            ('net_rx_kbs', '网络 RX (KB/s)',
+             f'rate(container_network_receive_bytes_total{{pod=~".*"}}[2m]) / 1024'),
+            ('net_tx_kbs', '网络 TX (KB/s)',
+             f'rate(container_network_transmit_bytes_total{{pod=~".*"}}[2m]) / 1024'),
+            ('restarts', '重启次数',
+             f'kube_pod_container_status_restarts_total{{{CONTAINER_FILTER}}}'),
+        ]
+
+        # 查询所有容器的命名空间信息
+        POD_NS_QUERY = f'kube_pod_container_info{{{CONTAINER_FILTER}}}'
+
+        # 对所有 enabled 数据源并行查询，合并结果（不同集群 fluent-bit pod 名不重复）
+        sources = PrometheusDataSource.objects.filter(enabled=True)
+        # {pod_name: {metric_key: value}}
+        pods_data: dict[str, dict[str, float | None]] = {}
+        # {pod_name: namespace}
+        pods_ns: dict[str, str] = {}
+
+        for ds in sources:
+            # 查询命名空间（从 kube_pod_container_info 或 kube_pod_info 获取）
+            try:
+                ns_results = instant_query(ds.url, POD_NS_QUERY, auth_token=ds.auth_token)
+                for series in ns_results:
+                    m = series.get('metric', {})
+                    pod = m.get('pod', '')
+                    ns = m.get('namespace', '')
+                    if pod and ns and pod not in pods_ns:
+                        pods_ns[pod] = ns
+            except PrometheusAPIError:
+                pass
+
+            for metric_key, display_name, promql in FLUENT_BIT_QUERIES:
+                try:
+                    results = instant_query(ds.url, promql, auth_token=ds.auth_token)
+                except PrometheusAPIError:
+                    continue
+                for series in results:
+                    pod = series.get('metric', {}).get('pod', '')
+                    if not pod:
+                        continue
+                    val_raw = series.get('value', [])
+                    if len(val_raw) >= 2:
+                        try:
+                            val = float(val_raw[1])
+                        except (ValueError, TypeError):
+                            val = None
+                    else:
+                        val = None
+                    if pod not in pods_data:
+                        pods_data[pod] = {}
+                    # 同一 pod 如果已有值则取最大（避免同一 pod 在两个数据源重复）
+                    if metric_key not in pods_data[pod] or (
+                        val is not None and
+                        (pods_data[pod][metric_key] is None or val > pods_data[pod][metric_key])
+                    ):
+                        pods_data[pod][metric_key] = val
+
+        # 构建返回结构
+        pods_list = []
+        for pod_name, metrics in sorted(pods_data.items()):
+            pods_list.append({
+                'pod': pod_name,
+                'namespace': pods_ns.get(pod_name, '-'),
+                **{k: metrics.get(k) for k, _, _ in FLUENT_BIT_QUERIES},
+            })
+
+        return Response({
+            'pods': pods_list,
+            'columns': [{'key': k, 'label': label} for k, label, _ in FLUENT_BIT_QUERIES],
+        })

@@ -539,7 +539,32 @@ export interface PrometheusServiceList {
 
 export interface PrometheusMetricSeries {
   display_name: string  // 如 "CPU 使用率 %"
-  data: { ts: number; value: number }[]
+  data: { ts: number; value: number }[]  // 聚合数据（per-pod 指标为空数组）
+  pods?: Record<string, { ts: number; value: number }[]>  // per-pod 数据：{pod_name: [{ts, value}]}
 }
 
 export type PrometheusMetricsResponse = Record<string, PrometheusMetricSeries>
+
+// Fluent-bit 监控表格
+export interface FluentBitPodMetric {
+  pod: string
+  namespace: string
+  cpu_pct: number | null
+  cpu_request_m: number | null
+  cpu_limit_m: number | null
+  mem_wss_pct: number | null
+  mem_wss_mb: number | null
+  mem_rss_pct: number | null
+  mem_rss_mb: number | null
+  mem_request_mb: number | null
+  mem_limit_mb: number | null
+  disk_usage_bytes: number | null
+  net_rx_kbs: number | null
+  net_tx_kbs: number | null
+  restarts: number | null
+}
+
+export interface FluentBitMetricsResponse {
+  pods: FluentBitPodMetric[]
+  columns: { key: string; label: string }[]
+}
