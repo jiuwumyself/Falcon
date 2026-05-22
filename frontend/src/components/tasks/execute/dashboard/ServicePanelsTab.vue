@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import { Server, Cpu, Loader, AlertCircle, RefreshCw, ChevronDown, Clock } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -50,6 +50,42 @@ const customTo = ref('')
 const isCustomRange = ref(false)
 const customRangeSeconds = ref(3600)
 
+// 监听 run 变化，自动设置时间范围
+watch(() => props.run, async (newRun) => {
+  console.log('[ServicePanelsTab] run 变化:', newRun?.run_id, newRun?.started_at, newRun?.finished_at)
+  
+  if (newRun?.started_at && newRun?.finished_at) {
+    const start = new Date(newRun.started_at)
+    const end = new Date(newRun.finished_at)
+    const durationSec = Math.round((end.getTime() - start.getTime()) / 1000)
+    
+    console.log('[ServicePanelsTab] 设置自定义时间范围:', {
+      started_at: newRun.started_at,
+      finished_at: newRun.finished_at,
+      durationSec,
+      customFrom: toDatetimeLocal(start),
+      customTo: toDatetimeLocal(end)
+    })
+    
+    // 设置自定义时间范围
+    customFrom.value = toDatetimeLocal(start)
+    customTo.value = toDatetimeLocal(end)
+    customRangeSeconds.value = Math.max(durationSec, 60) // 至少60秒
+    isCustomRange.value = true
+    
+    // 等待 Vue 响应式更新后，再刷新数据
+    await nextTick()
+    console.log('[ServicePanelsTab] nextTick 后，customFrom/customTo:', customFrom.value, customTo.value)
+    void fetchMetrics()
+    void fetchFluentBit()
+  } else if (newRun === null) {
+    // 如果没有选中的 run，恢复到默认的快捷范围
+    console.log('[ServicePanelsTab] run 为 null，恢复默认范围')
+    isCustomRange.value = false
+    selectedRangeIdx.value = 3 // 默认 1h
+  }
+}, { immediate: true })
+
 const timePickerRef = ref<HTMLElement>()
 onClickOutside(timePickerRef, () => { showTimePicker.value = false })
 
@@ -60,7 +96,8 @@ const currentTimeRangeLabel = computed(() => {
 
 function toDatetimeLocal(d: Date): string {
   const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  // 保留秒数，格式：YYYY-MM-DDTHH:MM:SS
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 watch(showTimePicker, (show) => {
@@ -116,9 +153,31 @@ async function fetchMetrics() {
   loading.value = true
   error.value = ''
   try {
-    const end = Math.floor(Date.now() / 1000)
-    const start = end - effectiveRangeSeconds.value
-    const step = Math.max(15, Math.floor(effectiveRangeSeconds.value / 240))
+    // 优先使用自定义时间范围（历史记录选择），否则使用快捷范围
+    let start: number
+    let end: number
+    
+    if (isCustomRange.value && customFrom.value && customTo.value) {
+      start = Math.floor(new Date(customFrom.value).getTime() / 1000)
+      end = Math.floor(new Date(customTo.value).getTime() / 1000)
+      console.log('[ServicePanelsTab] 使用自定义时间范围:', {
+        from: customFrom.value,
+        to: customTo.value,
+        start,
+        end,
+        duration: end - start
+      })
+    } else {
+      end = Math.floor(Date.now() / 1000)
+      start = end - effectiveRangeSeconds.value
+      console.log('[ServicePanelsTab] 使用快捷时间范围:', {
+        range: QUICK_RANGES[selectedRangeIdx.value].label,
+        start,
+        end
+      })
+    }
+    
+    const step = Math.max(15, Math.floor((end - start) / 240))
     // 性能优化：只查询页面实际需要的指标（而非全部 14 个）
     // cpu_usage, memory_usage 用于主图表
     // network_rx, network_tx 用于底部统计
@@ -137,7 +196,18 @@ async function fetchMetrics() {
   }
 }
 
-watch([selectedService, effectiveRangeSeconds], () => { void fetchMetrics() })
+// 统一的刷新函数：同时刷新图表和 Pod 资源明细
+async function refreshAll() {
+  await Promise.all([
+    fetchMetrics(),
+    fetchFluentBit()
+  ])
+}
+
+watch([selectedService, effectiveRangeSeconds], () => { 
+  console.log('[ServicePanelsTab] effectiveRangeSeconds 或 selectedService 变化，触发 fetchMetrics')
+  void fetchMetrics() 
+})
 onMounted(() => { void fetchMetrics() })
 
 // ── 自动刷新 ──
@@ -696,6 +766,20 @@ function fmtDiskUsage(bytes: number | null | undefined): string {
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + ' MiB'
   return bytes.toFixed(0) + ' B'
 }
+
+// 获取服务的 CPU avg 值颜色标记
+function getCpuAvgColor(serviceName: string): string {
+  const metrics = metricsMap.value[serviceName]
+  if (!metrics?.cpu_usage?.data.length) return 'transparent'
+  
+  const stats = computeStats(metrics.cpu_usage.data)
+  const avg = stats.avg
+  
+  // 根据 avg 值返回不同颜色
+  if (avg <= 40) return '#10b981' // 绿色：<= 40%
+  if (avg <= 70) return '#f59e0b' // 黄色：40% < avg <= 70%
+  return '#ef4444' // 红色：> 70%
+}
 </script>
 
 <template>
@@ -725,13 +809,25 @@ function fmtDiskUsage(bytes: number | null | undefined): string {
           :style="{
             background: selectedService === svc
               ? (isDark ? 'rgba(59,130,246,0.2)' : 'rgba(59,130,246,0.12)')
-              : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'),
+              : getCpuAvgColor(svc) === '#10b981' // 绿色：<= 40%
+                ? (isDark ? 'rgba(16,185,129,0.15)' : 'rgba(16,185,129,0.1)')
+                : getCpuAvgColor(svc) === '#f59e0b' // 黄色：40% < avg <= 70%
+                  ? (isDark ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)')
+                  : getCpuAvgColor(svc) === '#ef4444' // 红色：> 70%
+                    ? (isDark ? 'rgba(239,68,68,0.15)' : 'rgba(239,68,68,0.1)')
+                    : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'),
             color: selectedService === svc
               ? (isDark ? '#93c5fd' : '#2563eb')
               : (isDark ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.7)'),
             border: `1px solid ${selectedService === svc
               ? (isDark ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.3)')
-              : 'transparent'}`,
+              : getCpuAvgColor(svc) === '#10b981'
+                ? (isDark ? 'rgba(16,185,129,0.3)' : 'rgba(16,185,129,0.25)')
+                : getCpuAvgColor(svc) === '#f59e0b'
+                  ? (isDark ? 'rgba(245,158,11,0.3)' : 'rgba(245,158,11,0.25)')
+                  : getCpuAvgColor(svc) === '#ef4444'
+                    ? (isDark ? 'rgba(239,68,68,0.3)' : 'rgba(239,68,68,0.25)')
+                    : 'transparent'}`,
           }"
           @click="selectedService = svc"
         >
@@ -860,7 +956,7 @@ function fmtDiskUsage(bytes: number | null | undefined): string {
           </div>
         </div>
 
-        <!-- 刷新 -->
+        <!-- 刷新（统一刷新所有数据） -->
         <button
           class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] cursor-pointer"
           :style="{
@@ -868,10 +964,10 @@ function fmtDiskUsage(bytes: number | null | undefined): string {
             background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
             border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
           }"
-          :disabled="loading"
-          @click="fetchMetrics"
+          :disabled="loading || fbLoading"
+          @click="refreshAll"
         >
-          <RefreshCw :size="10" :class="{ 'animate-spin': loading }" />
+          <RefreshCw :size="10" :class="{ 'animate-spin': loading || fbLoading }" />
           刷新
         </button>
       </div>
@@ -1220,19 +1316,6 @@ function fmtDiskUsage(bytes: number | null | undefined): string {
             :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
             @click="openView('podDetail')"
           >□ View</button>
-          <button
-            class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] cursor-pointer"
-            :style="{
-              color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)',
-              background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
-              border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
-            }"
-            :disabled="fbLoading"
-            @click="fetchFluentBit"
-          >
-            <RefreshCw :size="10" :class="{ 'animate-spin': fbLoading }" />
-            刷新
-          </button>
         </div>
 
         <!-- 错误 -->
