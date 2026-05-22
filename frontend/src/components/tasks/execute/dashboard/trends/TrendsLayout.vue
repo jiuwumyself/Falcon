@@ -81,26 +81,18 @@ const effectiveOverall = computed(() => {
   if (tg && byTg.value[tg]) {
     const series = byTg.value[tg]
     if (series.active_users.length === 0) {
-      // per-TG 实测并发 JMeter 拿不到（maxAT 全局）→ 用配置 kind+params 算计划曲线
+      // per-TG 实测并发 JMeter 拿不到（maxAT 全局）→ 用配置 kind+params 算计划曲线。
+      // 始终走 dense plannedCurve（每秒一个点，覆盖整个 run 时间窗）：
+      //   1. 完整覆盖 t=0 到 finished_at，看得到第一个 ramp 从 0 起步
+      //   2. 峰值 anchor（t=5/15/25/35/45）精确命中 y=5，不会被 InfluxDB
+      //      bucket 错位（rps 桶可能落在 t=4.8 / 5.2，插值出 4.8 而不是 5）
+      //   3. ThroughputPerVuChart / ConcurrencyRpsChart 已改成 ±1.5s 最近匹配，
+      //      不再依赖 vu 和 rps 时间戳严格相等，不需要 aligned 模式
       const m = meta?.[tg]
       if (m && startMs > 0) {
-        // rps 足够密时按 rps 时间戳对齐（ThroughputPerVuChart 的 Map 精确匹配能用上）；
-        // 稀疏 rps（hold=0 / shutdown 太快导致采到的样本 ≤ 4 个时）→ 退到 dense
-        // plannedCurve（1s 一个点），否则 active_users 只有 1-2 个点 echarts 画不出线，
-        // ConcurrencyChart 看上去是空的。
-        const RPS_DENSE_THRESHOLD = 5
         const endMs = props.run?.finished_at
           ? new Date(props.run.finished_at).getTime()
           : Date.now()
-        if (series.rps.length >= RPS_DENSE_THRESHOLD) {
-          const timestamps = series.rps.map(([t]) => t)
-          return {
-            ...series,
-            active_users: plannedCurveAlignedToTimestamps(
-              m.kind, m.params, startMs, timestamps,
-            ),
-          }
-        }
         return {
           ...series,
           active_users: plannedCurve(m.kind, m.params, startMs, endMs, 1000),
@@ -237,6 +229,17 @@ const xRange = computed<[number, number] | null>(() => {
 // LatencyChart 用 p50/95/99_ok_ms；NetworkChart 用 bytes_recv_ok/bytes_sent_ok；
 // RpsChart 前端用 rps - error_count（每秒精确扣减）。三处都有效。
 const excludeKo = ref(false)
+
+// run 有失败样本才让 toggle 真生效；0 错误时 _ok 系列是后端跨 sampler mean-of-means
+// 近似（详见 backend/services/influxdb.py:226），跟 'all' 行数学维度不同，无脑切换会
+// 让 latency / network 'all' 线数值变化但语义错位（0 fail 还在剔）。
+// 主判断用 metrics.totals.total_errors —— 每轮轮询都实时算，运行中就有值；
+// run.error_rate 只在 _on_finish 终态才填，运行中是 0，单用它会导致"运行中
+// latency/network 剔不掉、终态才能剔"（RPS 走 error_count 实时扣减不受影响）。
+const hasErrors = computed(() =>
+  (props.metrics?.totals?.total_errors ?? 0) > 0
+  || (props.run?.error_rate ?? 0) > 0,
+)
 
 // ── 共享接口 legend：3 张图共用一份 samplerSelected。
 // 点击右侧 220 列里的接口名 → 3 张图同步隐藏 / 显示该 series。
@@ -427,6 +430,7 @@ const heroStyle = computed(() => ({
             :by-tg="effectiveTrendSplit"
             :sampler-selected="samplerSelected"
             :exclude-ko="excludeKo"
+            :has-errors="hasErrors"
             :run-id="activeRunId"
             :is-dark="isDark"
             compact
@@ -439,6 +443,7 @@ const heroStyle = computed(() => ({
             :by-tg="effectiveTrendSplit"
             :sampler-selected="samplerSelected"
             :exclude-ko="excludeKo"
+            :has-errors="hasErrors"
             :is-dark="isDark"
             @toggle-sampler="toggleSampler"
           />
@@ -460,6 +465,7 @@ const heroStyle = computed(() => ({
         :vu="effectiveOverall?.active_users || []"
         :by-tg="byTg"
         :tg-planned-meta="metrics?.tg_planned_meta || {}"
+        :sampler-thread-group="samplerToTg"
         :run-id="activeRunId"
         :is-terminal="isTerminal"
         :x-range="xRange"

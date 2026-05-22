@@ -23,6 +23,9 @@ const props = withDefaults(defineProps<{
   byTg: Record<string, RunMetricsSeries>
   samplerSelected: Record<string, boolean>
   excludeKo: boolean
+  /** run 是否有失败样本（run.error_rate > 0）。无失败时 excludeKo toggle 失效，
+   *  避免切到 mean-of-means 聚合误导用户。父组件 TrendsLayout 算好往下传。 */
+  hasErrors: boolean
   runId: string | null
   isDark: boolean
   /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
@@ -80,13 +83,20 @@ function isVisible(name: string): boolean {
   return props.samplerSelected[name] === true
 }
 
+// run 没有失败样本时 toggle 是 no-op：剔除"没东西可剔"。后端 _ok 系列是跨 sampler
+// mean-of-means 近似（见 backend/services/influxdb.py:226 注释），跟"all"行的真全局
+// 值数学上不相等；0 错误 run 切换会变成"切换两种聚合"，用户误以为剔除做了不该做的事。
+// hasErrors 从 TrendsLayout 通过 prop 传进来（run.error_rate > 0），不能从 props.overall
+// 检测——单 TG 模式 props.overall 是 by_tg 切片，by_tg 后端不填 _ko 系列。
+const effectiveExcludeKo = computed(() => props.excludeKo && props.hasErrors)
+
 // tx-p95 模式：excludeKo=true 时区分两种空：
 //   · p95_ok_ms === undefined → 老后端没 OK 切片 → 退回 p95_ms（兼容旧 run）
 //   · p95_ok_ms === [] → 新后端但该 sample 100% 失败 → 返回空，曲线消失（"剔除"
 //     语义直观，跟 RpsChart 的 rps - error_count 扣到 0 同效果）
 function p95For(series: { p95_ms?: any[]; p95_ok_ms?: any[] } | null | undefined): any[] {
   if (!series) return []
-  if (!props.excludeKo) return series.p95_ms || []
+  if (!effectiveExcludeKo.value) return series.p95_ms || []
   if (series.p95_ok_ms === undefined) return series.p95_ms || []
   return series.p95_ok_ms
 }
@@ -118,11 +128,11 @@ const fixedSpecs = computed<SeriesSpec[]>(() => {
   if (mode.value === 'all-percentiles') {
     if (!props.overall) return []
     // name 始终 'P50/P95/P99'（id 稳定，echarts smart-merge 不重画 → 切 excludeKo 不闪）
-    // 数据按 excludeKo 切换；OK 字段 undefined 时退回原字段（兼容老 run）
+    // 数据按 effectiveExcludeKo 切换：无 KO 样本时 toggle 失效，避免误切到 mean-of-means
     const o = props.overall
-    const p50 = props.excludeKo ? (o.p50_ok_ms ?? o.p50_ms) : o.p50_ms
-    const p95 = props.excludeKo ? (o.p95_ok_ms ?? o.p95_ms) : o.p95_ms
-    const p99 = props.excludeKo ? (o.p99_ok_ms ?? o.p99_ms) : o.p99_ms
+    const p50 = effectiveExcludeKo.value ? (o.p50_ok_ms ?? o.p50_ms) : o.p50_ms
+    const p95 = effectiveExcludeKo.value ? (o.p95_ok_ms ?? o.p95_ms) : o.p95_ms
+    const p99 = effectiveExcludeKo.value ? (o.p99_ok_ms ?? o.p99_ms) : o.p99_ms
     return [
       { name: 'P50', data: p50, color: SEMANTIC.success, lineWidth: 2, area: true },
       { name: 'P95', data: p95, color: SEMANTIC.latency, lineWidth: 2 },
@@ -217,7 +227,7 @@ watch(chartRef, (v) => {
         >
           <span class="text-[11.5px]"
                 :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-            延迟 · ms{{ excludeKo ? ' · 剔除失败' : '' }}
+            延迟 · ms{{ effectiveExcludeKo ? ' · 剔除失败' : '' }}
           </span>
         </HoverTip>
       </div>

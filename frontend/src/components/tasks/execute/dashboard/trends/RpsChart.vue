@@ -61,8 +61,11 @@ function rpsFor(series: RunMetricsSeries | null | undefined): SeriesPoint[] {
   if (series.error_count?.length) {
     return subtractErrors(series.rps || [], series.error_count)
   }
-  // 退到 overall.error_rate 按比例近似（per-sampler 后端不拆 OK/KO）
-  return scaleByErrorRate(series.rps || [], props.overall?.error_rate || [])
+  // 没有 per-sampler error_count 就当 0 错处理（v1.3 起后端已对所有 sampler 切片
+  // 填 error_count，走不到此分支）。
+  // 不再退到 scaleByErrorRate(overall.error_rate)——那会把整体错误率匀摊到
+  // 每个 sampler，1 接口全错时所有接口都缩水 25% 的根因。
+  return series.rps || []
 }
 
 function isVisible(name: string): boolean {

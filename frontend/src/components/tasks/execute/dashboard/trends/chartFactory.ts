@@ -25,6 +25,9 @@ export interface SeriesSpec {
   area?: boolean
   /** 堆叠面积时用：去渐变改实色（保留边界辨识度）。普通线图保持默认渐变 fade out */
   solidArea?: boolean
+  /** echarts 折线平滑。默认 true（连续指标如 RPS / 延迟更可读）；离散阶梯量（VU
+   *  并发数 / 计划曲线）必须 false，否则三角峰被磨成圆顶看不到真实峰值。 */
+  smooth?: boolean
 }
 
 export const CONNECT_GROUP = 'falcon-trends'
@@ -137,7 +140,7 @@ export function buildSeriesOption(
       id: s.name,
       name: s.name,
       data: s.data,
-      smooth: true,
+      smooth: s.smooth ?? true,
       // 稀疏 series（≤ 5 点）画圆点否则单点线不可见（hold=0 这类极短场景），
       // 密集 series 维持原 'none' 风格避免圆点糊一片。
       symbol: s.data.length <= 5 ? ('circle' as const) : ('none' as const),

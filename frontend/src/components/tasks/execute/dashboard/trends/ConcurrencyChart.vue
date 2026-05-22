@@ -31,6 +31,10 @@ const option = computed(() =>
         color: SEMANTIC.saturation,
         lineWidth: 1.6,
         area: true,
+        // VU 是离散整数 + 线性 ramp，禁用 smooth 避免 spike/Ultimate 5 三角峰被
+        // 磨成 5 个圆顶（峰值显示 ~4.5 而不是真实的 5，并且看上去像"一直在跑"
+        // 不下来）
+        smooth: false,
         formatter: (v: number) => `${Math.round(v)}`,
       },
     ],

@@ -44,6 +44,25 @@ _SAFE_PATH_RE = re.compile(r'[^A-Za-z0-9]+')
 _HIDDEN_COMPONENT_TAGS = frozenset({'BackendListener'})
 
 
+def _cache_is_fresh(cache_path, *source_paths) -> bool:
+    """聚合 / 接口统计端点的本地缓存是否可信。
+
+    有效 = 缓存文件存在 且 mtime ≥ 所有存在数据源(results.jtl / statistics.json)
+    里最新的 mtime。数据源全不存在 → False(不可信，重算)。
+
+    解决"缓存毒化":分布式 run 的 results.jtl 执行期周期 merge 一直在变，运行中第一次
+    轮询会算出空/半量结果写死缓存，之后(含终态)永远返回旧值。按 mtime 比对后:
+    运行中 JTL 持续变新 → 缓存恒过期 → 每次重算(实时);终态 JTL 冻结 → 缓存命中(快);
+    已存在的毒化缓存(比终态 JTL 旧)→ 自动失效重算，无需手动删文件。
+    """
+    if not cache_path.exists():
+        return False
+    src_mtimes = [p.stat().st_mtime for p in source_paths if p.exists()]
+    if not src_mtimes:
+        return False
+    return cache_path.stat().st_mtime >= max(src_mtimes)
+
+
 def _path_to_testname(run) -> dict[str, str]:
     """读当前 jmx 拿 path → testname 映射。snapshot 没存 testname，testname 只能从
     当前 jmx 推。jmx 改过 (Step 1 重新上传 / 顺序重排) 时可能跟 snapshot 当时不一致——
@@ -1173,16 +1192,19 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         run_dir = get_runs_dir() / run.run_id
 
-        # --- 缓存优先 ---
+        # 数据源：优先 statistics.json（JMeter -e -o 出），没有则扫 results.jtl
+        stats_json = run_dir / 'report' / 'statistics.json'
+        jtl = run_dir / 'results.jtl'
+
+        # --- 缓存优先：仅当缓存比两个数据源都新才信(防毒化，详见 _cache_is_fresh) ---
         cached = run_dir / 'cached_sampler_stats.json'
-        if cached.exists():
+        if _cache_is_fresh(cached, stats_json, jtl):
             try:
                 return Response(_json.loads(cached.read_text(encoding='utf-8')))
             except (OSError, _json.JSONDecodeError):
                 pass
 
         # 优先 statistics.json（JMeter -e -o 自动出）
-        stats_json = run_dir / 'report' / 'statistics.json'
         if stats_json.exists():
             try:
                 data = _json.loads(stats_json.read_text(encoding='utf-8'))
@@ -1213,13 +1235,9 @@ class RunViewSet(viewsets.GenericViewSet):
                 pass
             return Response(results)
 
-        # fallback：扫 jtl
-        jtl = run_dir / 'results.jtl'
+        # fallback：扫 jtl（jtl 变量已在方法开头定义）
         if not jtl.exists() or jtl.stat().st_size == 0:
-            try:
-                cached.write_text(_json.dumps([], ensure_ascii=False), encoding='utf-8')
-            except OSError:
-                pass
+            # JTL 缺失/空时不落缓存——否则运行早期的空结果会毒化整个 run 的查询
             return Response([])
 
         agg: dict[str, dict] = {}
@@ -1307,20 +1325,16 @@ class RunViewSet(viewsets.GenericViewSet):
         if use_cache:
             cache_name = 'cached_error_samples_agg.json' if aggregate else 'cached_error_samples_detail.json'
             cached = run_dir / cache_name
-            if cached.exists():
+            # 仅当缓存比 results.jtl 新才信(防毒化，详见 _cache_is_fresh)
+            if _cache_is_fresh(cached, jtl):
                 try:
                     return Response(_json.loads(cached.read_text(encoding='utf-8')))
                 except (OSError, _json.JSONDecodeError):
                     pass
 
         if not jtl.exists() or jtl.stat().st_size == 0:
-            empty_resp = {'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0}
-            if use_cache:
-                try:
-                    cached.write_text(_json.dumps(empty_resp, ensure_ascii=False), encoding='utf-8')
-                except OSError:
-                    pass
-            return Response(empty_resp)
+            # JTL 缺失/空时不落缓存——否则运行早期写下的空结果会毒化整个 run 的查询
+            return Response({'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0})
 
         try:
             limit = max(1, min(int(request.query_params.get('limit', 50)), 500))

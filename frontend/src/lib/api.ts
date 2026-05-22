@@ -163,6 +163,15 @@ export const runsApi = {
     if (q.codeBucket && q.codeBucket !== 'all') params.set('code_bucket', q.codeBucket)
     return api<ErrorAggregatesResponse>(`/runs/${runId}/error-samples/?${params.toString()}`)
   },
+  // 按需拉单条错误样本的 response body（errors.xml 双轨）。错误明细表点击展开某行时调，
+  // 后端早退式 iterparse 扫到首条匹配 (label, code) 即返回，避免全量扫大 errors.xml。
+  // 聚合 / 明细列表端点为了避 502 不再内联 body，body 全走这个懒加载端点。
+  responseBody: (runId: string, label: string, responseCode: string): Promise<{ body: string }> => {
+    const params = new URLSearchParams()
+    if (label) params.set('label', label)
+    if (responseCode) params.set('response_code', responseCode)
+    return api<{ body: string }>(`/runs/${runId}/response-body/?${params.toString()}`)
+  },
   // 响应时间拆解：扫 JTL 算 Connect/Server/Receive 三段时序，前端按需拉一次
   // excludeKO=true 时只算 success=true 样本，看真实业务延迟
   latencyBreakdown: (runId: string, excludeKO = false): Promise<LatencyBreakdownResponse> => {

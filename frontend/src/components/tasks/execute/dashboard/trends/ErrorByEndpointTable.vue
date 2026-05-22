@@ -92,12 +92,22 @@ async function toggleRow(r: DisplayRow) {
     // limit 50：SampleList 按 (body, reason) dedup 后通常只剩几行，但要让
     // ×N 徽章接近真实数量需要多采几条。50 条扫 jtl 仍很快。聚合行的 count
     // 已经显示该组合**真实总数**（不受这里 limit 影响）。
-    const res = await runsApi.errorSamples(props.runId, {
-      sampler: r.label,
-      responseCode: r.responseCode,
-      limit: 50,
-    })
-    samplesCache.value.set(key, res.samples)
+    // body 走独立的 response-body 懒加载端点（列表端点为避 502 不再内联 body）；
+    // 同 (label, code) 组合 body 通常一致，拉一条贴到所有 sample 上即可。
+    const [res, bodyRes] = await Promise.all([
+      runsApi.errorSamples(props.runId, {
+        sampler: r.label,
+        responseCode: r.responseCode,
+        limit: 50,
+      }),
+      runsApi.responseBody(props.runId, r.label, r.responseCode).catch(() => ({ body: '' })),
+    ])
+    const body = bodyRes.body || ''
+    // sample 自带 response_body 为空时，用懒加载拿到的 body 兜底填上
+    const samples = body
+      ? res.samples.map((s) => (s.response_body ? s : { ...s, response_body: body }))
+      : res.samples
+    samplesCache.value.set(key, samples)
   } catch {
     // 失败也写入 cache，避免反复点反复拉；展示空态
     samplesCache.value.set(key, [])

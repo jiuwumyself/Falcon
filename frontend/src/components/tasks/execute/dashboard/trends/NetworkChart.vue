@@ -23,6 +23,8 @@ const props = withDefaults(defineProps<{
   samplerSelected: Record<string, boolean>
   // 剔除失败样本：有 bytes_recv_ok 数据走 _ok，没有退回 bytes_recv（兼容旧 run）
   excludeKo: boolean
+  /** run 是否有失败样本（run.error_rate > 0）。无失败时 toggle 失效避免误切聚合。 */
+  hasErrors: boolean
   isDark: boolean
   /** small multiples 紧贴布局：隐藏 x 轴标签让最底下一张图承担 */
   compact?: boolean
@@ -41,12 +43,19 @@ function isVisible(name: string): boolean {
   return props.samplerSelected[name] === true
 }
 
+// run 没有失败样本时 toggle 是 no-op；详见 LatencyChart 同名 hasErrors 说明。
+// bytes_recv 是 JMeter 'all' 行的真总字节速率，bytes_recv_ok 是跨 sampler mean —
+// 数学维度不同，0 错误 run 切换会让"all"线缩水成 1/N（N=sampler 数）误导用户。
+// hasErrors 从 TrendsLayout 用 run.error_rate 算好传下来，不能查 props.overall.p99_ko_ms
+// ——单 TG 模式 overall 是 by_tg 切片，后端 by_tg 不填 _ko。
+const effectiveExcludeKo = computed(() => props.excludeKo && props.hasErrors)
+
 // excludeKo=true 时区分两种空：
 //   · bytes_recv_ok === undefined → 老后端没 OK 切片 → 退回 bytes_recv（兼容旧 run）
 //   · bytes_recv_ok === [] → 新后端但该 sample 100% 失败 → 返回空，曲线消失
 function recvFor(series: RunMetricsSeries | null | undefined): SeriesPoint[] {
   if (!series) return []
-  if (!props.excludeKo) return series.bytes_recv || []
+  if (!effectiveExcludeKo.value) return series.bytes_recv || []
   if (series.bytes_recv_ok === undefined) return series.bytes_recv || []
   return series.bytes_recv_ok
 }
@@ -159,7 +168,7 @@ watch(chartRef, (v) => {
       >
         <span class="text-[11.5px]"
               :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)' }">
-          网络流量（接收） · KB/s{{ excludeKo ? ' · 剔除失败' : '' }}
+          网络流量（接收） · KB/s{{ effectiveExcludeKo ? ' · 剔除失败' : '' }}
         </span>
       </HoverTip>
     </div>

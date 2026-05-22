@@ -224,11 +224,15 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     # statut='ok' / 'ko' 没有 transaction='all' 聚合，每个 sampler 单独写一行。
     # 故这里去掉 transaction='all' 过滤 + 排除 internal，跨 sampler 取 mean 近似全局
     # OK / KO p99（不是数学严格的全局 p99，是 JMeter-Influx 的天然限制）。
+    # 字节用 sum（跨 sampler 可加），延迟分位用 mean（跨 sampler 只能近似，JMeter
+    # 没有 transaction='all' AND statut='ok' 的预聚合行；详见本函数 226 行注释）。
+    # 早期 rb/sb 也用 mean 是 bug：3 个 OK sampler 字节率 63+4.4+5.4=73 KB/s 被算成
+    # 均值 24.3，剔除失败后 network 'all' 线缩水成真值的 ~1/N。
     overall_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
         "mean(\"pct99.0\") AS p99_ok_ms, "
-        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        "sum(\"rb\") AS rb_ok, sum(\"sb\") AS sb_ok "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='internal' AND \"statut\"='ok'{where_time} "
         "GROUP BY time(1s) fill(none)"
@@ -364,11 +368,12 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     # transaction='all' 聚合行，statut='ok'/'ko' 每个 sampler 单独写一行。
     # 故跨 sampler 取 mean 近似 TG 级 OK p99（不是数学严格的全局 p99，是
     # JMeter-Influx 的天然限制；同 overall_ok_q 同款 workaround）。
+    # 字节 sum（TG 内跨 sampler 可加），分位 mean（同 overall_ok_q 限制）
     by_tg_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
         "mean(\"pct99.0\") AS p99_ok_ms, "
-        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        "sum(\"rb\") AS rb_ok, sum(\"sb\") AS sb_ok "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='ok'{where_time} "
@@ -492,6 +497,31 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                     series['bytes_sent'].append([ts, float(r['sb'])])
     except Exception:  # noqa: BLE001
         pass
+    # — by_sampler 错误数：statut='ko' 行 per-sampler count
+    # 没这查询时 RpsChart 剔除失败样本会退到 scaleByErrorRate(rps, overall.error_rate)，
+    # 把整体错误率（如 25%）无差别砍到每个 sampler——100% 失败的 sampler 没被剔完，
+    # 0% 失败的 sampler 反被误砍 25%。前端 1 接口全错时所有接口都缩水即此原因。
+    by_sampler_err_q = (
+        "SELECT sum(\"count\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ko'{where_time} "
+        "GROUP BY time(1s), \"transaction\" fill(none)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_sampler_err_q).items():
+            tx = (tags or {}).get('transaction') or ''
+            if not tx:
+                continue
+            series = by_sampler.setdefault(tx, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                errs = r.get('errors')
+                if errs is not None and errs > 0:
+                    series['error_count'].append([ts, float(errs)])
+    except Exception:  # noqa: BLE001
+        pass
+
     # — by_sampler OK 切片：LatencyChart / NetworkChart 全部模式剔除失败样本 toggle 用
     by_sampler_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
@@ -561,6 +591,29 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
                     series['bytes_sent'].append([ts, float(r['sb'])])
     except Exception:  # noqa: BLE001
         pass
+    # — by_sampler_by_tg 错误数：切 TG 模式 RpsChart 剔除失败样本要 per-(sampler,TG) error_count
+    by_sampler_by_tg_err_q = (
+        "SELECT sum(\"count\") AS errors "
+        f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
+        f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
+        f"AND \"statut\"='ko'{where_time} "
+        "GROUP BY time(1s), \"transaction\", \"thread_group\" fill(none)"
+    )
+    try:
+        for (_meas, tags), points in client.query(by_sampler_by_tg_err_q).items():
+            tx = (tags or {}).get('transaction') or ''
+            tg = (tags or {}).get('thread_group') or ''
+            if not tx or not tg:
+                continue
+            series = by_sampler_by_tg.setdefault(tx, {}).setdefault(tg, _empty_series())
+            for r in points:
+                ts = _ts_to_ms(r['time'])
+                errs = r.get('errors')
+                if errs is not None and errs > 0:
+                    series['error_count'].append([ts, float(errs)])
+    except Exception:  # noqa: BLE001
+        pass
+
     # — by_sampler_by_tg OK 切片：切 TG 模式下 LatencyChart / NetworkChart 剔除失败 toggle 用
     by_sampler_by_tg_ok_q = (
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
@@ -679,6 +732,24 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     totals = _query_totals(client, safe_run)
     totals_by_tg = _query_totals_by_tg(client, safe_run)
 
+    # —— 单位归一：JMeter InfluxdbBackendListenerClient 默认 5s flush 一次，每条记录的
+    # count/rb/sb 是过去 5 秒**累计值**，不是 per-second 速率。但 chart 标签是 "req/s"
+    # 和 "KB/s"，直接展示会读高 ~5 倍（target_rps=5/s × 4 sampler = 20/s，原始查询
+    # 返回 ~94，÷5s 才是 19/s 对得上）。这里按 overall.rps 时间戳中位间隔自适应除掉
+    # flush 窗口，让 rps / bytes_recv / bytes_sent / error_count 真正变成 per-second。
+    flush_sec = _detect_flush_window_sec(overall.get('rps') or [])
+    if flush_sec > 1.5:   # ≤ 1s 无需归一（已是 per-second）
+        _normalize_rates(overall, flush_sec)
+        for s in by_tg.values():
+            _normalize_rates(s, flush_sec)
+        for s in by_sampler.values():
+            _normalize_rates(s, flush_sec)
+        for per_tg in by_sampler_by_tg.values():
+            for s in per_tg.values():
+                _normalize_rates(s, flush_sec)
+        for s in by_host.values():
+            _normalize_rates(s, flush_sec)
+
     return {
         'overall': overall,
         'by_tg': by_tg,
@@ -690,6 +761,47 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         'totals_by_tg': totals_by_tg,
         'last_ts': last_ts,
     }
+
+
+# —— 把每个 series 的"per-flush 累计"字段除以 flush_sec 改成 per-second 速率 ——
+# 影响 rps（→ req/s）/ bytes_recv,bytes_sent,*_ok（→ B/s）/ error_count（→ err/s）。
+# 不动 percentile（延迟天然非速率）、active_users（峰值并发本身就不是速率）、
+# error_rate（百分比本身已无量纲）。
+_RATE_FIELDS = (
+    'rps',
+    'bytes_recv', 'bytes_sent',
+    'bytes_recv_ok', 'bytes_sent_ok',
+    'error_count',
+)
+
+
+def _normalize_rates(series: dict, flush_sec: float) -> None:
+    """in-place 把累计字段除以 flush_sec，转成 per-second 速率"""
+    if flush_sec <= 0:
+        return
+    for k in _RATE_FIELDS:
+        arr = series.get(k)
+        if not arr:
+            continue
+        series[k] = [[ts, v / flush_sec] for ts, v in arr]
+
+
+def _detect_flush_window_sec(rps_points: list) -> float:
+    """根据 overall.rps 时间戳的中位间隔猜 JMeter 实际 flush 周期（秒）。
+    默认 5s（JMeter InfluxdbBackendListenerClient.SEND_INTERVAL 默认值）。"""
+    if not rps_points or len(rps_points) < 2:
+        return 5.0
+    deltas = []
+    prev = rps_points[0][0]
+    for ts, _ in rps_points[1:]:
+        d = (ts - prev) / 1000.0
+        if d > 0:
+            deltas.append(d)
+        prev = ts
+    if not deltas:
+        return 5.0
+    deltas.sort()
+    return deltas[len(deltas) // 2]
 
 
 def _query_totals(client, safe_run: str) -> dict:

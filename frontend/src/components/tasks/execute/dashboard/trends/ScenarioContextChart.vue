@@ -40,6 +40,9 @@ const props = defineProps<{
   byTg: Record<string, RunMetricsSeries>
   // 后端按 testname 给的 {kind, params, scenario}
   tgPlannedMeta: Record<string, { kind: TGKind; params: Record<string, any>; scenario?: ScenarioId | null }>
+  // sampler→[TG name 列表] 映射；throughput 场景下要 × samplers_per_TG 把
+  // arrivals/sec 换算成可跟 actual rps 对比的 samples/sec
+  samplerThreadGroup?: Record<string, string[]>
   runId: string | null
   isTerminal: boolean
   xRange?: [number, number] | null
@@ -65,12 +68,35 @@ function resolveScenarioId(kind: TGKind, scenario?: ScenarioId | null): Scenario
   return scenario ?? inferScenarioFromKind(kind)
 }
 
-function targetRpsFromParams(scenarioId: ScenarioId, params: Record<string, any>): number | null {
+// 数 TG 内启用的 sampler 个数：从 sampler_thread_group 倒查（每个 sampler 知道自己
+// 属于哪些 TG，反向计数）。throughput 场景 target_rps 是 arrivals/sec（=每秒新 thread
+// 迭代数），而 actual RPS 是 samples/sec（每个迭代会跑完该 TG 内全部 sampler），
+// 两者差 N 倍（N=该 TG 启用 sampler 数）。target × N 才能跟 actual 同尺度比较。
+function countSamplersInTg(
+  tgName: string,
+  samplerThreadGroup?: Record<string, string[]>,
+): number {
+  if (!samplerThreadGroup) return 0
+  let n = 0
+  for (const [, tgs] of Object.entries(samplerThreadGroup)) {
+    if (tgs.includes(tgName)) n++
+  }
+  return n
+}
+
+function targetRpsFromParams(
+  scenarioId: ScenarioId,
+  params: Record<string, any>,
+  samplersPerIter: number,
+): number | null {
   if (scenarioId !== 'throughput') return null
   const t = Number(params?.target_rps ?? 0)
   if (!t || t <= 0) return null
   const unit = (params?.unit as string) === 'M' ? 60 : 1
-  return t / unit
+  // 没数到 sampler 数（早期没拉到 metrics）就退到原始 target_rps 不放大，
+  // 至少不会比 actual 偏大；拉到后值会刷新。
+  const mult = samplersPerIter > 0 ? samplersPerIter : 1
+  return (t / unit) * mult
 }
 
 const ctx = computed<ResolvedCtx | null>(() => {
@@ -88,7 +114,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
         scenario: scenarioById(id),
         rps: slice?.rps ?? props.rps,
         vu: useFallbackVu ? props.vu : actualVu,
-        targetRpsPerSec: targetRpsFromParams(id, meta.params),
+        targetRpsPerSec: targetRpsFromParams(id, meta.params, countSamplersInTg(props.selectedTg, props.samplerThreadGroup)),
         mixed: false,
         vuIsPlanned: useFallbackVu,
       }
@@ -108,12 +134,12 @@ const ctx = computed<ResolvedCtx | null>(() => {
     if (unique.length === 1) {
       const id = unique[0]
       // 同质场景：用第一个 TG 的 params 算 target（throughput 多 TG 时取第一个为代表）
-      const firstParams = metaEntries[0][1].params
+      const [firstTgName, firstMeta] = metaEntries[0]
       return {
         scenario: scenarioById(id),
         rps: props.rps,
         vu: props.vu,
-        targetRpsPerSec: targetRpsFromParams(id, firstParams),
+        targetRpsPerSec: targetRpsFromParams(id, firstMeta.params, countSamplersInTg(firstTgName, props.samplerThreadGroup)),
         mixed: false,
         vuIsPlanned: false,
       }
@@ -138,7 +164,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
     scenario: scenarioById(id),
     rps: props.rps,
     vu: props.vu,
-    targetRpsPerSec: targetRpsFromParams(id, cfg.params || {}),
+    targetRpsPerSec: targetRpsFromParams(id, cfg.params || {}, 0),  // 老 run 无 metrics 时不放大，至少不偏
     mixed: cfgs.length > 1 && new Set(
       cfgs.map((c) => resolveScenarioId(c.kind, c.scenario)),
     ).size > 1,
