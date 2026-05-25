@@ -321,23 +321,32 @@ function makeChartOption(
 ) {
   const formatValue = unit === 'cpu' ? formatCpuValue : unit === 'memory' ? formatMemValue : formatNetDiskValue
 
-  // 计算所有数据点的 min/max，动态设置纵坐标范围（对标 Grafana 自适应缩放）
+  // 计算所有数据点的 min/max，动态设置纵坐标范围
   const allValues = series.flatMap(s => s.data.map(d => d.value))
   let yMin: number | undefined
   let yMax: number | undefined
   if (allValues.length > 0) {
     const dataMin = Math.min(...allValues)
     const dataMax = Math.max(...allValues)
-    const span = dataMax - dataMin
-    if (span > 0.01) {
-      // 有明显波动：上下各留 30% 余量，让波动曲线充满图表
-      yMin = Math.max(0, dataMin - span * 0.3)
-      yMax = dataMax + span * 0.3
+    const avg = allValues.reduce((a, b) => a + b, 0) / allValues.length
+    
+    if (unit === 'netdisk') {
+      // 磁盘和网络：根据数据跨度智能调整
+      const span = dataMax - dataMin
+      if (span > 0) {
+        // 有波动：上下各留 20% 余量
+        yMin = Math.max(0, dataMin - span * 0.2)
+        yMax = dataMax + span * 0.2
+      } else {
+        // 无波动：以平均值为中心，上下各扩展 50%
+        const range = avg * 0.5
+        yMin = Math.max(0, avg - range)
+        yMax = avg + range
+      }
     } else {
-      // 数据几乎是直线：以数据中心为基准，留 ±1% 余量
-      const mid = (dataMin + dataMax) / 2
-      yMin = Math.max(0, mid - 1)
-      yMax = mid + 1
+      // CPU 和内存：以平均值为中心，上下各扩展 10 个百分点
+      yMin = Math.max(0, avg - 10)
+      yMax = avg + 10
     }
   }
   return {
@@ -515,17 +524,10 @@ function makePodChartOption(
   let yMin: number | undefined
   let yMax: number | undefined
   if (allValues.length > 0) {
-    const dataMin = Math.min(...allValues)
-    const dataMax = Math.max(...allValues)
-    const span = dataMax - dataMin
-    if (span > 0.01) {
-      yMin = Math.max(0, dataMin - span * 0.3)
-      yMax = dataMax + span * 0.3
-    } else {
-      const mid = (dataMin + dataMax) / 2
-      yMin = Math.max(0, mid - 1)
-      yMax = mid + 1
-    }
+    const avg = allValues.reduce((a, b) => a + b, 0) / allValues.length
+    // 以平均值为中心，上下各扩展 10 个百分点
+    yMin = Math.max(0, avg - 10)
+    yMax = avg + 10
   }
 
   // 主线组（WSS 或 CPU）
@@ -1003,6 +1005,57 @@ function getCpuAvgColor(serviceName: string): string {
   if (avg <= 70) return '#f59e0b' // 黄色：40% < avg <= 70%
   return '#ef4444' // 红色：> 70%
 }
+
+// 批量加载所有服务的 CPU 数据（用于标签颜色显示）
+const cpuColorsLoading = ref<Set<string>>(new Set())
+const cpuColorsLoaded = ref<Set<string>>(new Set())
+
+async function loadServiceCpuData(serviceName: string) {
+  // 如果已经加载过，直接返回
+  if (cpuColorsLoaded.value.has(serviceName)) return
+  if (cpuColorsLoading.value.has(serviceName)) return
+  
+  const sourceId = props.task.prometheus_source
+  if (!sourceId) return
+  
+  cpuColorsLoading.value.add(serviceName)
+  
+  try {
+    const end = Math.floor(Date.now() / 1000)
+    const start = end - effectiveRangeSeconds.value
+    const step = Math.max(15, Math.floor((end - start) / 240))
+    
+    // 只查询 cpu_usage 指标
+    const data = await prometheusSourcesApi.metrics(sourceId, {
+      service: serviceName,
+      start,
+      end,
+      step: `${step}s`,
+      metrics: 'cpu_usage',
+    })
+    
+    // 合并到 metricsMap（不覆盖已有的完整数据）
+    if (!metricsMap.value[serviceName]) {
+      metricsMap.value = { ...metricsMap.value, [serviceName]: data }
+    }
+    
+    cpuColorsLoaded.value.add(serviceName)
+  } catch (e) {
+    console.error(`[ServicePanelsTab] 加载 ${serviceName} CPU数据失败:`, e)
+  } finally {
+    cpuColorsLoading.value.delete(serviceName)
+  }
+}
+
+// 当服务列表或时间范围变化时，批量加载所有服务的CPU数据
+watch([services, effectiveRangeSeconds], async ([newServices]) => {
+  if (!newServices || newServices.length === 0) return
+  
+  // 并行加载所有服务的CPU数据
+  await Promise.all(
+    newServices.map(svc => loadServiceCpuData(svc))
+  )
+}, { immediate: true })
 </script>
 
 <template>
