@@ -6,14 +6,14 @@ import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import {
   GridComponent, TitleComponent, TooltipComponent, LegendComponent,
-  DataZoomComponent, MarkLineComponent,
+  DataZoomComponent, MarkLineComponent, ToolboxComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { onClickOutside } from '@vueuse/core'
 import { prometheusSourcesApi } from '@/lib/api'
 import type { FluentBitMetricsResponse, FluentBitPodMetric, PrometheusMetricsResponse, Task, TaskRun } from '@/types/task'
 
-use([LineChart, GridComponent, TitleComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, CanvasRenderer])
+use([LineChart, GridComponent, TitleComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, ToolboxComponent, CanvasRenderer])
 
 const props = defineProps<{
   task: Task
@@ -228,7 +228,27 @@ watch([selectedService, effectiveRangeSeconds], () => {
   console.log('[ServicePanelsTab] effectiveRangeSeconds 或 selectedService 变化，触发 fetchMetrics')
   void fetchMetrics() 
 })
-onMounted(() => { void fetchMetrics() })
+onMounted(() => { 
+  void fetchMetrics()
+  // 延迟绑定事件，确保图表已渲染
+  setTimeout(() => {
+    bindDataZoomEvents()
+  }, 1000)
+})
+
+// 绑定 dataZoom 事件到所有图表
+function bindDataZoomEvents() {
+  const allRefs = [cpuChartRef, memChartRef, networkChartRef, diskChartRef, cpuByPodChartRef, memByPodChartRef]
+  allRefs.forEach((ref) => {
+    const inst = ref.value?.chart ?? ref.value
+    if (!inst || typeof inst.on !== 'function') return
+    
+    // 监听 slider dataZoom 事件
+    inst.on('dataZoom', (params: any) => {
+      syncDataZoomToAllCharts(params)
+    })
+  })
+}
 
 // ── 自动刷新 ──
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -326,7 +346,7 @@ function makeChartOption(
       left: 8, top: 4,
       textStyle: { fontSize: 11, color: axisColor.value },
     },
-    grid: { top: 30, left: 54, right: 14, bottom: 16 },
+    grid: { top: 30, left: 54, right: 14, bottom: 30, containLabel: false },
     tooltip: {
       trigger: 'axis' as const,
       formatter: (params: any) => {
@@ -344,7 +364,28 @@ function makeChartOption(
         filterMode: 'filter' as const,
         zoomOnMouseWheel: true,
         moveOnMouseMove: true,
-        moveOnMouseWheel: false,
+        moveOnMouseWheel: true,
+        start: 0,
+        end: 100,
+        minValueSpan: 60000,
+      },
+      {
+        type: 'slider' as const,
+        xAxisIndex: 0,
+        filterMode: 'filter' as const,
+        start: 0,
+        end: 100,
+        height: 20,
+        bottom: 2,
+        showDetail: false,
+        borderColor: 'transparent',
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        fillerColor: 'rgba(59, 130, 246, 0.2)',
+        handleSize: '80%',
+        handleStyle: {
+          color: '#fff',
+          borderColor: 'rgba(59, 130, 246, 0.5)',
+        },
       },
     ],
     xAxis: {
@@ -519,7 +560,7 @@ function makePodChartOption(
       left: 8, top: 4,
       textStyle: { fontSize: 11, color: axisColor.value },
     },
-    grid: { top: 30, left: 54, right: 14, bottom: 16 },
+    grid: { top: 30, left: 54, right: 14, bottom: 30, containLabel: false },
     tooltip: {
       trigger: 'axis' as const,
       formatter: (params: any) => {
@@ -541,7 +582,28 @@ function makePodChartOption(
         filterMode: 'filter' as const,
         zoomOnMouseWheel: true,
         moveOnMouseMove: true,
-        moveOnMouseWheel: false,
+        moveOnMouseWheel: true,
+        start: 0,
+        end: 100,
+        minValueSpan: 60000,
+      },
+      {
+        type: 'slider' as const,
+        xAxisIndex: 0,
+        filterMode: 'filter' as const,
+        start: 0,
+        end: 100,
+        height: 20,
+        bottom: 2,
+        showDetail: false,
+        borderColor: 'transparent',
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        fillerColor: 'rgba(59, 130, 246, 0.2)',
+        handleSize: '80%',
+        handleStyle: {
+          color: '#fff',
+          borderColor: 'rgba(59, 130, 246, 0.5)',
+        },
       },
     ],
     xAxis: {
@@ -591,25 +653,144 @@ const memByPodOption = computed(() => {
 const cpuByPodChartRef = ref()
 const memByPodChartRef = ref()
 
-// ── 图表交互：双击重置缩放 / 扩展时间范围 ──
+// ── 图表交互：框选缩放 ──
 const cpuChartRef = ref()
 const memChartRef = ref()
 const networkChartRef = ref()
 const diskChartRef = ref()
+const CHART_GROUP = 'service-panels'
+
+// 注册图表同步 connector（全局只需要执行一次）
+function initChartConnector() {
+  if ((window as any).__echartsConnectorRegistered) return
+  ;(window as any).__echartsConnectorRegistered = true
+  import('echarts').then(({ connect }) => {
+    // 建立 group 连接，所有设置相同 group 的图表将自动同步 dataZoom
+    connect(CHART_GROUP)
+  })
+}
+initChartConnector()
+
+// 图表同步：拖动任一图表时间轴时，同步到所有其他图表
+function syncDataZoomToAllCharts(event: any) {
+  // 提取 start/end 值
+  let start = 0
+  let end = 100
+  
+  if (event.batch && event.batch.length > 0) {
+    const batch = event.batch[0]
+    if (batch != null) {
+      start = batch.start ?? 0
+      end = batch.end ?? 100
+    }
+  } else if (event.start != null && event.end != null) {
+    start = event.start
+    end = event.end
+  } else {
+    return
+  }
+  
+  // 同步到所有图表
+  const allRefs = [cpuChartRef, memChartRef, networkChartRef, diskChartRef, cpuByPodChartRef, memByPodChartRef]
+  allRefs.forEach(ref => {
+    const inst = ref.value?.chart ?? ref.value
+    if (!inst || typeof inst.dispatchAction !== 'function') return
+    
+    // 避免重复触发：检查当前图表是否已经是目标范围
+    try {
+      const opt = inst.getOption()
+      const currentZoom = opt?.dataZoom?.[1] // slider 是第二个 dataZoom
+      if (currentZoom) {
+        const currentStart = currentZoom.start ?? 0
+        const currentEnd = currentZoom.end ?? 100
+        // 如果差异小于 0.1%，不更新（避免死循环）
+        if (Math.abs(currentStart - start) < 0.1 && Math.abs(currentEnd - end) < 0.1) {
+          return
+        }
+      }
+    } catch {
+      // ignore
+    }
+    
+    inst.dispatchAction({ type: 'dataZoom', start, end })
+  })
+}
+
+// 全局缩放状态：0=原始范围, >0=放大倍数
+const zoomScale = ref(0)  // 0=100%, 1=80%, 2=64%...
+
+// 保存原始时间范围（用于重置）
+const originalStart = ref(0)
+const originalEnd = ref(100)
+
+// 分发缩放到所有图表
+function dispatchZoom(chartRef: any, start: number, end: number) {
+  const instance = chartRef.value?.chart ?? chartRef.value
+  if (instance && typeof instance.dispatchAction === 'function') {
+    try {
+      instance.dispatchAction({ type: 'dataZoom', start, end })
+    } catch { /* ignore */ }
+  }
+}
+
+// 放大：缩小时间范围（聚焦）
+function zoomInAll() {
+  if (zoomScale.value === 0) {
+    // 记录当前范围作为基准
+    const instance = cpuChartRef.value?.chart ?? cpuChartRef.value
+    if (instance) {
+      const opt = instance.getOption()
+      originalStart.value = opt?.dataZoom?.[0]?.start ?? 0
+      originalEnd.value = opt?.dataZoom?.[0]?.end ?? 100
+    }
+  }
+  zoomScale.value++
+  
+  // 计算缩小后的范围（以当前中心为基准）
+  const center = (originalStart.value + originalEnd.value) / 2
+  const baseRange = originalEnd.value - originalStart.value
+  const newRange = Math.max(10, baseRange * Math.pow(0.8, zoomScale.value))
+  const newStart = Math.max(0, center - newRange / 2)
+  const newEnd = Math.min(100, newStart + newRange)
+  
+  // 应用到所有图表
+  ;[cpuChartRef, memChartRef, networkChartRef, diskChartRef, cpuByPodChartRef, memByPodChartRef].forEach(ref => {
+    dispatchZoom(ref, newStart, newEnd)
+  })
+}
+
+// 缩小/重置：恢复原始范围
+function zoomOutAll() {
+  if (zoomScale.value <= 0) {
+    // 已经是最原始的范围，执行重置
+    zoomScale.value = 0
+  } else {
+    zoomScale.value--
+  }
+  
+  // 计算恢复的范围
+  const center = (originalStart.value + originalEnd.value) / 2
+  const baseRange = originalEnd.value - originalStart.value
+  const newRange = Math.max(10, baseRange * Math.pow(0.8, zoomScale.value))
+  const newStart = Math.max(0, center - newRange / 2)
+  const newEnd = Math.min(100, newStart + newRange)
+  
+  // 应用到所有图表
+  ;[cpuChartRef, memChartRef, networkChartRef, diskChartRef, cpuByPodChartRef, memByPodChartRef].forEach(ref => {
+    dispatchZoom(ref, newStart, newEnd)
+  })
+}
 
 function handleDblClick(chartType: 'cpu' | 'mem' | 'network' | 'disk') {
   const chartRef = chartType === 'cpu' ? cpuChartRef : chartType === 'mem' ? memChartRef : chartType === 'network' ? networkChartRef : diskChartRef
-  // vue-echarts: ref 可能直接是 ECharts 实例，也可能是组件实例（.chart 属性）
   const instance = chartRef.value?.chart ?? chartRef.value
   if (instance && typeof instance.dispatchAction === 'function') {
     try {
       const option = instance.getOption()
       const zoom = option?.dataZoom?.[0]
       if (zoom && (zoom.start > 1 || zoom.end < 99)) {
-        // 已缩放 → 重置到全范围
         instance.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
       } else {
-        // 全范围 → 跳到下一档更大的时间范围
         const nextIdx = Math.min(selectedRangeIdx.value + 1, QUICK_RANGES.length - 1)
         if (nextIdx > selectedRangeIdx.value) {
           selectedRangeIdx.value = nextIdx
@@ -617,7 +798,6 @@ function handleDblClick(chartType: 'cpu' | 'mem' | 'network' | 'disk') {
         }
       }
     } catch {
-      // fallback: 直接重置
       instance.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
     }
   }
@@ -664,6 +844,18 @@ const VIEW_TITLES: Record<ViewPanelId, string> = {
 
 // ── Pod 统计表：每个 pod 的 max / current ────────────
 interface PodStat { name: string; max: number; current: number; color: string }
+
+// 获取当前服务相关的 Pod 列表（基于 Prometheus cpu_usage_by_pod 数据）
+// 如果 cpu_usage_by_pod 有数据，则按其过滤；如果没有，则显示所有 Pod（兼容不同数据源）
+const serviceRelatedPods = computed(() => {
+  if (!fbData.value?.pods) return []
+  const perPodNames = currentMetrics.value?.cpu_usage_by_pod?.pods
+  if (perPodNames && Object.keys(perPodNames).length > 0) {
+    const validPodNames = new Set(Object.keys(perPodNames))
+    return fbData.value.pods.filter(pod => validPodNames.has(pod.pod))
+  }
+  return fbData.value.pods
+})
 
 function computePodStats(
   pods: Record<string, { ts: number; value: number }[]>,
@@ -737,12 +929,22 @@ const fbLoading = ref(false)
 const fbError = ref('')
 const fbLoadedAt = ref(0)
 
+// 获取 fluent-bit 查询的时间参数（支持历史查询）
+// 与 fetchMetrics 保持一致，使用 customFrom/customTo 或 run 的 finished_at
+const fluentBitTime = computed<number | undefined>(() => {
+  // 如果有自定义时间范围，使用 customTo 的时间
+  if (isCustomRange.value && customTo.value) {
+    return Math.floor(new Date(customTo.value).getTime() / 1000)
+  }
+  return undefined
+})
+
 async function fetchFluentBit() {
   if (!props.task.prometheus_source) return
   fbLoading.value = true
   fbError.value = ''
   try {
-    fbData.value = await prometheusSourcesApi.fluentBit()
+    fbData.value = await prometheusSourcesApi.fluentBit(fluentBitTime.value)
     fbLoadedAt.value = Date.now()
   } catch (e) {
     fbError.value = e instanceof Error ? e.message : String(e)
@@ -753,7 +955,8 @@ async function fetchFluentBit() {
 
 // 首次载入和同步刷新
 onMounted(() => { void fetchFluentBit() })
-watch(isRunActive, () => { void fetchFluentBit() })
+// 当时间范围或选中的服务变化时，重新获取 fluent-bit 数据
+watch([customFrom, customTo, selectedService, isRunActive], () => { void fetchFluentBit() })
 
 function fmtNum(v: number | null | undefined, decimals = 1): string {
   if (v == null || isNaN(v)) return '-'
@@ -990,6 +1193,8 @@ function getCpuAvgColor(serviceName: string): string {
           <RefreshCw :size="10" :class="{ 'animate-spin': loading || fbLoading }" />
           刷新
         </button>
+
+
       </div>
 
       <!-- 错误提示 -->
@@ -1017,15 +1222,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- CPU 图表 -->
         <div v-if="cpuOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('cpu')"
-          >□ View</button>
           <v-chart
             ref="cpuChartRef"
             :option="cpuOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1051,15 +1251,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- 内存图表 -->
         <div v-if="memOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('mem')"
-          >□ View</button>
           <v-chart
             ref="memChartRef"
             :option="memOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1087,15 +1282,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- Pod CPU 图表 -->
         <div v-if="cpuByPodOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('podCpu')"
-          >□ View</button>
           <v-chart
             ref="cpuByPodChartRef"
             :option="cpuByPodOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1133,15 +1323,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- Pod 内存图表 -->
         <div v-if="memByPodOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('podMem')"
-          >□ View</button>
           <v-chart
             ref="memByPodChartRef"
             :option="memByPodOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1181,15 +1366,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- 磁盘 I/O 图表 -->
         <div v-if="diskOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('disk')"
-          >□ View</button>
           <v-chart
             ref="diskChartRef"
             :option="diskOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1213,15 +1393,10 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- 网络流量图表 -->
         <div v-if="networkOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
-          <!-- View 按鈕 -->
-          <button
-            class="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-50 hover:opacity-100 transition-opacity"
-            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
-            @click="openView('network')"
-          >□ View</button>
           <v-chart
             ref="networkChartRef"
             :option="networkOption"
+            :group="CHART_GROUP"
             :init-options="{ renderer: 'canvas' }"
             style="height: 180px"
             autoresize
@@ -1293,7 +1468,7 @@ function getCpuAvgColor(serviceName: string): string {
                 </thead>
                 <tbody>
                   <tr
-                    v-for="(pod, idx) in fbData.pods.filter(p => cpuPodStats.some(s => s.name === p.pod))"
+                    v-for="(pod, idx) in serviceRelatedPods"
                     :key="pod.pod"
                     :style="{
                       background: idx % 2 === 0 ? 'transparent' : (isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)'),
@@ -1351,7 +1526,7 @@ function getCpuAvgColor(serviceName: string): string {
         </div>
 
         <!-- 无数据 -->
-        <div v-else-if="!fbData || !fbData.pods.filter(p => cpuPodStats.some(s => s.name === p.pod)).length" class="py-4 text-center text-[11px]"
+        <div v-else-if="!serviceRelatedPods.length" class="py-4 text-center text-[11px]"
              :style="{ color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)' }">
           未找到 {{ selectedService }} 的 Pod 资源数据
         </div>
@@ -1374,7 +1549,7 @@ function getCpuAvgColor(serviceName: string): string {
             </thead>
             <tbody>
               <tr
-                v-for="(pod, idx) in fbData.pods.filter(p => cpuPodStats.some(s => s.name === p.pod))"
+                v-for="(pod, idx) in serviceRelatedPods"
                 :key="pod.pod"
                 :style="{
                   background: idx % 2 === 0 ? 'transparent' : (isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)'),
@@ -1397,11 +1572,6 @@ function getCpuAvgColor(serviceName: string): string {
 
         <!-- 底部提示 -->
         <div class="mt-2 space-y-1">
-          <!-- 操作提示 -->
-          <div class="text-center text-[9px]"
-               :style="{ color: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.3)' }">
-            滚轮缩放 · 拖拽平移 · 双击重置或扩展范围
-          </div>
           <!-- 数据更新时间 -->
           <p v-if="fbLoadedAt" class="text-[10px] text-center"
              :style="{ color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.35)' }">

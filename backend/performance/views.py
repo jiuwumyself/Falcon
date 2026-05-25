@@ -1817,13 +1817,24 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='fluent-bit')
     def fluent_bit(self, request):
-        """Fluent-bit 尔时监控数据（所有 enabled 数据源汇总查询）。
+        """Fluent-bit 实时监控数据（所有 enabled 数据源汇总查询）。
 
         GET /api/performance/prometheus-sources/fluent-bit/
+        GET /api/performance/prometheus-sources/fluent-bit/?time=<unix_timestamp>
 
-        返回每个 pod 的实时 CPU、内存、磁盘、网络指标（instant query）。
+        支持可选的 time 参数（Unix 时间戳），用于查询历史时刻的数据。
+        如果未指定 time，则查询当前时刻数据（instant query）。
         """
         from .services.prometheus import instant_query, _detect_service_label, PrometheusAPIError  # noqa: PLC0415
+
+        # 解析时间参数（支持历史查询）
+        time_param = request.query_params.get('time')
+        query_time = None
+        if time_param:
+            try:
+                query_time = int(time_param)
+            except ValueError:
+                pass
 
         # 主业务容器 PromQL——排除 sidecar（fluent-bit）和 pause 容器
         CONTAINER_FILTER = 'container!="",container!="POD",container!="fluent-bit"'
@@ -1874,9 +1885,12 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
         pods_ns: dict[str, str] = {}
 
         for ds in sources:
+            # 计算查询时间（用于历史数据查询）
+            query_ts = str(query_time) if query_time else None
+            
             # 查询命名空间（从 kube_pod_container_info 或 kube_pod_info 获取）
             try:
-                ns_results = instant_query(ds.url, POD_NS_QUERY, auth_token=ds.auth_token)
+                ns_results = instant_query(ds.url, POD_NS_QUERY, time=query_ts, auth_token=ds.auth_token)
                 for series in ns_results:
                     m = series.get('metric', {})
                     pod = m.get('pod', '')
@@ -1888,7 +1902,7 @@ class PrometheusDataSourceViewSet(viewsets.ReadOnlyModelViewSet):
 
             for metric_key, display_name, promql in FLUENT_BIT_QUERIES:
                 try:
-                    results = instant_query(ds.url, promql, auth_token=ds.auth_token)
+                    results = instant_query(ds.url, promql, time=query_ts, auth_token=ds.auth_token)
                 except PrometheusAPIError:
                     continue
                 for series in results:

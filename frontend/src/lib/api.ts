@@ -247,8 +247,10 @@ export const prometheusSourcesApi = {
     if (opts.metrics) params.set('metrics', opts.metrics)
     return api<PrometheusMetricsResponse>(`/prometheus-sources/${sourceId}/metrics/?${params}`)
   },
-  /** 查询 fluent-bit 实时监控数据（所有 enabled 数据源汇总） */
-  fluentBit: () =>
-    api<FluentBitMetricsResponse>('/prometheus-sources/fluent-bit/'),
+  /** 查询 fluent-bit 实时监控数据（所有 enabled 数据源汇总）
+   * @param time 可选，Unix 时间戳，用于查询历史时刻的数据
+   */
+  fluentBit: (time?: number) =>
+    api<FluentBitMetricsResponse>('/prometheus-sources/fluent-bit/' + (time ? `?time=${time}` : '')),
 }
 
