@@ -1346,16 +1346,16 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
           <!-- Pod CPU 统计表（Grafana 风格行格式） -->
           <div v-if="cpuPodStats.length" class="px-2 pb-1.5">
             <!-- 表头 -->
-            <div class="flex text-[9px] font-mono mb-0.5" :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.38)' }">
+            <div class="flex text-[16px] font-mono mb-0.5" :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.38)' }">
               <span class="flex-1 min-w-0"></span>
-              <span class="w-16 text-right">max</span>
-              <span class="w-16 text-right">current</span>
+              <span class="w-10 text-right mr-12">max</span>
+              <span class="w-10 text-right ml-3">current</span>
             </div>
             <!-- 每个 Pod 一行 -->
             <div
               v-for="pod in cpuPodStats"
               :key="pod.name"
-              class="flex items-center text-[9px] font-mono cursor-pointer rounded px-0.5"
+              class="flex items-center text-[16px] font-mono cursor-pointer rounded px-0.5"
               :style="{
                 opacity: activeCpuPod && activeCpuPod !== pod.name ? 0.4 : 1,
                 background: activeCpuPod === pod.name ? (isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)') : 'transparent',
@@ -1363,9 +1363,9 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
               @click="clickCpuPod(pod.name)"
             >
               <span class="inline-block w-2 h-2 rounded-full flex-shrink-0 mr-1" :style="{ background: pod.color }" />
-              <span class="flex-1 min-w-0 truncate" :title="pod.name" :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)' }">{{ pod.name }}</span>
-              <span class="w-16 text-right font-semibold" :style="{ color: pod.color }">{{ formatCpuValue(pod.max) }}</span>
-              <span class="w-16 text-right font-semibold" style="color: #fbbf24">{{ formatCpuValue(pod.current) }}</span>
+              <span class="flex-1 min-w-0 ml-20 truncate" :title="pod.name" :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)' }">{{ pod.name }}</span>
+              <span class="w-10 text-right font-semibold mr-12" :style="{ color: pod.color }">{{ formatCpuValue(pod.max) }}</span>
+              <span class="w-10 text-right font-semibold ml-3" style="color: #fbbf24">{{ formatCpuValue(pod.current) }}</span>
             </div>
           </div>
         </div>
@@ -1387,16 +1387,16 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
           <!-- Pod 内存统计表（Grafana 风格行格式） -->
           <div v-if="memPodStats.length" class="px-2 pb-1.5">
             <!-- 表头 -->
-            <div class="flex text-[9px] font-mono mb-0.5" :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.38)' }">
+            <div class="flex text-[16px] font-mono mb-0.5" :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.38)' }">
               <span class="flex-1 min-w-0"></span>
-              <span class="w-16 text-right">max</span>
-              <span class="w-16 text-right">current</span>
+              <span class="w-10 text-right mr-12">max</span>
+              <span class="w-10 text-right ml-3">current</span>
             </div>
             <!-- 每个 Pod 一行 -->
             <div
               v-for="pod in memPodStats"
               :key="pod.name"
-              class="flex items-center text-[9px] font-mono cursor-pointer rounded px-0.5"
+              class="flex items-center text-[16px] font-mono cursor-pointer rounded px-0.5"
               :style="{
                 opacity: activeMemPod && activeMemPod !== pod.name ? 0.4 : 1,
                 background: activeMemPod === pod.name ? (isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)') : 'transparent',
@@ -1404,9 +1404,9 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
               @click="clickMemPod(pod.name)"
             >
               <span class="inline-block w-2 h-2 rounded-full flex-shrink-0 mr-1" :style="{ background: pod.color }" />
-              <span class="flex-1 min-w-0 truncate" :title="pod.name" :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)' }">{{ pod.name }}</span>
-              <span class="w-16 text-right font-semibold" :style="{ color: pod.color }">{{ formatMemValue(pod.max) }}</span>
-              <span class="w-16 text-right font-semibold" style="color: #fbbf24">{{ formatMemValue(pod.current) }}</span>
+              <span class="flex-1 min-w-0 ml-20 truncate" :title="pod.name" :style="{ color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)' }">{{ pod.name }}</span>
+              <span class="w-10 text-right font-semibold mr-12" :style="{ color: pod.color }">{{ formatMemValue(pod.max) }}</span>
+              <span class="w-10 text-right font-semibold ml-3" style="color: #fbbf24">{{ formatMemValue(pod.current) }}</span>
             </div>
           </div>
         </div>
