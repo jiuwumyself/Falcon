@@ -1275,6 +1275,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- CPU 图表 -->
         <div v-if="cpuOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('cpu')"
+          >□ View</button>
           <v-chart
             ref="cpuChartRef"
             :option="cpuOption"
@@ -1304,6 +1310,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- 内存图表 -->
         <div v-if="memOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('mem')"
+          >□ View</button>
           <v-chart
             ref="memChartRef"
             :option="memOption"
@@ -1335,6 +1347,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- Pod CPU 图表 -->
         <div v-if="cpuByPodOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('podCpu')"
+          >□ View</button>
           <v-chart
             ref="cpuByPodChartRef"
             :option="cpuByPodOption"
@@ -1376,6 +1394,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- Pod 内存图表 -->
         <div v-if="memByPodOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('podMem')"
+          >□ View</button>
           <v-chart
             ref="memByPodChartRef"
             :option="memByPodOption"
@@ -1419,6 +1443,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- 磁盘 I/O 图表 -->
         <div v-if="diskOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('disk')"
+          >□ View</button>
           <v-chart
             ref="diskChartRef"
             :option="diskOption"
@@ -1446,6 +1476,12 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
 
         <!-- 网络流量图表 -->
         <div v-if="networkOption" class="rounded-lg p-1 relative" :style="{ background: panelBg }">
+          <!-- View 按钮 -->
+          <button
+            class="absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded text-[9px] font-medium opacity-60 hover:opacity-100 transition-opacity"
+            :style="{ background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: isDark ? '#fff' : '#333' }"
+            @click="openView('network')"
+          >□ View</button>
           <v-chart
             ref="networkChartRef"
             :option="networkOption"
