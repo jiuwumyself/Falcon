@@ -39,7 +39,14 @@ const servicesLoading = ref(false)
 })()
 
 // 数据源切换时拉服务列表 + 通知父组件
-watch(selectedSourceId, async (id) => {
+// 使用 immediate: true 确保组件挂载或 sourceId 变化时都会加载
+watch([selectedSourceId, () => props.sourceId], async ([currentId, propId]) => {
+  // 当 props.sourceId 变化时，同步到 selectedSourceId
+  if (propId !== undefined && propId !== currentId) {
+    selectedSourceId.value = propId
+  }
+  
+  const id = selectedSourceId.value
   emit('update:sourceId', id)
   if (!id) {
     prometheusServices.value = []
@@ -54,7 +61,7 @@ watch(selectedSourceId, async (id) => {
   } finally {
     servicesLoading.value = false
   }
-})
+}, { immediate: true })
 
 const open = ref(false)
 const query = ref('')
