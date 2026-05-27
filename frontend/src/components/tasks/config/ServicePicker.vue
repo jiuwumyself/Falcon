@@ -40,18 +40,35 @@ const servicesLoading = ref(false)
 
 // 数据源切换时拉服务列表 + 通知父组件
 // 使用 immediate: true 确保组件挂载或 sourceId 变化时都会加载
-watch([selectedSourceId, () => props.sourceId], async ([currentId, propId]) => {
-  // 当 props.sourceId 变化时，同步到 selectedSourceId
-  if (propId !== undefined && propId !== currentId) {
-    selectedSourceId.value = propId
+// 关键：区分用户操作和 props 变化，避免循环触发
+let isInitialLoad = true
+let isUserChanging = false  // 标记是否是用户在下拉框中主动选择
+
+// 监听用户在下拉框中的选择
+watch(selectedSourceId, (newId, oldId) => {
+  // 只有当值真正变化且不是初始化时才标记为用户操作
+  if (!isInitialLoad && newId !== oldId) {
+    isUserChanging = true
   }
+})
+
+// 主 watch：处理数据源切换和服务列表加载
+watch([selectedSourceId, () => props.sourceId], async ([currentId, propId]) => {
+  const id = currentId // 使用 selectedSourceId 的值
   
-  const id = selectedSourceId.value
-  emit('update:sourceId', id)
+  // 如果没有数据源，清空服务列表
   if (!id) {
     prometheusServices.value = []
+    // 只有用户主动操作时才 emit
+    if (!isInitialLoad && isUserChanging) {
+      emit('update:sourceId', id)
+      isUserChanging = false
+    }
+    isInitialLoad = false
     return
   }
+  
+  // 加载服务列表
   servicesLoading.value = true
   try {
     const r = await prometheusSourcesApi.services(id)
@@ -61,6 +78,18 @@ watch([selectedSourceId, () => props.sourceId], async ([currentId, propId]) => {
   } finally {
     servicesLoading.value = false
   }
+  
+  // emit 逻辑：
+  // 1. 非初始化阶段
+  // 2. 且是用户主动操作 或 props.sourceId 与 currentId 不同
+  if (!isInitialLoad) {
+    const shouldEmit = isUserChanging || (propId !== undefined && propId !== currentId)
+    if (shouldEmit) {
+      emit('update:sourceId', id)
+      isUserChanging = false
+    }
+  }
+  isInitialLoad = false
 }, { immediate: true })
 
 const open = ref(false)
