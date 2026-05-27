@@ -1083,20 +1083,18 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
           v-for="svc in services" :key="svc"
           class="px-2.5 py-1 rounded text-[11px] cursor-pointer"
           :style="{
-            background: selectedService === svc
-              ? (isDark ? 'rgba(59,130,246,0.2)' : 'rgba(59,130,246,0.12)')
-              : getCpuAvgColor(svc) === '#10b981' // 绿色：<= 40%
-                ? (isDark ? 'rgba(16,185,129,0.15)' : 'rgba(16,185,129,0.1)')
-                : getCpuAvgColor(svc) === '#f59e0b' // 黄色：40% < avg <= 70%
-                  ? (isDark ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)')
-                  : getCpuAvgColor(svc) === '#ef4444' // 红色：> 70%
-                    ? (isDark ? 'rgba(239,68,68,0.15)' : 'rgba(239,68,68,0.1)')
-                    : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'),
+            background: getCpuAvgColor(svc) === '#10b981' // 绿色：<= 40%
+              ? (isDark ? 'rgba(16,185,129,0.15)' : 'rgba(16,185,129,0.1)')
+              : getCpuAvgColor(svc) === '#f59e0b' // 黄色：40% < avg <= 70%
+                ? (isDark ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)')
+                : getCpuAvgColor(svc) === '#ef4444' // 红色：> 70%
+                  ? (isDark ? 'rgba(239,68,68,0.15)' : 'rgba(239,68,68,0.1)')
+                  : (isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'),
             color: selectedService === svc
               ? (isDark ? '#93c5fd' : '#2563eb')
               : (isDark ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.7)'),
             border: `1px solid ${selectedService === svc
-              ? (isDark ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.3)')
+              ? 'rgba(59,130,246,0.6)'
               : getCpuAvgColor(svc) === '#10b981'
                 ? (isDark ? 'rgba(16,185,129,0.3)' : 'rgba(16,185,129,0.25)')
                 : getCpuAvgColor(svc) === '#f59e0b'
@@ -1104,6 +1102,7 @@ watch([services, effectiveRangeSeconds], async ([newServices]) => {
                   : getCpuAvgColor(svc) === '#ef4444'
                     ? (isDark ? 'rgba(239,68,68,0.3)' : 'rgba(239,68,68,0.25)')
                     : 'transparent'}`,
+            boxShadow: selectedService === svc ? '0 0 0 2px rgba(59,130,246,0.25)' : 'none',
           }"
           @click="selectedService = svc"
         >
