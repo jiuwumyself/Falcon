@@ -67,6 +67,11 @@ _STOPTEST_PORT_RANGE = 1000
 _GRACEFUL_TIMEOUT_SEC = 5
 _SIGTERM_TIMEOUT_SEC = 3
 
+# P0 #4：任务最大运行时长限制（防止僵尸任务）。
+# 默认 24 小时（86400s）。可通过 settings.MAX_RUN_DURATION_SEC 覆盖。
+# 到达上限后自动标记为 TIMEOUT，触发 cancel 链路清理资源。
+_MAX_RUN_DURATION_SEC = getattr(settings, 'MAX_RUN_DURATION_SEC', 86400)
+
 # 心跳间隔 + duration 超时余量
 _HEARTBEAT_INTERVAL_SEC = 1.0
 _DURATION_OVERRUN_SEC = 60
@@ -773,6 +778,8 @@ class RunExecutor:
         last_jtl_pull = start_t
         any_failed = False
         early_aborted = False
+        # P0 #4：追踪取消状态持续时间，避免永久等待 agent 响应
+        cancelling_since: float | None = None
 
         while True:
             self._update_run(last_heartbeat_at=dj_timezone.now())
@@ -786,11 +793,34 @@ class RunExecutor:
             if not pending:
                 break
 
-            if self._cancelled.is_set():
-                # cancel 已经在 cancel() 里广播过了；这里继续等终态
-                pass
-
             now = time.monotonic()
+
+            # P0 #4：取消超时处理
+            if self._cancelled.is_set():
+                if cancelling_since is None:
+                    cancelling_since = now
+                    self._append_runtime_log('WARN', f'已进入取消流程，等待 {len(pending)} 台 agent 响应...')
+                else:
+                    elapsed = now - cancelling_since
+                    # 取消超时：超过 GRACEFUL + SIGTERM 时间后强制标记为 cancelled
+                    cancel_timeout = _GRACEFUL_TIMEOUT_SEC + _SIGTERM_TIMEOUT_SEC + 5
+                    if elapsed > cancel_timeout:
+                        self._append_runtime_log(
+                            'WARN',
+                            f'取消超时（已等待 {int(elapsed)}s > {cancel_timeout}s），强制标记为 cancelled',
+                        )
+                        self._update_run(
+                            status=RunStatus.CANCELLED,
+                            error_message=f'取消请求超时（{int(elapsed)}s 无响应），系统强制终止',
+                            finished_at=dj_timezone.now(),
+                        )
+                        # 标记所有 agent 为已完成（避免后续处理）
+                        with self._agent_runs_lock:
+                            for lg_id, info in self._agent_runs.items():
+                                info['finished'] = True
+                        return 1  # 非零表示异常退出
+            else:
+                cancelling_since = None
 
             # § 12 S1：实时锚点扫描（first_sample / first_error / first_5xx）
             # 分布式时本地 results.jtl 还没合并 → JTL 扫描会自动 skip；first_error 走
@@ -858,6 +888,27 @@ class RunExecutor:
                     f'→ 广播 cancel 给 {len(pending)} 台 agent',
                 )
                 self._update_run(status=RunStatus.CANCELLING)
+                for lg_id, info in pending:
+                    try:
+                        requests.post(
+                            f'{info["base_url"]}/runs/{info["agent_run_id"]}/cancel',
+                            timeout=5, headers=self._agent_headers(),
+                        )
+                    except requests.RequestException:
+                        pass
+                self._update_run(status=RunStatus.TIMEOUT)
+
+            # P0 #4：最大运行时长限制（防止僵尸任务）
+            if _MAX_RUN_DURATION_SEC > 0 and (now - start_t) > _MAX_RUN_DURATION_SEC:
+                self._append_runtime_log(
+                    'WARN',
+                    f'分布式任务最大运行时长已达上限（{_MAX_RUN_DURATION_SEC}s = {_MAX_RUN_DURATION_SEC // 3600}h）'
+                    f'→ 广播 cancel 给 {len(pending)} 台 agent',
+                )
+                self._update_run(
+                    status=RunStatus.CANCELLING,
+                    error_message=f'任务运行时长超过上限（{_MAX_RUN_DURATION_SEC // 3600}小时），系统自动终止',
+                )
                 for lg_id, info in pending:
                     try:
                         requests.post(
