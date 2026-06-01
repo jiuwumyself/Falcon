@@ -16,6 +16,9 @@ const loading = ref(false)
 const errorMessage = ref('')
 const sortKey = ref<SamplerSortKey>('error_rate_desc')
 const expandedLabel = ref<string | null>(null)
+// 竞态防御：切 run / 重复 mount 时，旧请求晚到不能覆盖新请求；
+// 上次失败的请求也不能污染新切过来的状态（避免"切回来还看到 HTTP 502"残留）
+let inflightToken = 0
 
 // SLA 阈值（暂用静态；v1.2 接 Service 模型后从那里取）
 const P99_SLA_MS = 1000
@@ -31,15 +34,19 @@ async function load() {
     stats.value = []
     return
   }
+  const token = ++inflightToken
   loading.value = true
   errorMessage.value = ''
   try {
-    stats.value = await runsApi.samplerStats(props.runId)
+    const data = await runsApi.samplerStats(props.runId)
+    if (token !== inflightToken) return   // 已被新请求顶掉，丢弃晚到结果
+    stats.value = data
   } catch (e) {
-    errorMessage.value = String(e)
+    if (token !== inflightToken) return
+    errorMessage.value = e instanceof Error ? e.message : String(e)
     stats.value = []
   } finally {
-    loading.value = false
+    if (token === inflightToken) loading.value = false
   }
 }
 

@@ -227,16 +227,35 @@ const isFlashing = computed(
   () => ctx?.errorFlashPath.value === props.node.path,
 )
 
+// 行级 hover 高亮：鼠标在该行任意位置 → 浅色；hover 到右侧开关时进一步加强 +
+// 左侧画 enabled-color 长条，把视觉从开关锚回行首的状态点，避免误关错行。
+const rowHovered = ref(false)
+const toggleHovered = ref(false)
+
 const rowBackground = computed(() => {
   // Error flash wins over search highlight so the user can't miss a failed save.
   if (isFlashing.value) {
     return props.isDark ? 'rgba(239,68,68,0.28)' : 'rgba(254,202,202,0.75)'
   }
+  // Hover toggle → 强紫色高亮（提示"将要操作的就是这一行"）
+  if (toggleHovered.value && !isRootTestPlan.value) {
+    return props.isDark ? 'rgba(167,139,250,0.22)' : 'rgba(167,139,250,0.16)'
+  }
   if (isMatch.value) {
     return props.isDark ? 'rgba(250,204,21,0.18)' : 'rgba(254,240,138,0.55)'
   }
+  // 普通行 hover：很淡的提示色
+  if (rowHovered.value && !isRootTestPlan.value) {
+    return props.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)'
+  }
   return 'transparent'
 })
+
+// hover toggle 时在行首画 4px 状态条（绿=enabled，灰=disabled），把开关跟状态点
+// 用同色"连"起来，强化"这一行整体"的视觉锁定
+const stripeColor = computed(() =>
+  props.node.enabled ? '#10b981' : '#94a3b8',
+)
 
 const toolbarBtnStyle = computed(() => ({
   background: props.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
@@ -249,14 +268,22 @@ const toolbarBtnStyle = computed(() => ({
   <div>
     <!-- Row -->
     <div
-      class="flex items-center gap-2 py-1.5 rounded-md transition-colors"
+      class="flex items-center gap-2 py-1.5 rounded-md transition-colors relative"
       :style="{
         paddingLeft: `${depth * 18 + 8}px`,
         paddingRight: '10px',
         opacity: effectivelyActive ? 1 : 0.45,
         background: rowBackground,
       }"
+      @mouseenter="rowHovered = true"
+      @mouseleave="rowHovered = false"
     >
+      <!-- Hover-toggle 时左侧 enabled-state 长条：把右开关跟左侧状态视觉绑定 -->
+      <div
+        v-if="toggleHovered && !isRootTestPlan"
+        class="absolute left-0 top-1 bottom-1 w-[3px] rounded-r-sm pointer-events-none transition-colors"
+        :style="{ background: stripeColor }"
+      />
       <!-- Chevron (placeholder kept for alignment when no children) -->
       <button
         class="w-4 h-4 flex items-center justify-center rounded-sm flex-shrink-0"
@@ -277,10 +304,20 @@ const toolbarBtnStyle = computed(() => ({
         </Motion>
       </button>
 
-      <!-- Status dot -->
+      <!-- Status dot：2.5px + enabled 时加发光环（hover 行/开关时再放大 + 加深环） -->
       <div
-        class="w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors"
-        :style="{ background: node.enabled ? '#10b981' : '#64748b' }"
+        class="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all"
+        :style="{
+          background: node.enabled ? '#10b981' : '#64748b',
+          boxShadow: node.enabled
+            ? (toggleHovered
+                ? '0 0 0 3px rgba(16,185,129,0.35)'
+                : (rowHovered ? '0 0 0 2px rgba(16,185,129,0.22)' : '0 0 0 1px rgba(16,185,129,0.18)'))
+            : (toggleHovered
+                ? '0 0 0 3px rgba(148,163,184,0.30)'
+                : 'none'),
+          transform: toggleHovered ? 'scale(1.15)' : 'scale(1)',
+        }"
       />
 
       <!-- testname — 双击可编辑（TestPlan 根节点除外） -->
@@ -426,7 +463,7 @@ const toolbarBtnStyle = computed(() => ({
 
         <!-- enabled toggle -->
         <button
-          class="relative w-9 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+          class="relative w-9 h-5 rounded-full transition-all flex-shrink-0 cursor-pointer"
           :disabled="busy"
           :style="{
             background: node.enabled
@@ -434,8 +471,15 @@ const toolbarBtnStyle = computed(() => ({
               : isDark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.14)',
             opacity: busy ? 0.6 : 1,
             cursor: busy ? 'wait' : 'pointer',
+            boxShadow: toggleHovered
+              ? (node.enabled
+                  ? '0 0 0 3px rgba(16,185,129,0.25)'
+                  : '0 0 0 3px rgba(148,163,184,0.28)')
+              : 'none',
           }"
           @click="handleToggle"
+          @mouseenter="toggleHovered = true"
+          @mouseleave="toggleHovered = false"
         >
           <div
             class="absolute top-[2px] w-4 h-4 rounded-full bg-white transition-all duration-200"

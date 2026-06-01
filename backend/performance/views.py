@@ -1175,6 +1175,14 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         run_dir = get_runs_dir() / run.run_id
 
+        # --- 缓存优先 ---
+        cached = run_dir / 'cached_sampler_stats.json'
+        if cached.exists():
+            try:
+                return Response(_json.loads(cached.read_text(encoding='utf-8')))
+            except (OSError, _json.JSONDecodeError):
+                pass
+
         # 优先 statistics.json（JMeter -e -o 自动出）
         stats_json = run_dir / 'report' / 'statistics.json'
         if stats_json.exists():
@@ -1201,11 +1209,19 @@ class RunViewSet(viewsets.GenericViewSet):
                     'avg_bytes': float(s.get('receivedKBytesPerSec', 0)) * 1024 / max(s.get('throughput', 1), 1),
                     'top_errors': [],  # statistics.json 不分错误类型；要细的看 error-samples
                 })
+            try:
+                cached.write_text(_json.dumps(results, ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
             return Response(results)
 
         # fallback：扫 jtl
         jtl = run_dir / 'results.jtl'
         if not jtl.exists() or jtl.stat().st_size == 0:
+            try:
+                cached.write_text(_json.dumps([], ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
             return Response([])
 
         agg: dict[str, dict] = {}
@@ -1260,6 +1276,10 @@ class RunViewSet(viewsets.GenericViewSet):
                 'avg_bytes': r['bytes_sum'] / r['total'] if r['total'] else 0,
                 'top_errors': [{'reason': k, 'count': v} for k, v in top],
             })
+        try:
+            cached.write_text(_json.dumps(out, ensure_ascii=False), encoding='utf-8')
+        except OSError:
+            pass
         return Response(out)
 
     @action(detail=True, methods=['get'], url_path='error-samples')
@@ -1274,11 +1294,35 @@ class RunViewSet(viewsets.GenericViewSet):
           → 用于 ErrorByEndpointTable，sum 永远 = 真实总错误数（不被 limit 影响）
         """
         import csv as _csv
+        import json as _json
         run = self.get_object()
         jtl = get_runs_dir() / run.run_id / 'results.jtl'
         aggregate = (request.query_params.get('aggregate') or '').lower() in ('1', 'true', 'yes')
+
+        # --- 缓存优先（仅对无额外过滤条件的查询做缓存）---
+        run_dir = get_runs_dir() / run.run_id
+        use_cache = not any([
+            request.query_params.get('sampler'),
+            request.query_params.get('code_bucket'),
+            request.query_params.get('response_code'),
+        ])
+        if use_cache:
+            cache_name = 'cached_error_samples_agg.json' if aggregate else 'cached_error_samples_detail.json'
+            cached = run_dir / cache_name
+            if cached.exists():
+                try:
+                    return Response(_json.loads(cached.read_text(encoding='utf-8')))
+                except (OSError, _json.JSONDecodeError):
+                    pass
+
         if not jtl.exists() or jtl.stat().st_size == 0:
-            return Response({'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0})
+            empty_resp = {'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0}
+            if use_cache:
+                try:
+                    cached.write_text(_json.dumps(empty_resp, ensure_ascii=False), encoding='utf-8')
+                except OSError:
+                    pass
+            return Response(empty_resp)
 
         try:
             limit = max(1, min(int(request.query_params.get('limit', 50)), 500))
@@ -1302,50 +1346,11 @@ class RunViewSet(viewsets.GenericViewSet):
                 return '4xx'
             return 'other'
 
-        # errors*.xml（双轨：仅失败样本 + body）。CSV 不带 body，body 必须从这里拿。
-        # 单机模式 = errors.xml；分布式 = errors_<pod>.xml（每台 agent 一份）。
-        # 解析建立 (label, responseCode) → 首条 responseData 索引（同组多条取头一条够用）。
-        run_dir = get_runs_dir() / run.run_id
+        # errors.xml 扫描已移至独立的 response-body 端点（按需加载）。
+        # 列表加载不再扫描 errors.xml，彻底消除 lxml iterparse 耗时导致的 502。
+        # body_index 置空；聚合表 / 明细表的 response_body 字段返回空字符串，
+        # 前端点击某行时调 response-body 端点按需拉取。
         body_index: dict[tuple[str, str], str] = {}
-        if run_dir.exists():
-            from lxml import etree as _etree  # noqa: PLC0415
-            for errors_xml in sorted(run_dir.glob('errors*.xml')):
-                if errors_xml.stat().st_size == 0:
-                    continue
-                try:
-                    # iterparse end 事件**先触发子元素**（responseData / cookies 等）
-                    # 再触发父元素 sample/httpSample。如果对子元素调 clear()，会把它
-                    # 们的 text 提前清掉 → 外层 sample.find('responseData').text 空。
-                    # 所以只在父级 sample/httpSample 上 clear()（自动级联清子元素）。
-                    # root 节点用 fast_iter 模式从 parent 删除已处理的 sample，防止
-                    # 流式解析时 root.testResults 无限增长爆内存。
-                    ctx = _etree.iterparse(
-                        str(errors_xml),
-                        events=('end',),
-                        recover=True,
-                    )
-                    for _ev, el in ctx:
-                        if el.tag not in ('sample', 'httpSample'):
-                            continue  # ← 子元素不要 clear，等父级 sample 一起清
-                        if (el.get('s') or '').lower() == 'true':
-                            pass
-                        else:
-                            lab = el.get('lb') or ''
-                            code = el.get('rc') or ''
-                            key = (lab, code)
-                            if key not in body_index:
-                                body_el = el.find('responseData')
-                                if body_el is not None:
-                                    txt = (body_el.text or '').strip()
-                                    if txt:
-                                        body_index[key] = txt[:500]  # 截断防表大
-                        # 释放：清子树 + 从 root 摘除（fast_iter 防内存爆）
-                        el.clear()
-                        parent = el.getparent()
-                        if parent is not None:
-                            parent.remove(el)
-                except OSError:
-                    continue
 
         samples: list[dict] = []
         agg: dict[tuple[str, str], dict] = {}
@@ -1408,8 +1413,71 @@ class RunViewSet(viewsets.GenericViewSet):
 
         if aggregate:
             rows = sorted(agg.values(), key=lambda r: r['count'], reverse=True)[:limit]
-            return Response({'aggregates': rows, 'total': total})
-        return Response({'samples': samples, 'total': total})
+            resp_data = {'aggregates': rows, 'total': total}
+        else:
+            resp_data = {'samples': samples, 'total': total}
+        if use_cache:
+            try:
+                cached.write_text(_json.dumps(resp_data, ensure_ascii=False), encoding='utf-8')
+            except OSError:
+                pass
+        return Response(resp_data)
+
+    @action(detail=True, methods=['get'], url_path='response-body')
+    def response_body(self, request, run_id=None):
+        """按需从 errors.xml 拉取单条错误样本的 response body。
+
+        前端在错误明细表点击某行时调用，传 label + response_code 定位首条匹配样本。
+        只扫到第一个匹配 key 就退出，避免全量 iterparse。"""
+        label = (request.query_params.get('label') or '').strip()
+        code = (request.query_params.get('response_code') or '').strip()
+        if not label and not code:
+            return Response({'body': ''})
+
+        run = self.get_object()
+        run_dir = get_runs_dir() / run.run_id
+        if not run_dir.exists():
+            return Response({'body': ''})
+
+        from lxml import etree as _etree  # noqa: PLC0415
+        for errors_xml in sorted(run_dir.glob('errors*.xml')):
+            if errors_xml.stat().st_size == 0:
+                continue
+            try:
+                ctx = _etree.iterparse(
+                    str(errors_xml),
+                    events=('end',),
+                    recover=True,
+                )
+                for _ev, el in ctx:
+                    if el.tag not in ('sample', 'httpSample'):
+                        continue
+                    if (el.get('s') or '').lower() == 'true':
+                        el.clear()
+                        parent = el.getparent()
+                        if parent is not None:
+                            parent.remove(el)
+                        continue
+                    # 匹配 label + code
+                    lab = el.get('lb') or ''
+                    rc = el.get('rc') or ''
+                    matched = True
+                    if label and lab != label:
+                        matched = False
+                    if code and rc != code:
+                        matched = False
+                    if matched:
+                        body_el = el.find('responseData')
+                        txt = (body_el.text or '').strip() if body_el is not None else ''
+                        el.clear()
+                        return Response({'body': txt[:2000]})
+                    el.clear()
+                    parent = el.getparent()
+                    if parent is not None:
+                        parent.remove(el)
+            except OSError:
+                continue
+        return Response({'body': ''})
 
     @action(detail=True, methods=['get'], url_path='timeline')
     def timeline(self, request, run_id=None):

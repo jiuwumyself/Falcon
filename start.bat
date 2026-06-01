@@ -1,7 +1,11 @@
 # Windows 启动脚本
 @echo off
+REM ============================================================
 REM Falcon one-click startup (Windows)
 REM Backend :8000 + Frontend :5173
+REM 添加 chcp 65001 切换到 UTF-8 编码，解决 Windows CMD 中文乱码问题
+REM ============================================================
+chcp 65001 >nul
 
 cd /d "%~dp0"
 

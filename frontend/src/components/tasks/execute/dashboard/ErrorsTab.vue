@@ -17,18 +17,32 @@ const TERMINAL_STATUSES = [
   'pre_check_failed', 'success', 'failed', 'timeout', 'cancelled',
 ] as const
 const aggregates = ref<ErrorAggregateRow[]>([])
+// loading 区分"还在拉" vs "真没数据"，否则切 tab 瞬间会假"暂无错误样本"误导用户
+const loading = ref(false)
+const fetchError = ref('')
 let timer: number | null = null
+let inflightToken = 0   // 竞态防御：runId 切换时旧请求晚到不能覆盖
 
 async function fetchAggregates() {
   if (!props.runId) {
     aggregates.value = []
+    loading.value = false
     return
   }
+  const token = ++inflightToken
+  // 首次 / runId 切换后第一次拉显式 loading；后续轮询保留旧数据不闪
+  if (aggregates.value.length === 0) loading.value = true
+  fetchError.value = ''
   try {
     const res = await runsApi.errorAggregates(props.runId, { limit: AGGREGATE_LIMIT })
+    if (token !== inflightToken) return  // 已被新请求顶掉
     aggregates.value = res.aggregates
-  } catch {
+  } catch (e) {
+    if (token !== inflightToken) return
+    fetchError.value = String(e)
     // 失败保留旧数据，下一轮再试
+  } finally {
+    if (token === inflightToken) loading.value = false
   }
 }
 
@@ -54,6 +68,7 @@ watch(
     aggregates.value = []
     if (!props.runId) {
       stopPoll()
+      loading.value = false
       return
     }
     startPoll()
@@ -141,7 +156,26 @@ const showBreakdown = computed(() => buckets.value.length > 0)
     </div>
     <!-- 聚合表：按 接口×code×msg 分组 + 行内下钻样本（含 body）-->
     <div class="flex-1 min-h-0 overflow-y-auto p-3">
+      <!-- 首次加载：明确 loading 状态，避免假"暂无错误样本"-->
+      <div
+        v-if="loading && aggregates.length === 0"
+        class="flex items-center justify-center gap-2 py-12 text-[12px]"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
+      >
+        <div
+          class="w-3 h-3 border-2 border-current border-r-transparent rounded-full animate-spin"
+        />
+        正在扫 JTL 提取错误聚合…大 run 可能需 3-5 秒
+      </div>
+      <div
+        v-else-if="fetchError && aggregates.length === 0"
+        class="text-center py-12 text-[12px]"
+        :style="{ color: '#ef4444' }"
+      >
+        加载失败：{{ fetchError }}
+      </div>
       <ErrorByEndpointTable
+        v-else
         :rows="aggregates"
         :run-id="runId"
         :is-dark="isDark"

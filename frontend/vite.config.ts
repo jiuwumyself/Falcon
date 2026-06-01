@@ -16,6 +16,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        // 大 run（百万错误，3.7GB errors xml）下 sampler-stats / error-samples
+        // 端点要 3-5s，留充裕 buffer 避免 vite-proxy 偶发 502
+        proxyTimeout: 120_000,
+        timeout: 120_000,
       },
     },
   },

@@ -52,7 +52,14 @@ interface ResolvedCtx {
   vu: SeriesPoint[]
   targetRpsPerSec: number | null
   mixed: boolean    // 多场景混合提示
+  vuIsPlanned: boolean   // 单 TG 时 active_users 实测不可拆（InfluxDB maxAT 全局），
+                          // 退到 snapshot 计划曲线；UI 标"计划"，避免误读为实测
 }
+
+// 单 TG 切片时 active_users 拿不到真切片（见 backend/services/influxdb.py:439）。
+// 父组件 TrendsLayout 已经把 effectiveOverall.active_users 替换成该 TG 的 plannedCurve
+// （所有 5 种 kind 都支持），透传到 props.vu —— 这里只需要在 slice.active_users 空
+// 时退到 props.vu，不再自己重算。
 
 function resolveScenarioId(kind: TGKind, scenario?: ScenarioId | null): ScenarioId {
   return scenario ?? inferScenarioFromKind(kind)
@@ -73,13 +80,17 @@ const ctx = computed<ResolvedCtx | null>(() => {
     if (meta) {
       const id = resolveScenarioId(meta.kind, meta.scenario)
       const slice = props.byTg?.[props.selectedTg]
+      const actualVu = slice?.active_users ?? []
+      // slice 没切到 vu 就退到 props.vu —— 父组件 TrendsLayout 已经把
+      // effectiveOverall.active_users 算成该 TG 的 plannedCurve 了，无需重算
+      const useFallbackVu = actualVu.length === 0 && props.vu.length > 0
       return {
         scenario: scenarioById(id),
-        // 切片优先用 byTg；没有就退到 props.rps/vu（合计）兜底
         rps: slice?.rps ?? props.rps,
-        vu: slice?.active_users ?? props.vu,
+        vu: useFallbackVu ? props.vu : actualVu,
         targetRpsPerSec: targetRpsFromParams(id, meta.params),
         mixed: false,
+        vuIsPlanned: useFallbackVu,
       }
     }
     // meta 缺失：fall through 走 cfgs[0] 兜底
@@ -104,6 +115,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
         vu: props.vu,
         targetRpsPerSec: targetRpsFromParams(id, firstParams),
         mixed: false,
+        vuIsPlanned: false,
       }
     }
     // 混合场景：通用散点图兜底 + 顶部提示
@@ -113,6 +125,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
       vu: props.vu,
       targetRpsPerSec: null,
       mixed: true,
+      vuIsPlanned: false,
     }
   }
 
@@ -129,6 +142,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
     mixed: cfgs.length > 1 && new Set(
       cfgs.map((c) => resolveScenarioId(c.kind, c.scenario)),
     ).size > 1,
+    vuIsPlanned: false,
   }
 })
 
@@ -169,6 +183,7 @@ const showTrendLine = computed(() => ctx.value?.scenario.id === 'soak')
         v-else-if="ctx?.scenario.id === 'spike'"
         :rps="ctx.rps"
         :vu="ctx.vu"
+        :vu-is-planned="ctx.vuIsPlanned"
         :x-range="xRange ?? null"
         :is-dark="isDark"
       />
