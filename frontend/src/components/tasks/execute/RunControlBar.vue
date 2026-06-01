@@ -24,6 +24,11 @@ const ACTIVE: RunStatus[] = ['pre_checking', 'pending', 'running', 'cancelling']
 const isActive = computed(() => !!props.selectedRun && ACTIVE.includes(props.selectedRun.status))
 // cancelling 状态：按钮 disabled + 文字变「取消中…」，避免重复点击触发多次 cancel
 const isCancelling = computed(() => props.selectedRun?.status === 'cancelling')
+// 终态判断：用 status 是否不在 ACTIVE 里决定，不依赖 startedMs/finishedMs。
+// 修复：pre_checking/pending 阶段被强杀时 started_at=null，若依赖 startedMs 判断会失效。
+const isTerminalStatus = computed(() =>
+  !!props.selectedRun && !ACTIVE.includes(props.selectedRun.status),
+)
 
 // ─── 时间基准 ────────────────────────────────────────────
 // 进度条起点 = run.created_at（pre_check 开始）
@@ -68,14 +73,15 @@ const PRE_CHECK_VISIBLE_MAX_PCT = 4
 
 // 进度条总秒数 = pre_check + 计划时长。
 // 空盘（无 selectedRun）时返 0 → totalStr 显示 00:00。
-// 终态（success / failed / timeout / cancelled）：scale 用实际 elapsed，bar 100% 满填
-//   （不然估算 > 实际时尾巴留黑条）。
-// 其余（pre_checking / pending / running / cancelling）：preCheck + plannedDurationSec
+// 终态且有 started_at + finished_at：用实际 elapsed 定格，bar 100% 满填。
+// 终态但 started_at=null（pre_check/pending 被强杀）：用计划时长兜底，
+//   elapsedSec 已由 finishedMs 定格，不会继续滚动。
+// 非终态（pre_checking / pending / running / cancelling）：preCheck + plannedDurationSec
 //   —— 跟任务卡上显示的"X 分 X 秒"对齐；不用 r.max_wall_sec（那个含 shutdown 给
 //   executor 超时检测用，对 ConcurrencyThreadGroup 会多算 shutdown 秒数）。
 const totalSec = computed<number>(() => {
   if (!props.selectedRun) return 0
-  if (finishedMs.value && startedMs.value) {
+  if (isTerminalStatus.value && finishedMs.value && startedMs.value) {
     return Math.max(1, elapsedSec.value)
   }
   const cfgPlan = plannedDurationSec(props.task.thread_groups_config)
@@ -84,11 +90,18 @@ const totalSec = computed<number>(() => {
   return Math.max(1, total)
 })
 
-// 当前 elapsed（相对 created_at；终态用 finished_at 定格）
+// 当前 elapsed（相对 created_at）：
+// - 终态：强制用 finished_at 定格（started_at=null 时也能定格，不再滚动）
+//   修复：pre_checking/pending 阶段被强杀时 started_at=null，原逻辑
+//   finishedMs ?? now 在非终态路径下仍走 now.value，计时器持续滚动。
+// - 非终态：实时用 now.value 滚动
 const elapsedSec = computed<number>(() => {
   if (!createdMs.value) return 0
-  const end = finishedMs.value ?? now.value
-  return Math.max(0, Math.floor((end - createdMs.value) / 1000))
+  if (isTerminalStatus.value) {
+    const end = finishedMs.value ?? now.value
+    return Math.max(0, Math.floor((end - createdMs.value) / 1000))
+  }
+  return Math.max(0, Math.floor((now.value - createdMs.value) / 1000))
 })
 
 function fmtTime(s: number): string {
