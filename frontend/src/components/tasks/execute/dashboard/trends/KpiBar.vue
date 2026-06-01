@@ -5,6 +5,7 @@ import type {
 } from '@/types/task'
 import { fmtBytesTotal, fmtInt, statsOf } from './chartFactory'
 import { colorForErrorMetric, SEMANTIC } from './semanticColors'
+import { scenarioById, inferScenarioFromKind } from '@/components/tasks/configStageCtx'
 
 // 单行紧凑：TG 切换 chip 组 + 累计 chips + 整体 RPS / P95。
 // 场景徽章已搬到 RunPlanSummary（进度条下方）；KpiBar 不再展示场景，避免重复。
@@ -38,34 +39,40 @@ const overallP95 = computed<number | null>(() => {
 
 const muted = computed(() => props.isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.55)')
 
+// 主场景徽章：run 快照优先，回退当前 task 配置；第一个 TG 为主场景，多 TG 附 +N。
+// （上一轮从 RunPlanSummary 信息条移除，闭环到 KpiBar 这里。）
+const scenarioCfgs = computed(() => {
+  const snap = props.run?.thread_groups_config_snapshot
+  if (snap && snap.length) return snap
+  return props.task?.thread_groups_config || []
+})
+const primaryScenario = computed(() => {
+  const first = scenarioCfgs.value[0]
+  if (!first) return null
+  return scenarioById(first.scenario || inferScenarioFromKind(first.kind))
+})
+const scenarioExtraN = computed(() => Math.max(0, scenarioCfgs.value.length - 1))
+
 interface Chip { label: string; color: string; title?: string }
 
+// 始终渲染（没数据时显示 0 / —），避免新任务进来 KPI 行空荡荡。
 const chips = computed<Chip[]>(() => {
   const t = props.totals
-  const out: Chip[] = []
-  if (t) {
-    out.push({ label: `${fmtInt(t.total_count ?? 0)} req`, color: muted.value })
-    out.push({
-      label: `${fmtInt(t.total_errors ?? 0)} fail`,
-      color: colorForErrorMetric(t.total_errors ?? 0, muted.value),
-    })
-    out.push({ label: `${fmtBytesTotal(t.total_bytes_recv ?? 0)} ↓`, color: muted.value })
-    out.push({ label: `${fmtBytesTotal(t.total_bytes_sent ?? 0)} ↑`, color: muted.value })
-  }
-  if (overallRps.value !== null) {
-    out.push({
-      label: `平均 RPS ${overallRps.value.toFixed(1)}`,
-      color: SEMANTIC.traffic,
-    })
-  }
-  if (overallP95.value !== null) {
-    out.push({
-      label: `整体 P95 ${Math.round(overallP95.value)} ms`,
+  return [
+    { label: `${fmtInt(t?.total_count ?? 0)} req`, color: muted.value },
+    {
+      label: `${fmtInt(t?.total_errors ?? 0)} fail`,
+      color: colorForErrorMetric(t?.total_errors ?? 0, muted.value),
+    },
+    { label: `${fmtBytesTotal(t?.total_bytes_recv ?? 0)} ↓`, color: muted.value },
+    { label: `${fmtBytesTotal(t?.total_bytes_sent ?? 0)} ↑`, color: muted.value },
+    { label: `平均 RPS ${(overallRps.value ?? 0).toFixed(1)}`, color: SEMANTIC.traffic },
+    {
+      label: overallP95.value != null ? `整体 P95 ${Math.round(overallP95.value)} ms` : '整体 P95 —',
       color: muted.value,
       title: '所有时序点的 P95 中位数',
-    })
-  }
-  return out
+    },
+  ]
 })
 </script>
 
@@ -73,6 +80,21 @@ const chips = computed<Chip[]>(() => {
   <div
     class="flex items-center flex-wrap gap-x-3 gap-y-1 px-1"
   >
+    <!-- 主场景徽章（单 TG 即唯一场景；多 TG = 主场景 + N，切换仍按 TG）-->
+    <span
+      v-if="primaryScenario"
+      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] flex-shrink-0 cursor-default"
+      :style="{
+        background: `${primaryScenario.color}1f`,
+        color: primaryScenario.color,
+        border: `1px solid ${primaryScenario.color}33`,
+      }"
+    >
+      <component :is="primaryScenario.icon" :size="11" />
+      {{ primaryScenario.label }}
+      <span v-if="scenarioExtraN > 0" class="opacity-60 ml-0.5">+{{ scenarioExtraN }}</span>
+    </span>
+
     <!-- 多 TG 切换 chip 组：tgKeys.length > 1 时显示；点击切换 selectedTg。
          单 TG / 无 TG 时不渲染 chip 组（TrendsLayout 已自动把 selectedTg 设为该
          唯一 TG，"全部"按钮没意义）。chip key 是 ThreadGroup testname（per-TG listener

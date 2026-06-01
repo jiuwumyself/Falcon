@@ -44,6 +44,7 @@ Falcon/
 │   │   │   ├── executor.py      ★ Step 3 RunExecutor（v1.1 单机；v1.2 分布式分支共用）
 │   │   │   ├── scheduler.py     ★ v1.2 多机调度（compute_shards / build_shard_jmx / slice_csv_by_offset）
 │   │   │   ├── jtl_merger.py    ★ v1.2 多 jtl 流式 N-way merge by timeStamp
+│   │   │   ├── jtl_analysis.py  ★ v1.3 终态 JTL 派生计算单一真相（接口统计/错误聚合/并发/延迟/错误时序 + LatencyHistogram 内存有界）→ 入库 + 端点兜底共用
 │   │   │   └── orchestrator/    ★ v1.2 容器编排适配器：DockerComposeAdapter / K8sAdapter（stub）
 │   │   ├── management/commands/
 │   │   │   ├── setup_jmeter.py          手动预装 JMeter（或首次上传时自动下载）
@@ -144,6 +145,14 @@ npx vue-tsc --noEmit     # 仅类型检查
 **前后端连通**：Vite 把 `/api/*` 代理到 `localhost:8000`；Django 的 CORS 放行了 `localhost:5173` / `127.0.0.1:5173`。
 
 ## 5. 当前真实状态（重要）
+
+**v1.3 资源治理 / 终态数据入库 已落地（2026-05-26，端到端已验证）**：解决大压测 JTL（十几个 G）OOM / 切 tab 502、文件 + InfluxDB 日积月累爆盘的问题。核心改为**终态把分析数据抽进 DB，原始重文件抽完即删 / 限量保留，查历史全走 DB**。
+- ✅ 终态 `executor._on_finish` 一次扫 JTL → 写 3 张分析表（`RunSamplerStat` / `RunErrorAggregate` / `RunAnalysis`，migration 0020）→ **删 errors.xml**；`services/jtl_analysis.py` 是 JTL 派生计算单一真相（终态入库 + 端点文件兜底共用），`LatencyHistogram` 定长直方图算 p99 内存 O(1) 不 OOM
+- ✅ 显示端点（sampler-stats / error-samples / concurrency / latency-breakdown / error-breakdown-ts / response-body）**优先读 DB，无则扫文件兜底**；实时 RPS/延迟仍走 InfluxDB（近 30d）
+- ✅ **原生报告改按需生成**：跑压测不再带 `-e -o`；`POST /runs/:id/generate-report/`（jmeter -g）生成后**删 results.jtl** 腾盘；`GET report-status` + 前端 ReportTab 状态机（生成按钮 → 嵌入面板）
+- ✅ **保留策略**：`cleanup_old_runs` 只留最近 `RUN_KEEP_COUNT`（默认 5）个 run 目录，超出整删 + `influxdb.delete_run_data` 同步清；DB 分析行长期保留。`ensure_retention_policy()` 启动幂等建 30d 策略（杜绝忘跑 setup_influxdb → autogen 无限期）；校验目录用完即删 + 孤儿 tmp 清理 + JMeter temp 收进 run 目录
+- ✅ **并发数图 = 实测(JTL allThreads/grpThreads，分布式跨 agent 求和) 实线 + 计划曲线虚线叠加**；吞吐量(Arrivals)模式不画计划线（详见 backend/CLAUDE.md §19、前端 ConcurrencyChart）
+- ⚠️ 行为变化：**跑新压测会把 run 目录剪到 5 个 + 清被剪 run 的 InfluxDB**（分析在 DB，查历史不受影响；但旧 run 的实时 Trends 曲线会没）；老 run（本次改动前）无 DB 分析行 → 显示走文件兜底
 
 **v1.2 容器化压力源 + Dashboard 重构 已落地（端到端已验证）**（2026-05-07 骨架；2026-05-13 多机联调通过 commit 18407d9）：
 
@@ -319,6 +328,11 @@ npx vue-tsc --noEmit     # 仅类型检查
 7. **Step 4 分析 / Step 5 报告**（v1.3+）：iframe JMeter HTML 报告作为 v1.1 兜底；自画对比页 + AI 总结 + Word 导出留到 v1.3
 8. **TG 高级参数暴露**：Arrivals 的 `ConcurrencyLimit`、Stepping 的"每步内部 ramp"等当前写死兜底
 9. **CSV 切片落地**：`scheduler.slice_csv_by_offset` 已实现，但 executor 里多机分支当前用全量 CSV 副本；需要决定切片是默认开还是按场景（账号池等）
+10. **被测服务垃圾时的防御能力（"主动断链 + SLA 自停"）**：目标服务慢/挂时，closed-loop 压测会让线程卡在慢请求上 → 收尾拖很久、延迟图被超时污染、并发测量失真（2026-06-01 实测过：单进程 Python 目标在 105 并发下 P95 飙到 23s、3 台 agent 退出差 42s）。要补的能力：
+    - **组件树支持"新增组件"**（当前只能编辑已有组件，不能新增）——至少能加 **HTTP Request Defaults**（设 `connectTimeout`/`responseTimeout`，一次对全部接口生效；现有 `HttpDefaults` detail 已支持这俩字段的编辑，缺的是"新增"入口）和 **响应断言 / 时长断言**（响应码 / 响应时间 SLA → 慢但 200 的请求也判失败，统计才诚实）
+    - **用法约定**：responseTimeout 建议设成业务 SLA 值（如 SLA P99<2s → timeout=3s），慢请求 fail-fast → 收尾秒退 + 饱和以"超时错误"清晰暴露，而非把延迟拉到 60s
+    - **配套早停**：executor 已有"错误率破 80% early-abort"；可加"P99 破 SLA 早停"（RunEventAnchor 已有 `p99_sla_breached` 事件类型占位）
+    - 选型提示：想测"固定流量下表现"用吞吐量场景（Arrivals，开环按 RPS 注入），但开环 + 垃圾服务必须配 responseTimeout 否则压力机侧请求堆积 OOM
 
 ## 7. 关键约定 & 踩坑点
 

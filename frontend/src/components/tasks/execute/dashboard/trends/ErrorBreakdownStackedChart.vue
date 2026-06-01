@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
@@ -22,6 +22,8 @@ const props = defineProps<{
   isTerminal: boolean
   xRange?: [number, number] | null
   isDark: boolean
+  // mock 预览用：直接喂桶数据，跳过 runId 取数（真实模式不传）
+  mockBuckets?: Record<Bucket, [number, number][]> | null
 }>()
 
 type Bucket = '4xx' | '5xx' | 'timeout' | 'connect_error' | 'assertion' | 'other'
@@ -71,9 +73,10 @@ function stopPolling(): void {
 }
 
 watch(
-  () => [props.runId, props.isTerminal] as const,
-  ([runId, terminal]) => {
+  () => [props.runId, props.isTerminal, props.mockBuckets] as const,
+  ([runId, terminal, mock]) => {
     stopPolling()
+    if (mock) { data.value = mock; return }   // mock 模式：直接用喂进来的桶，不取数
     if (!runId) return
     if (terminal) fetchOnce()
     else startPolling()
@@ -81,7 +84,6 @@ watch(
   { immediate: true },
 )
 onUnmounted(stopPolling)
-onMounted(() => { if (props.runId) (props.isTerminal ? fetchOnce() : startPolling()) })
 
 const totals = computed(() => {
   const out: Record<Bucket, number> = {

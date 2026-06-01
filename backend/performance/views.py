@@ -27,8 +27,9 @@ from .services import executor as executor_svc
 from .services import influxdb as influxdb_svc
 from .services.jmeter import (
     DiskFullError, delete_csv, delete_script, ensure_jmeter_installed,
-    ensure_plugins_installed, get_run_dir, get_runs_dir, get_scripts_dir,
-    rename_script, unique_script_filename, write_csv, write_jar, write_script,
+    ensure_plugins_installed, generate_html_report, get_run_dir, get_runs_dir,
+    get_scripts_dir, rename_script, unique_script_filename, write_csv, write_jar,
+    write_script,
 )
 from .services.jmx import (
     JmxParseError, build_run_xml, get_component_detail, list_components,
@@ -43,24 +44,8 @@ _SAFE_PATH_RE = re.compile(r'[^A-Za-z0-9]+')
 
 _HIDDEN_COMPONENT_TAGS = frozenset({'BackendListener'})
 
-
-def _cache_is_fresh(cache_path, *source_paths) -> bool:
-    """聚合 / 接口统计端点的本地缓存是否可信。
-
-    有效 = 缓存文件存在 且 mtime ≥ 所有存在数据源(results.jtl / statistics.json)
-    里最新的 mtime。数据源全不存在 → False(不可信，重算)。
-
-    解决"缓存毒化":分布式 run 的 results.jtl 执行期周期 merge 一直在变，运行中第一次
-    轮询会算出空/半量结果写死缓存，之后(含终态)永远返回旧值。按 mtime 比对后:
-    运行中 JTL 持续变新 → 缓存恒过期 → 每次重算(实时);终态 JTL 冻结 → 缓存命中(快);
-    已存在的毒化缓存(比终态 JTL 旧)→ 自动失效重算，无需手动删文件。
-    """
-    if not cache_path.exists():
-        return False
-    src_mtimes = [p.stat().st_mtime for p in source_paths if p.exists()]
-    if not src_mtimes:
-        return False
-    return cache_path.stat().st_mtime >= max(src_mtimes)
+# 注:JTL threadName→TG 名提取、文件缓存新鲜度判断等已收敛进 services/jtl_analysis.py
+# (终态入库 + 端点兜底单一真相);显示端点改读 DB 后这里不再需要文件缓存逻辑。
 
 
 def _path_to_testname(run) -> dict[str, str]:
@@ -856,15 +841,26 @@ class TaskViewSet(viewsets.ModelViewSet):
                 )
 
         run_id = secrets.token_hex(8)
+        # 快照「计划」并发 / 加压 / 稳态时长——从 thread_groups_config 算，而不是 copy
+        # task 的旧单字段（plugin TG 下 task.virtual_users/ramp/duration 会失真，详见
+        # scheduler.compute_planned_run_params）。这样进度条 / Timeline / RunStatusCard
+        # 显示的时长跟真实场景一致。
+        from .services.scheduler import compute_planned_run_params  # noqa: PLC0415
+        planned_vu, planned_ramp, planned_dur = compute_planned_run_params(
+            instance.thread_groups_config or [],
+            fallback_vusers=instance.virtual_users,
+            fallback_ramp=instance.ramp_up_seconds,
+            fallback_duration=instance.duration_seconds,
+        )
         try:
             with transaction.atomic():
                 task_run = TaskRun.objects.create(
                     task=instance,
                     run_id=run_id,
                     status=RunStatus.PRE_CHECKING,
-                    virtual_users=instance.virtual_users,
-                    ramp_up_seconds=instance.ramp_up_seconds,
-                    duration_seconds=instance.duration_seconds,
+                    virtual_users=planned_vu,
+                    ramp_up_seconds=planned_ramp,
+                    duration_seconds=planned_dur,
                     # 快照当前 Step 2 配置 + jmx 指纹；切历史 run 时给前端展示"当时是
                     # 这么跑的"，且跟当前 task 对比能提示"已变化"
                     thread_groups_config_snapshot=instance.thread_groups_config or [],
@@ -953,6 +949,27 @@ class RunViewSet(viewsets.GenericViewSet):
         run.refresh_from_db()
         return Response(TaskRunSerializer(run).data)
 
+    @action(detail=True, methods=['post'], url_path='set-keep')
+    def set_keep(self, request, run_id=None):
+        """勾选/取消「保留」。keep=True 的 run 目录永不被 cleanup_old_runs 自动清理。"""
+        run = self.get_object()
+        run.keep = bool(request.data.get('keep'))
+        run.save(update_fields=['keep'])
+        return Response(TaskRunSerializer(run).data)
+
+    @action(detail=True, methods=['post'], url_path='set-baseline')
+    def set_baseline(self, request, run_id=None):
+        """设/清历史基准。每 task 单选：设 true 时先清掉同 task 其它 run 的 is_baseline。"""
+        run = self.get_object()
+        on = bool(request.data.get('is_baseline'))
+        if on:
+            TaskRun.objects.filter(task=run.task, is_baseline=True).exclude(
+                pk=run.pk,
+            ).update(is_baseline=False)
+        run.is_baseline = on
+        run.save(update_fields=['is_baseline'])
+        return Response(TaskRunSerializer(run).data)
+
     @action(detail=True, methods=['get'], url_path='metrics')
     def metrics(self, request, run_id=None):
         run = self.get_object()
@@ -974,6 +991,19 @@ class RunViewSet(viewsets.GenericViewSet):
         # 单 TG 选中时按 meta 算计划曲线渲染，能看到启动 ramp 形态（不再是直平线）。
         data['tg_planned_users'] = _compute_tg_planned_users(run)
         data['tg_planned_meta'] = _compute_tg_planned_meta(run)
+
+        # 终态:用 DB 里 JTL 重算的真·每秒整体延迟分位覆盖 overall p50/p95/p99
+        # (InfluxDB 跨 agent 平均预聚合分位 → p99 虚高,实测 518 vs 真 355)。
+        # 运行中没 DB 行 → 保持 InfluxDB 近似(没别的选)。仅覆盖 overall,
+        # per-sampler/by_tg 仍 InfluxDB(per-sampler 无跨 sampler union,偏差小)。
+        from .models import RunAnalysis  # noqa: PLC0415
+        ra = RunAnalysis.objects.filter(run=run).first()
+        if ra and ra.latency_overall and data.get('overall'):
+            for k in ('p50_ms', 'p95_ms', 'p99_ms',
+                      'p50_ok_ms', 'p95_ok_ms', 'p99_ok_ms'):
+                if ra.latency_overall.get(k):
+                    data['overall'][k] = ra.latency_overall[k]
+
         # 顺手附上 run 状态，前端可以一次拿到全部信息
         data['run'] = TaskRunSerializer(run).data
         return Response(data)
@@ -996,63 +1026,36 @@ class RunViewSet(viewsets.GenericViewSet):
         Query 参数：
           - exclude_ko=true：剔除失败样本（success=false 跳过），看真实业务延迟分布
         """
-        import csv as _csv
+        from .models import RunAnalysis  # noqa: PLC0415
+        from .services import jtl_analysis as _ja  # noqa: PLC0415
         run = self.get_object()
         exclude_ko = request.query_params.get('exclude_ko', '').lower() == 'true'
         jtl = get_runs_dir() / run.run_id / 'results.jtl'
-        empty = {'connect_ms': [], 'server_ms': [], 'receive_ms': []}
-        if not jtl.exists() or jtl.stat().st_size == 0:
-            return Response(empty)
 
-        # 按秒聚合：bucket_ms -> [connect_sum, server_sum, receive_sum, count]
-        buckets: dict[int, list[float]] = {}
-        try:
-            with jtl.open('r', encoding='utf-8', errors='replace') as f:
-                reader = _csv.DictReader(f)
-                for row in reader:
-                    if exclude_ko and (row.get('success') or '').lower() != 'true':
-                        continue
-                    try:
-                        ts = int(row.get('timeStamp') or 0)
-                        elapsed = float(row.get('elapsed') or 0)
-                        latency = float(row.get('Latency') or 0)
-                        connect = float(row.get('Connect') or 0)
-                    except ValueError:
-                        continue
-                    if ts <= 0:
-                        continue
-                    # 异常兜底：latency 不可能 > elapsed，connect 不可能 > latency
-                    if connect > latency:
-                        connect = latency
-                    if latency > elapsed:
-                        latency = elapsed
-                    server = max(0.0, latency - connect)
-                    receive = max(0.0, elapsed - latency)
-                    bucket = (ts // 1000) * 1000
-                    b = buckets.get(bucket)
-                    if b is None:
-                        buckets[bucket] = [connect, server, receive, 1]
-                    else:
-                        b[0] += connect
-                        b[1] += server
-                        b[2] += receive
-                        b[3] += 1
-        except OSError as e:
-            return Response({'detail': f'read jtl: {e}'}, status=500)
+        # exclude_ko=true 需重算(DB 只存全样本版),JTL 还在就重算,否则退到 DB 全样本版。
+        if exclude_ko and jtl.exists() and jtl.stat().st_size > 0:
+            return Response(_ja.compute_latency_breakdown(jtl, exclude_ko=True))
+        # 默认(含全样本):优先 DB,无则扫文件
+        ra = RunAnalysis.objects.filter(run=run).first()
+        if ra and ra.latency_breakdown:
+            return Response(ra.latency_breakdown)
+        return Response(_ja.compute_latency_breakdown(jtl, exclude_ko=exclude_ko))
 
-        connect_pts: list[list[float]] = []
-        server_pts: list[list[float]] = []
-        receive_pts: list[list[float]] = []
-        for ts in sorted(buckets.keys()):
-            c, s, r, n = buckets[ts]
-            connect_pts.append([ts, round(c / n, 2)])
-            server_pts.append([ts, round(s / n, 2)])
-            receive_pts.append([ts, round(r / n, 2)])
-        return Response({
-            'connect_ms': connect_pts,
-            'server_ms': server_pts,
-            'receive_ms': receive_pts,
-        })
+    @action(detail=True, methods=['get'], url_path='concurrency')
+    def concurrency(self, request, run_id=None):
+        """每秒真实并发(allThreads 总 / grpThreads per-TG,分布式跨 agent 求和)。
+
+        优先读 DB(终态 RunAnalysis.concurrency);老 run / 终态前无 DB → 扫文件兜底
+        (jtl_analysis.compute_concurrency,与终态入库同一套,分布式正确求和)。
+        返回 {overall: [[ts,total]], by_tg: {tgname: [[ts,total]]}}。
+        """
+        from .models import RunAnalysis  # noqa: PLC0415
+        from .services import jtl_analysis as _ja  # noqa: PLC0415
+        run = self.get_object()
+        ra = RunAnalysis.objects.filter(run=run).first()
+        if ra and ra.concurrency:
+            return Response(ra.concurrency)
+        return Response(_ja.compute_concurrency(get_runs_dir() / run.run_id))
 
     @action(detail=True, methods=['get'], url_path='error-breakdown-timeseries')
     def error_breakdown_timeseries(self, request, run_id=None):
@@ -1072,44 +1075,14 @@ class RunViewSet(viewsets.GenericViewSet):
             "other":         [[ts_ms, count], ...],
           }
         """
-        import csv as _csv
-        from .services.jmeter_runner import classify_jtl_error, empty_error_breakdown  # noqa: PLC0415
+        from .models import RunAnalysis  # noqa: PLC0415
+        from .services import jtl_analysis as _ja  # noqa: PLC0415
         run = self.get_object()
-        jtl = get_runs_dir() / run.run_id / 'results.jtl'
-        buckets_template = empty_error_breakdown()
-        if not jtl.exists() or jtl.stat().st_size == 0:
-            return Response({k: [] for k in buckets_template})
-
-        # 按秒聚合：bucket_sec_ms → {bucket_name: count}
-        per_sec: dict[int, dict[str, int]] = {}
-        try:
-            with jtl.open('r', encoding='utf-8', errors='replace') as f:
-                reader = _csv.DictReader(f)
-                for row in reader:
-                    if (row.get('success') or '').lower() == 'true':
-                        continue
-                    try:
-                        ts = int(row.get('timeStamp') or 0)
-                    except ValueError:
-                        continue
-                    if ts <= 0:
-                        continue
-                    bucket_name = classify_jtl_error(row)
-                    sec_ms = (ts // 1000) * 1000
-                    slot = per_sec.get(sec_ms)
-                    if slot is None:
-                        slot = dict(buckets_template)
-                        per_sec[sec_ms] = slot
-                    slot[bucket_name] = slot.get(bucket_name, 0) + 1
-        except OSError as e:
-            return Response({'detail': f'read jtl: {e}'}, status=500)
-
-        out: dict[str, list[list[int]]] = {k: [] for k in buckets_template}
-        for ts in sorted(per_sec.keys()):
-            slot = per_sec[ts]
-            for bname in out:
-                out[bname].append([ts, slot.get(bname, 0)])
-        return Response(out)
+        ra = RunAnalysis.objects.filter(run=run).first()
+        if ra and ra.error_breakdown_ts:
+            return Response(ra.error_breakdown_ts)
+        return Response(_ja.compute_error_breakdown_ts(
+            get_runs_dir() / run.run_id / 'results.jtl'))
 
     @action(detail=True, methods=['get'], url_path='log')
     def log(self, request, run_id=None):
@@ -1153,7 +1126,7 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         report_dir = get_runs_dir() / run.run_id / 'report'
         if not report_dir.is_dir():
-            raise Http404('报告尚未生成（仅 success/cancelled/timeout 后可看）')
+            raise Http404('报告未生成,请先在"查看报告"点击生成(POST generate-report)')
 
         rel = sub or 'index.html'
         # 防路径穿越
@@ -1179,124 +1152,51 @@ class RunViewSet(viewsets.GenericViewSet):
             content_type=content_types.get(ext, 'application/octet-stream'),
         )
 
+    @action(detail=True, methods=['get'], url_path='report-status')
+    def report_status(self, request, run_id=None):
+        """报告状态:report/ 是否已生成 + results.jtl 是否还在(能否生成)。
+        前端"查看报告"tab 据此显示 生成按钮 / 嵌入面板 / 已清理提示。"""
+        run = self.get_object()
+        run_dir = get_runs_dir() / run.run_id
+        ready = (run_dir / 'report' / 'index.html').exists()
+        jtl = run_dir / 'results.jtl'
+        has_jtl = jtl.exists() and jtl.stat().st_size > 0
+        return Response({
+            'state': 'ready' if ready else 'none',
+            'has_jtl': has_jtl,
+        })
+
+    @action(detail=True, methods=['post'], url_path='generate-report')
+    def generate_report(self, request, run_id=None):
+        """按需生成 JMeter 原生 HTML 报告(jmeter -g),成功后删 results.jtl 腾盘。
+        跑压测不再自动出报告;用户点'生成报告'才触发。"""
+        run = self.get_object()
+        try:
+            generate_html_report(run.run_id)
+        except RuntimeError as e:
+            return Response({'detail': str(e)}, status=400)
+        return Response({'state': 'ready', 'has_jtl': False})
+
     # ── v1.2 Step 3 下半部分真端点（取代 mock）──────────────────────────
 
     @action(detail=True, methods=['get'], url_path='sampler-stats')
     def sampler_stats(self, request, run_id=None):
-        """
-        每接口聚合统计。优先从 JMeter HTML 报告的 statistics.json 读，没生成时
-        流式扫 jtl 自己聚合（精度较粗，但保证有数据）。
-        """
-        import csv as _csv
-        import json as _json
+        """每接口聚合统计。优先读 DB(终态 _extract_and_persist_analysis 已写入
+        RunSamplerStat),老 run / 终态前无 DB 行时回退扫 results.jtl(jtl_analysis)。"""
+        from .models import RunSamplerStat  # noqa: PLC0415
         run = self.get_object()
-        run_dir = get_runs_dir() / run.run_id
 
-        # 数据源：优先 statistics.json（JMeter -e -o 出），没有则扫 results.jtl
-        stats_json = run_dir / 'report' / 'statistics.json'
-        jtl = run_dir / 'results.jtl'
+        rows = list(RunSamplerStat.objects.filter(run=run).values(
+            'label', 'total', 'success', 'error', 'avg_ms', 'min_ms', 'max_ms',
+            'p50_ms', 'p90_ms', 'p99_ms', 'avg_rps', 'avg_bytes', 'top_errors',
+        ))
+        if rows:
+            return Response(rows)
 
-        # --- 缓存优先：仅当缓存比两个数据源都新才信(防毒化，详见 _cache_is_fresh) ---
-        cached = run_dir / 'cached_sampler_stats.json'
-        if _cache_is_fresh(cached, stats_json, jtl):
-            try:
-                return Response(_json.loads(cached.read_text(encoding='utf-8')))
-            except (OSError, _json.JSONDecodeError):
-                pass
-
-        # 优先 statistics.json（JMeter -e -o 自动出）
-        if stats_json.exists():
-            try:
-                data = _json.loads(stats_json.read_text(encoding='utf-8'))
-            except (OSError, _json.JSONDecodeError):
-                data = {}
-            results = []
-            for label, s in data.items():
-                if label == 'Total':
-                    continue
-                results.append({
-                    'label': label,
-                    'total': int(s.get('sampleCount', 0)),
-                    'success': int(s.get('sampleCount', 0)) - int(s.get('errorCount', 0)),
-                    'error': int(s.get('errorCount', 0)),
-                    'avg_ms': float(s.get('meanResTime', 0)),
-                    'min_ms': float(s.get('minResTime', 0)),
-                    'max_ms': float(s.get('maxResTime', 0)),
-                    'p50_ms': float(s.get('medianResTime', 0)),
-                    'p90_ms': float(s.get('pct1ResTime', 0)),
-                    'p99_ms': float(s.get('pct3ResTime', 0)),
-                    'avg_rps': float(s.get('throughput', 0)),
-                    'avg_bytes': float(s.get('receivedKBytesPerSec', 0)) * 1024 / max(s.get('throughput', 1), 1),
-                    'top_errors': [],  # statistics.json 不分错误类型；要细的看 error-samples
-                })
-            try:
-                cached.write_text(_json.dumps(results, ensure_ascii=False), encoding='utf-8')
-            except OSError:
-                pass
-            return Response(results)
-
-        # fallback：扫 jtl（jtl 变量已在方法开头定义）
-        if not jtl.exists() or jtl.stat().st_size == 0:
-            # JTL 缺失/空时不落缓存——否则运行早期的空结果会毒化整个 run 的查询
-            return Response([])
-
-        agg: dict[str, dict] = {}
-        try:
-            with jtl.open('r', encoding='utf-8', errors='replace') as f:
-                reader = _csv.DictReader(f)
-                for row in reader:
-                    label = row.get('label') or ''
-                    rec = agg.setdefault(label, {
-                        'label': label, 'total': 0, 'success': 0, 'error': 0,
-                        'elapsed': [], 'first_ts': None, 'last_ts': None,
-                        'bytes_sum': 0, 'top_errors': {},
-                    })
-                    rec['total'] += 1
-                    if (row.get('success') or '').lower() == 'true':
-                        rec['success'] += 1
-                    else:
-                        rec['error'] += 1
-                        msg = row.get('failureMessage') or row.get('responseMessage') or '(unknown)'
-                        rec['top_errors'][msg] = rec['top_errors'].get(msg, 0) + 1
-                    try:
-                        rec['elapsed'].append(int(row.get('elapsed') or 0))
-                        ts = int(row.get('timeStamp') or 0)
-                        rec['first_ts'] = ts if rec['first_ts'] is None else min(rec['first_ts'], ts)
-                        rec['last_ts'] = ts if rec['last_ts'] is None else max(rec['last_ts'], ts)
-                        rec['bytes_sum'] += int(row.get('bytes') or 0)
-                    except (TypeError, ValueError):
-                        pass
-        except OSError as e:
-            return Response({'detail': f'read jtl: {e}'}, status=500)
-
-        out = []
-        for r in agg.values():
-            elapsed = sorted(r['elapsed'])
-            n = len(elapsed)
-            def pct(p):
-                return float(elapsed[max(0, int(n * p) - 1)]) if n else 0.0
-            span = max((r['last_ts'] - r['first_ts']) / 1000.0, 0.001) if r['first_ts'] else 1
-            top = sorted(r['top_errors'].items(), key=lambda x: -x[1])[:3]
-            out.append({
-                'label': r['label'],
-                'total': r['total'],
-                'success': r['success'],
-                'error': r['error'],
-                'avg_ms': float(sum(elapsed) / n) if n else 0.0,
-                'min_ms': float(elapsed[0]) if n else 0.0,
-                'max_ms': float(elapsed[-1]) if n else 0.0,
-                'p50_ms': pct(0.5),
-                'p90_ms': pct(0.9),
-                'p99_ms': pct(0.99),
-                'avg_rps': r['total'] / span if span > 0 else 0,
-                'avg_bytes': r['bytes_sum'] / r['total'] if r['total'] else 0,
-                'top_errors': [{'reason': k, 'count': v} for k, v in top],
-            })
-        try:
-            cached.write_text(_json.dumps(out, ensure_ascii=False), encoding='utf-8')
-        except OSError:
-            pass
-        return Response(out)
+        # 兜底：DB 无分析行 → 扫文件(jtl_analysis 与终态入库同一套计算,内存有界)
+        from .services import jtl_analysis as _ja  # noqa: PLC0415
+        jtl = get_runs_dir() / run.run_id / 'results.jtl'
+        return Response(_ja.compute_sampler_stats(jtl))
 
     @action(detail=True, methods=['get'], url_path='error-samples')
     def error_samples(self, request, run_id=None):
@@ -1309,131 +1209,60 @@ class RunViewSet(viewsets.GenericViewSet):
           每组带真实 count + 一条代表 url
           → 用于 ErrorByEndpointTable，sum 永远 = 真实总错误数（不被 limit 影响）
         """
-        import csv as _csv
-        import json as _json
+        from .models import RunErrorAggregate  # noqa: PLC0415
+        from .services import jtl_analysis as _ja  # noqa: PLC0415
         run = self.get_object()
-        jtl = get_runs_dir() / run.run_id / 'results.jtl'
         aggregate = (request.query_params.get('aggregate') or '').lower() in ('1', 'true', 'yes')
-
-        # --- 缓存优先（仅对无额外过滤条件的查询做缓存）---
-        run_dir = get_runs_dir() / run.run_id
-        use_cache = not any([
-            request.query_params.get('sampler'),
-            request.query_params.get('code_bucket'),
-            request.query_params.get('response_code'),
-        ])
-        if use_cache:
-            cache_name = 'cached_error_samples_agg.json' if aggregate else 'cached_error_samples_detail.json'
-            cached = run_dir / cache_name
-            # 仅当缓存比 results.jtl 新才信(防毒化，详见 _cache_is_fresh)
-            if _cache_is_fresh(cached, jtl):
-                try:
-                    return Response(_json.loads(cached.read_text(encoding='utf-8')))
-                except (OSError, _json.JSONDecodeError):
-                    pass
-
-        if not jtl.exists() or jtl.stat().st_size == 0:
-            # JTL 缺失/空时不落缓存——否则运行早期写下的空结果会毒化整个 run 的查询
-            return Response({'aggregates': [], 'total': 0} if aggregate else {'samples': [], 'total': 0})
-
+        sampler = request.query_params.get('sampler') or ''
+        code_bucket = (request.query_params.get('code_bucket') or 'all').lower()
+        response_code = (request.query_params.get('response_code') or '').strip()
         try:
             limit = max(1, min(int(request.query_params.get('limit', 50)), 500))
         except ValueError:
             limit = 50
-        sampler = request.query_params.get('sampler') or ''
-        code_bucket = (request.query_params.get('code_bucket') or 'all').lower()
-        # 精确 code 过滤（下钻聚合行用）：code_bucket 太宽（401/404/422 都归 4xx），
-        # 用户在聚合表看到一行精确 code=500 要看具体样本时，应按 500 严格匹配，
-        # 不应被 4xx/5xx 桶宽过滤。空值 = 不过滤；保留 code_bucket 给粗粒度场景用。
-        response_code = (request.query_params.get('response_code') or '').strip()
 
-        def bucket_of(code: str, msg: str) -> str:
-            if code.startswith('Non HTTP'):
-                return 'timeout'
-            if (msg or '').startswith('Assertion'):
-                return 'assertion'
-            if code.startswith('5'):
-                return '5xx'
-            if code.startswith('4'):
-                return '4xx'
-            return 'other'
+        # DB 优先(终态已写 RunErrorAggregate);无 DB 行则扫文件兜底(老 run/终态前)
+        aggs = list(RunErrorAggregate.objects.filter(run=run).values(
+            'response_code', 'label', 'count', 'sample_message',
+            'sample_failure_message', 'sample_url', 'sample_response_body',
+        ))
+        if not aggs:
+            run_dir = get_runs_dir() / run.run_id
+            aggs = _ja.compute_error_aggregates(run_dir / 'results.jtl', run_dir)
 
-        # errors.xml 扫描已移至独立的 response-body 端点（按需加载）。
-        # 列表加载不再扫描 errors.xml，彻底消除 lxml iterparse 耗时导致的 502。
-        # body_index 置空；聚合表 / 明细表的 response_body 字段返回空字符串，
-        # 前端点击某行时调 response-body 端点按需拉取。
-        body_index: dict[tuple[str, str], str] = {}
+        # 过滤(sampler 子串 / response_code 精确 / code_bucket 粗桶)。聚合行的 count
+        # 是真实总数,sum 不受 limit 影响。
+        def _keep(a: dict) -> bool:
+            if sampler and sampler not in a['label']:
+                return False
+            if response_code and a['response_code'] != response_code:
+                return False
+            if code_bucket != 'all':
+                b = _ja.err_bucket(
+                    a['response_code'], a['sample_failure_message'] or a['sample_message'])
+                if b != code_bucket:
+                    return False
+            return True
 
-        samples: list[dict] = []
-        agg: dict[tuple[str, str], dict] = {}
-        total = 0
-        try:
-            with jtl.open('r', encoding='utf-8', errors='replace') as f:
-                reader = _csv.DictReader(f)
-                for row in reader:
-                    if (row.get('success') or '').lower() == 'true':
-                        continue
-                    label = row.get('label') or ''
-                    if sampler and sampler not in label:
-                        continue
-                    code = row.get('responseCode') or ''
-                    msg = row.get('responseMessage') or ''
-                    fmsg = row.get('failureMessage') or ''
-                    url = row.get('URL') or ''  # 需要 -Jjmeter.save.saveservice.url=true（新版 executor 默认开）
-                    bucket = bucket_of(code, fmsg or msg)
-                    if code_bucket != 'all' and bucket != code_bucket:
-                        continue
-                    if response_code and code != response_code:
-                        continue
-                    total += 1
-                    if aggregate:
-                        # 按 (code, label) 二键聚合：同接口同 code 不同 message 文本
-                        # 合并为一行（之前三键含 msg_norm，HTTP 500 不同异常栈会分多行
-                        # 用户反馈"重复看了"）。代表 message 取首条样本的 fmsg/msg，
-                        # 前端按 code 派生 HTTP_REASON 兜底；要看不同 message 走行展开
-                        # 看具体样本。
-                        key = (code, label)
-                        existing = agg.get(key)
-                        if existing is None:
-                            agg[key] = {
-                                'response_code': code,
-                                'label': label,
-                                'count': 1,
-                                'sample_message': msg,
-                                'sample_failure_message': fmsg,
-                                'sample_url': url,
-                                # body 从 errors.xml 拿（双轨注入，仅失败样本带）
-                                'sample_response_body': body_index.get((label, code), ''),
-                            }
-                        else:
-                            existing['count'] += 1
-                    elif len(samples) < limit:
-                        samples.append({
-                            'timestamp': int(row.get('timeStamp') or 0),
-                            'label': label,
-                            'method': '',  # JMeter CSV 默认不写 method（要 -Jjmeter.save.saveservice.method=true）
-                            'response_code': code,
-                            'response_message': msg,
-                            'failure_message': fmsg,
-                            'url': url,
-                            'elapsed_ms': int(row.get('elapsed') or 0),
-                            # body 从 errors.xml 双轨拿；旧 run（未注入 listener）→ 空字符串
-                            'response_body': body_index.get((label, code), ''),
-                        })
-        except OSError as e:
-            return Response({'detail': f'read jtl: {e}'}, status=500)
+        aggs = sorted((a for a in aggs if _keep(a)), key=lambda r: r['count'], reverse=True)
+        total = sum(a['count'] for a in aggs)
 
         if aggregate:
-            rows = sorted(agg.values(), key=lambda r: r['count'], reverse=True)[:limit]
-            resp_data = {'aggregates': rows, 'total': total}
-        else:
-            resp_data = {'samples': samples, 'total': total}
-        if use_cache:
-            try:
-                cached.write_text(_json.dumps(resp_data, ensure_ascii=False), encoding='utf-8')
-            except OSError:
-                pass
-        return Response(resp_data)
+            return Response({'aggregates': aggs[:limit], 'total': total})
+
+        # detail：原始逐条样本不入库(用户确认代表一条够用)→ 每聚合组合成一条代表样本。
+        samples = [{
+            'timestamp': 0,
+            'label': a['label'],
+            'method': '',
+            'response_code': a['response_code'],
+            'response_message': a['sample_message'],
+            'failure_message': a['sample_failure_message'],
+            'url': a['sample_url'],
+            'elapsed_ms': 0,
+            'response_body': a['sample_response_body'],
+        } for a in aggs[:limit]]
+        return Response({'samples': samples, 'total': total})
 
     @action(detail=True, methods=['get'], url_path='response-body')
     def response_body(self, request, run_id=None):
@@ -1447,6 +1276,19 @@ class RunViewSet(viewsets.GenericViewSet):
             return Response({'body': ''})
 
         run = self.get_object()
+
+        # DB 优先:终态已把代表 body 抽进 RunErrorAggregate(errors.xml 随后即删)
+        from .models import RunErrorAggregate  # noqa: PLC0415
+        q = RunErrorAggregate.objects.filter(run=run)
+        if label:
+            q = q.filter(label=label)
+        if code:
+            q = q.filter(response_code=code)
+        agg = q.exclude(sample_response_body='').first() or q.first()
+        if agg is not None:
+            return Response({'body': agg.sample_response_body or ''})
+
+        # 兜底:DB 无 → 扫 errors.xml(老 run / 终态前,文件还在时)
         run_dir = get_runs_dir() / run.run_id
         if not run_dir.exists():
             return Response({'body': ''})

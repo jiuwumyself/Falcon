@@ -104,6 +104,44 @@ def get_run_dir(run_id: str) -> Path:
     return d
 
 
+def generate_html_report(run_id: str) -> Path:
+    """按需从 results.jtl 生成 JMeter 原生 HTML 报告(jmeter -g),**成功后删 results.jtl**。
+
+    跑压测不再带 `-e -o`(省每 run 的报告生成开销 + report/ 占盘);用户点"生成报告"
+    时才跑这个。报告含全部分析,JTL 删了原始数据也在 DB → 可放心删,腾盘。
+    返回 report/ 路径;失败抛 RuntimeError(不删 jtl,可重试)。
+    """
+    import subprocess  # noqa: PLC0415
+    from .jmeter_runner import _augmented_env  # noqa: PLC0415
+    run_dir = get_run_dir(run_id)
+    jtl = run_dir / 'results.jtl'
+    report_dir = run_dir / 'report'
+    if not jtl.exists() or jtl.stat().st_size == 0:
+        raise RuntimeError('results.jtl 不存在或为空,无法生成报告(可能已生成过并清理)')
+    # jmeter -g 要求输出目录不存在 / 为空
+    if report_dir.exists():
+        shutil.rmtree(report_dir, ignore_errors=True)
+    env = _augmented_env()
+    env.setdefault('JAVA_TOOL_OPTIONS', '-Dfile.encoding=UTF-8')
+    try:
+        proc = subprocess.run(
+            [str(get_jmeter_bin()), '-g', str(jtl), '-o', str(report_dir)],
+            cwd=str(get_jmeter_home()), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(f'报告生成异常: {e}') from e
+    if proc.returncode != 0 or not (report_dir / 'index.html').exists():
+        tail = (proc.stdout or b'').decode('utf-8', 'replace')[-500:]
+        raise RuntimeError(f'报告生成失败(exit={proc.returncode}): {tail}')
+    # 成功 → 删 results.jtl 腾盘(报告 + DB 已覆盖全部分析需求)
+    try:
+        jtl.unlink()
+    except OSError:
+        pass
+    return report_dir
+
+
 def archive_run_dir(run_id: str) -> Path | None:
     """把 runs/<run_id>/ 整体打包成 runs/<run_id>.tar.gz 并删原目录。
 
@@ -129,29 +167,80 @@ def archive_run_dir(run_id: str) -> Path | None:
     return archive
 
 
-def cleanup_old_runs(keep: int = 20) -> list[str]:
-    """按 mtime 倒序保留最新 keep 个 run 目录，更老的归档为 .tar.gz。
+# 孤儿 temp / 用完校验目录的清理阈值：mtime 超过此值才清(避免误删进行中的)。
+_TEMP_TTL_SEC = 60 * 60  # 60 min
 
-    已归档的 .tar.gz 不计入 keep 配额（永久保留，用户主动删）。
-    返回本次新归档的 run_id 列表（用于日志）。
+
+def cleanup_old_runs(keep: int | None = None) -> list[str]:
+    """清理 run 目录:勾选「保留」(TaskRun.keep=True)的永不删;未勾选的目录 mtime
+    超过 settings.RUN_RETENTION_DAYS(30) 天才整删(run_dir + 遗留 .tar.gz)并同步清
+    InfluxDB 时序数据。
+
+    设计(2026-05 资源治理 / 2026-05-27 改 30 天 TTL + keep 豁免):终态分析数据已入
+    DB(RunSamplerStat/RunErrorAggregate/RunAnalysis + TaskRun summary),查历史走 DB,
+    run 目录是可丢的重数据。DB 分析行 / TaskRun 行**不删**,历史照查。
+
+    顺手清理:孤儿 .tmp(SIGKILL/网络异常残留)、用完的 _validate_* 校验目录
+    (mtime > _TEMP_TTL_SEC)。
+
+    `keep` 参数已废弃(旧的"最近 N 个"计数淘汰),保留签名兼容调用方;实际按
+    RUN_RETENTION_DAYS 天 TTL 淘汰。返回本次删除的 run_id 列表(日志用)。
     """
     runs = get_runs_dir()
     if not runs.exists():
         return []
-    dirs = sorted(
-        (p for p in runs.iterdir() if p.is_dir()),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    archived: list[str] = []
-    for old in dirs[keep:]:
+
+    now = time.time()
+    # 1) 清孤儿 temp + 用完的校验目录
+    for p in runs.iterdir():
         try:
-            archive_run_dir(old.name)
-            archived.append(old.name)
+            if now - p.stat().st_mtime < _TEMP_TTL_SEC:
+                continue
+        except OSError:
+            continue
+        name = p.name
+        if p.is_file() and ('.tmp' in name):
+            p.unlink(missing_ok=True)
+        elif p.is_dir() and name.startswith('_validate_'):
+            shutil.rmtree(p, ignore_errors=True)
+
+    # 2) keep=True 的 run 豁免;其余目录 mtime 超 RUN_RETENTION_DAYS 天的整删
+    ttl_sec = getattr(settings, 'RUN_RETENTION_DAYS', 30) * 86400
+    try:
+        from ..models import TaskRun  # noqa: PLC0415  (局部 import 避循环依赖)
+        kept = set(
+            TaskRun.all_objects.filter(keep=True).values_list('run_id', flat=True),
+        )
+    except Exception:  # noqa: BLE001
+        kept = set()
+
+    deleted: list[str] = []
+    for p in runs.iterdir():
+        if (not p.is_dir() or p.name.startswith('_validate_')
+                or p.name.startswith('.')):
+            continue
+        run_id = p.name
+        if run_id in kept:
+            continue  # 用户勾选保留,永不自动删
+        try:
+            if now - p.stat().st_mtime < ttl_sec:
+                continue  # 未到 30 天,留着
+        except OSError:
+            continue
+        try:
+            shutil.rmtree(p, ignore_errors=True)
+            (runs / f'{run_id}.tar.gz').unlink(missing_ok=True)  # 删遗留归档
+            # 同步清 InfluxDB(局部 import 避循环依赖;失败不阻断,retention 兜底)
+            try:
+                from . import influxdb as _influx  # noqa: PLC0415
+                _influx.delete_run_data(run_id)
+            except Exception:  # noqa: BLE001
+                pass
+            deleted.append(run_id)
         except Exception as e:  # noqa: BLE001
-            print(f'[jmeter] WARN: archive failed for {old.name}: {e}',
+            print(f'[jmeter] WARN: delete old run {run_id} failed: {e}',
                   file=sys.stderr)
-    return archived
+    return deleted
 
 
 # Minimum disk free space required before writing scripts / CSVs / run snapshots.

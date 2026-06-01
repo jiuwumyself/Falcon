@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import type {
-  RunMetrics, RunMetricsSeries, Task, TaskRun,
+  ConcurrencyResponse, RunMetrics, RunMetricsSeries, SamplerStat, SeriesPoint, Task, TaskRun,
 } from '@/types/task'
+import { runsApi } from '@/lib/api'
 import { plannedCurveAlignedToTimestamps, plannedCurve } from '@/lib/plannedCurve'
 import KpiBar from './KpiBar.vue'
 import ErrorCountChart from './ErrorCountChart.vue'
@@ -13,10 +14,12 @@ import RpsChart from './RpsChart.vue'
 import LatencyChart from './LatencyChart.vue'
 import NetworkChart from './NetworkChart.vue'
 import { inferScenarioFromKind } from './scenarioCtx'
+import { buildMockBundle } from './trendsMockData'
 
 const props = defineProps<{
   task: Task
   run: TaskRun | null
+  runs: TaskRun[]            // 末位 baseline 图②找本任务星标的历史基准 run 用
   metrics: RunMetrics | null
   isDark: boolean
 }>()
@@ -24,16 +27,23 @@ const props = defineProps<{
 // v1.3 起 Trends 不再承载错误数据：聚合表 + 单条样本下钻都搬进 Errors tab，
 // Trends 专注 6 张时序图（看大盘 / 趋势 / 形状）。
 
-const activeRunId = computed(() => props.run?.run_id || null)
+// 🎭 mock 预览：开关打开后整页换成 6-TG 合成 run（每 TG 一个场景），看末位场景图效果。
+// 真实数据源接入前用，纯前端编造数据；关掉即恢复真实 metrics。
+const mockMode = ref(false)
+const mockBundle = buildMockBundle()
+const eMetrics = computed(() => (mockMode.value ? mockBundle.metrics : props.metrics))
+const eRun = computed(() => (mockMode.value ? mockBundle.run : props.run))
 
-const overall = computed(() => props.metrics?.overall ?? null)
-const byTg = computed(() => props.metrics?.by_tg ?? {})
-const bySampler = computed(() => props.metrics?.by_sampler ?? {})
-const bySamplerByTg = computed(() => props.metrics?.by_sampler_by_tg ?? {})
-const samplerToTg = computed(() => props.metrics?.sampler_thread_group ?? {})
-const byHost = computed(() => props.metrics?.by_host ?? {})
-const totals = computed(() => props.metrics?.totals ?? null)
-const totalsByTg = computed(() => props.metrics?.totals_by_tg ?? {})
+const activeRunId = computed(() => eRun.value?.run_id || null)
+
+const overall = computed(() => eMetrics.value?.overall ?? null)
+const byTg = computed(() => eMetrics.value?.by_tg ?? {})
+const bySampler = computed(() => eMetrics.value?.by_sampler ?? {})
+const bySamplerByTg = computed(() => eMetrics.value?.by_sampler_by_tg ?? {})
+const samplerToTg = computed(() => eMetrics.value?.sampler_thread_group ?? {})
+const byHost = computed(() => eMetrics.value?.by_host ?? {})
+const totals = computed(() => eMetrics.value?.totals ?? null)
+const totalsByTg = computed(() => eMetrics.value?.totals_by_tg ?? {})
 
 // v1.2 多机切线：>1 host 时允许切到"按主机"看分散度。<=1 不显示按钮，纯按接口。
 const splitMode = ref<'tg' | 'host'>('tg')
@@ -64,85 +74,154 @@ watch(tgKeys, (keys) => {
   }
 }, { immediate: true })
 
-// per-TG active_users 后端拿不到（JMeter maxAT 在多 listener 时都是全局值），
-// 用 metrics.tg_planned_users 里的"计划线程数"渲染一条水平线兜底。
-// 注意：这是计划值不是实测；ramp-up 阶段会"假满"，配上 isStatic 提示用户。
+// ── 并发数 = 实测(JTL) + 计划曲线 ──────────────────────────────────────
+// 后端 InfluxDB 的 maxAT 是全局值切不开 per-TG，所以实测并发改走独立的 JTL 端点
+// （allThreads 总 / grpThreads per-TG 每秒峰值）。计划曲线仍用 plannedCurve 算。
+// ConcurrencyChart 把实测画实线、计划画虚线叠加；ThroughputPerVuChart 等用"实测优先"
+// 的最佳估计(effectiveOverall.active_users)。
+const realConcurrency = ref<ConcurrencyResponse | null>(null)
+
+// 计划并发曲线：单 TG → dense plannedCurve；全部 → 各 TG 按 rps 时间戳相加。
+// meta 缺失(旧 run)→ planned_users 静态线兜底。
 //
-// 全部模式（selectedTg=null）也走 plannedCurve 加总 —— 后端 overall.active_users
-// 来自 JMeter 全局 maxAT，多 listener 重复写时 max 出来的值跟各 TG 实际计划并发的
-// 加和对不上（实测：maxAT=10，学生端 5 + 教师端 2 = 7）。前端按各 TG plannedCurve
-// 按 ts 相加保证「全部并发数 = 各 TG 并发数加和」语义一致。
-const effectiveOverall = computed(() => {
-  const tg = selectedTg.value
-  const startMs = props.run?.started_at ? new Date(props.run.started_at).getTime() : 0
-  const meta = props.metrics?.tg_planned_meta
-
-  // —— 1. 选中具体 TG：用 byTg 切片 + per-TG plannedCurve 兜底 active_users ——
-  if (tg && byTg.value[tg]) {
-    const series = byTg.value[tg]
-    if (series.active_users.length === 0) {
-      // per-TG 实测并发 JMeter 拿不到（maxAT 全局）→ 用配置 kind+params 算计划曲线。
-      // 始终走 dense plannedCurve（每秒一个点，覆盖整个 run 时间窗）：
-      //   1. 完整覆盖 t=0 到 finished_at，看得到第一个 ramp 从 0 起步
-      //   2. 峰值 anchor（t=5/15/25/35/45）精确命中 y=5，不会被 InfluxDB
-      //      bucket 错位（rps 桶可能落在 t=4.8 / 5.2，插值出 4.8 而不是 5）
-      //   3. ThroughputPerVuChart / ConcurrencyRpsChart 已改成 ±1.5s 最近匹配，
-      //      不再依赖 vu 和 rps 时间戳严格相等，不需要 aligned 模式
-      const m = meta?.[tg]
-      if (m && startMs > 0) {
-        const endMs = props.run?.finished_at
-          ? new Date(props.run.finished_at).getTime()
-          : Date.now()
-        return {
-          ...series,
-          active_users: plannedCurve(m.kind, m.params, startMs, endMs, 1000),
-        }
-      }
-      // meta 缺失（旧 run / 后端未升级）→ 退到 planned_users 静态线兜底
-      const planned = props.metrics?.tg_planned_users?.[tg] ?? 0
-      if (planned > 0 && series.rps.length > 0) {
-        return {
-          ...series,
-          active_users: series.rps.map(
-            ([t]) => [t, planned] as [number, number],
-          ),
-        }
-      }
+// ArrivalsThreadGroup(吞吐量)模式不画计划线:它是到达率驱动,线程数由 JMeter 动态
+// 调,**没有"计划并发"**这回事。plannedCurve 对 Arrivals 画的是 target_rps(到达率,
+// arrivals/sec),跟实测的线程数(threads)单位不同,叠在并发(VU)轴上会误导。
+// 吞吐量的"目标 vs 实际"对比看末位的"目标 RPS vs 实际 RPS"图(同单位 RPS)。
+function plannedActiveUsersFor(tg: string | null): SeriesPoint[] {
+  const startMs = eRun.value?.started_at ? new Date(eRun.value.started_at).getTime() : 0
+  if (startMs <= 0) return []
+  const meta = eMetrics.value?.tg_planned_meta
+  const endMs = eRun.value?.finished_at
+    ? new Date(eRun.value.finished_at).getTime()
+    : Date.now()
+  if (tg) {
+    const m = meta?.[tg]
+    if (m) {
+      if (m.kind === 'ArrivalsThreadGroup') return []   // 到达率驱动,无计划并发
+      return plannedCurve(m.kind, m.params, startMs, endMs, 1000)
     }
-    return series
+    const planned = eMetrics.value?.tg_planned_users?.[tg] ?? 0
+    const series = byTg.value[tg]
+    if (planned > 0 && series?.rps?.length) {
+      return series.rps.map(([t]) => [t, planned] as SeriesPoint)
+    }
+    return []
   }
-
-  // —— 2. 全部模式：active_users 用各 TG plannedCurve 按 ts 相加（替代后端 maxAT）
+  // 全部：各 TG plannedCurve 按 rps 时间戳逐点相加（保证总并发 = 各 TG 加和）。
+  // Arrivals TG 跳过(无计划并发);全是 Arrivals 时 sums 恒 0 → 返回空不画线。
   const base = overall.value
-  if (!base) return null
   const metaEntries = Object.entries(meta || {})
-  if (metaEntries.length > 0 && startMs > 0 && base.rps.length > 0) {
+    .filter(([, m]) => m.kind !== 'ArrivalsThreadGroup')
+  if (base && metaEntries.length > 0 && base.rps.length > 0) {
     const timestamps = base.rps.map(([t]) => t)
-    // 每个 TG 算一份对齐 plannedCurve（时间戳跟 rps 一致 → 长度一致，逐点 sum）
     const sums = new Array(timestamps.length).fill(0)
     for (const [, m] of metaEntries) {
       const curve = plannedCurveAlignedToTimestamps(m.kind, m.params, startMs, timestamps)
-      for (let i = 0; i < curve.length && i < sums.length; i++) {
-        sums[i] += curve[i][1]
-      }
+      for (let i = 0; i < curve.length && i < sums.length; i++) sums[i] += curve[i][1]
     }
-    return {
-      ...base,
-      active_users: timestamps.map((t, i) => [t, sums[i]] as [number, number]),
-    }
+    return timestamps.map((t, i) => [t, sums[i]] as SeriesPoint)
   }
-  return base
+  return []
+}
+
+// 实测并发(JTL 端点)：单 TG → by_tg[tg]；全部 → overall。空数组 = 还没拉到/无数据。
+const realActiveUsers = computed<SeriesPoint[]>(() => {
+  const rc = realConcurrency.value
+  if (!rc) return []
+  const tg = selectedTg.value
+  return (tg ? rc.by_tg[tg] : rc.overall) ?? []
+})
+const plannedActiveUsers = computed<SeriesPoint[]>(() => plannedActiveUsersFor(selectedTg.value))
+
+const effectiveOverall = computed<RunMetricsSeries | null>(() => {
+  const tg = selectedTg.value
+  const base = (tg && byTg.value[tg]) ? byTg.value[tg] : overall.value
+  if (!base) return null
+  // active_users 优先实测(JTL)，没拉到则用计划曲线 —— 给 ThroughputPerVuChart /
+  // ScenarioContextChart 一个"最佳估计"。ConcurrencyChart 另走 real+planned 双线。
+  const real = realActiveUsers.value
+  return { ...base, active_users: real.length ? real : plannedActiveUsers.value }
 })
 // 末位「场景上下文图」始终显示——内部按场景分发：
-//   baseline/load/soak → ConcurrencyRpsChart
-//   stress → ErrorBreakdownStackedChart
+//   baseline/load/stress → ConcurrencyRpsChart（load 看拐点，stress 看容量悬崖）
+//   soak → SoakLatencyTrendChart（p95 RT 随时间 + 回归线，抓延迟爬升泄漏）
 //   spike → VuRpsDualAxisChart
 //   throughput → TargetRpsVsActualChart（专门为 Arrivals 场景设计，不再硬隐）
 // 旧 hasOnlyArrivals 隐藏逻辑已废弃：throughput 场景下展示目标 vs 实际对比，比硬隐有信息量
 const isTerminal = computed(() => {
-  const s = props.run?.status
+  const s = eRun.value?.status
   return s ? ['pre_check_failed', 'success', 'failed', 'timeout', 'cancelled'].includes(s) : false
 })
+
+// 拉真实并发(JTL 端点)：运行中 5s 轮询(JTL 周期增长)、终态 one-shot。
+let concurrencyTimer: ReturnType<typeof setInterval> | null = null
+async function fetchConcurrency() {
+  const id = activeRunId.value
+  if (!id) { realConcurrency.value = null; return }
+  try {
+    realConcurrency.value = await runsApi.concurrency(id)
+  } catch {
+    // 失败保留旧数据，下一轮再试
+  }
+}
+function stopConcurrencyPoll() {
+  if (concurrencyTimer != null) { clearInterval(concurrencyTimer); concurrencyTimer = null }
+}
+watch(
+  () => [activeRunId.value, isTerminal.value, mockMode.value] as const,
+  ([id, terminal, mock]) => {
+    stopConcurrencyPoll()
+    if (mock) { realConcurrency.value = mockBundle.concurrency; return }  // mock：直接喂，不轮询
+    if (!id) { realConcurrency.value = null; return }
+    void fetchConcurrency()
+    if (!terminal) concurrencyTimer = window.setInterval(fetchConcurrency, 5000)
+  },
+  { immediate: true },
+)
+onUnmounted(stopConcurrencyPoll)
+
+// ── 末位图② 取数：throughput 气泡(samplerStats) + baseline 版本对比 ─────────
+// 终态 one-shot 拉本 run 的接口统计；本任务有星标基准 run 时再拉它的，组成对比。
+const samplerStats = ref<SamplerStat[]>([])
+const baselineStats = ref<SamplerStat[]>([])
+const baselineRunId = computed(() =>
+  props.runs.find((r) => r.is_baseline && r.run_id !== activeRunId.value)?.run_id ?? null,
+)
+
+// SamplerStat 'all' 行 → {avg, p90, p99}（BaselineVersionBar 吃这个形状）
+function verOf(stats: SamplerStat[]): { avg: number; p90: number; p99: number } | null {
+  const all = stats.find((s) => s.label === 'all') ?? stats[0]
+  if (!all) return null
+  return { avg: all.avg_ms, p90: all.p90_ms, p99: all.p99_ms }
+}
+// 本次自己的数据有就传（终态后），baseline 仅当「存在另一个星标基准 run」且「自己不是基准」才给。
+// 自己是基准 → 永远只显示自己；没设基准 → 也只显示自己（带提示，星标后才对比）。
+const baselineCompare = computed(() => {
+  const cur = verOf(samplerStats.value)
+  if (!cur) return null   // 本次还没接口统计（运行中/无数据）→ ScenarioPair 占位
+  const selfIsBaseline = !!eRun.value?.is_baseline
+  const base = selfIsBaseline ? null : verOf(baselineStats.value)
+  return { current: cur, baseline: base, selfIsBaseline }
+})
+
+watch(
+  () => [activeRunId.value, isTerminal.value, baselineRunId.value, mockMode.value] as const,
+  async ([id, terminal, baseId, mock]) => {
+    if (mock || !id || !terminal) {
+      samplerStats.value = []; baselineStats.value = []
+      return
+    }
+    try { samplerStats.value = await runsApi.samplerStats(id) } catch { samplerStats.value = [] }
+    if (baseId) {
+      try { baselineStats.value = await runsApi.samplerStats(baseId) } catch { baselineStats.value = [] }
+    } else {
+      baselineStats.value = []
+    }
+  },
+  { immediate: true },
+)
+
 const effectiveTotals = computed(() => {
   if (selectedTg.value) {
     // 选中具体 TG：必须用 by_tg 切片，缺失（旧 run / 后端未升级）就给 0 totals，
@@ -217,7 +296,7 @@ const hasAnyData = computed(() => {
 // 跨图统一 X 轴时间窗：[run.started_at, run.finished_at | now]。
 // 让所有小图共用同一刻度，否则 echarts 按各自 series 自适应，截止时间会错。
 const xRange = computed<[number, number] | null>(() => {
-  const r = props.run
+  const r = eRun.value
   if (!r?.started_at) return null
   const start = new Date(r.started_at).getTime()
   const end = r.finished_at ? new Date(r.finished_at).getTime() : Date.now()
@@ -237,8 +316,8 @@ const excludeKo = ref(false)
 // run.error_rate 只在 _on_finish 终态才填，运行中是 0，单用它会导致"运行中
 // latency/network 剔不掉、终态才能剔"（RPS 走 error_count 实时扣减不受影响）。
 const hasErrors = computed(() =>
-  (props.metrics?.totals?.total_errors ?? 0) > 0
-  || (props.run?.error_rate ?? 0) > 0,
+  (eMetrics.value?.totals?.total_errors ?? 0) > 0
+  || (eRun.value?.error_rate ?? 0) > 0,
 )
 
 // ── 共享接口 legend：3 张图共用一份 samplerSelected。
@@ -278,7 +357,7 @@ watch(
 //   · 全部模式 → 仅当所有 TG 场景同质时显示；多场景混合 → 整块隐藏（散点图无意义）
 const showScenarioCard = computed(() => {
   if (selectedTg.value) return true
-  const meta = props.metrics?.tg_planned_meta
+  const meta = eMetrics.value?.tg_planned_meta
   if (!meta) return true   // meta 还没拉到，先显示兜底图，避免页面跳动
   const ids = Object.values(meta).map((m) =>
     m.scenario ?? inferScenarioFromKind(m.kind),
@@ -319,16 +398,32 @@ const heroStyle = computed(() => ({
         background: isDark ? 'rgba(10,10,12,0.85)' : 'rgba(245,245,247,0.85)',
       }"
     >
-      <KpiBar
-        :task="task"
-        :run="run"
-        :totals="effectiveTotals"
-        :series="effectiveOverall"
-        :tg-keys="tgKeys"
-        :selected-tg="selectedTg"
-        :is-dark="isDark"
-        @update:selected-tg="setSelectedTg"
-      />
+      <div class="flex items-start gap-2">
+        <div class="flex-1 min-w-0">
+          <KpiBar
+            :task="task"
+            :run="eRun"
+            :totals="effectiveTotals"
+            :series="effectiveOverall"
+            :tg-keys="tgKeys"
+            :selected-tg="selectedTg"
+            :is-dark="isDark"
+            @update:selected-tg="setSelectedTg"
+          />
+        </div>
+        <!-- 🎭 mock 预览开关（真实数据源接入前临时用，纯前端编造数据）-->
+        <button
+          type="button"
+          class="flex-shrink-0 self-center text-[10.5px] px-2 py-0.5 rounded-full cursor-pointer transition-colors"
+          :style="{
+            background: mockMode ? 'rgba(236,72,153,0.16)' : (isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'),
+            color: mockMode ? '#ec4899' : (isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'),
+            border: `1px solid ${mockMode ? 'rgba(236,72,153,0.4)' : 'transparent'}`,
+          }"
+          title="仅前端预览：用编造数据渲染 6 个场景的末位图（真实数据接入前临时用）"
+          @click="mockMode = !mockMode"
+        >🎭 模拟场景数据{{ mockMode ? ' ●' : '' }}</button>
+      </div>
     </div>
 
     <!-- 2. 健康度小图：错误数 / 并发 / 人均吞吐（错误率已搬到 KpiBar fail chip）-->
@@ -338,14 +433,15 @@ const heroStyle = computed(() => ({
           :data="effectiveOverall?.error_count || []"
           :rps-data="effectiveOverall?.rps || []"
           :totals="effectiveTotals"
-          :run="run"
+          :run="eRun"
           :x-range="xRange"
           :is-dark="isDark"
         />
       </div>
       <div class="rounded-xl p-3" :style="sectionStyle">
         <ConcurrencyChart
-          :data="effectiveOverall?.active_users || []"
+          :data="realActiveUsers"
+          :planned-data="plannedActiveUsers"
           :x-range="xRange"
           :is-dark="isDark"
         />
@@ -452,30 +548,43 @@ const heroStyle = computed(() => ({
     </div>
 
     <!-- 5.5 场景上下文图：末位卡按 6 场景分发到不同组件
-         baseline/load/soak → ConcurrencyRpsChart（散点 / RPS 抖动）
-         stress → ErrorBreakdownStackedChart（5 桶堆叠）
+         baseline/load/stress → ConcurrencyRpsChart（散点 / 拐点 / 容量悬崖）
+         soak → SoakLatencyTrendChart（p95 RT 随时间 + 回归线）
          spike → VuRpsDualAxisChart（双轴对比）
          throughput → TargetRpsVsActualChart（目标 vs 实际）
          多 TG 时切 selectedTg 跟随切图 -->
-    <div v-if="showScenarioCard" class="rounded-xl p-3 h-[220px]" :style="sectionStyle">
+    <div
+      v-if="mockMode || showScenarioCard"
+      class="rounded-xl p-3"
+      :class="mockMode ? '' : 'h-[240px]'"
+      :style="sectionStyle"
+    >
       <ScenarioContextChart
         :task="task"
         :selected-tg="selectedTg"
         :rps="effectiveOverall?.rps || []"
         :vu="effectiveOverall?.active_users || []"
+        :lat="effectiveOverall?.p95_ms || []"
+        :vu-is-real="realActiveUsers.length > 0"
         :by-tg="byTg"
-        :tg-planned-meta="metrics?.tg_planned_meta || {}"
+        :tg-planned-meta="eMetrics?.tg_planned_meta || {}"
         :sampler-thread-group="samplerToTg"
-        :run-id="activeRunId"
-        :is-terminal="isTerminal"
         :x-range="xRange"
         :is-dark="isDark"
+        :run-id="activeRunId"
+        :is-terminal="isTerminal"
+        :sampler-stats="samplerStats"
+        :baseline-compare="baselineCompare"
+        :mock-mode="mockMode"
+        :mock-scenarios="mockMode ? mockBundle.scenarios : undefined"
+        :mock-x-range="mockMode ? mockBundle.xRange : null"
       />
     </div>
 
-    <!-- 占位提示（首次 mount + 未拉到任何数据） -->
+    <!-- 占位提示：仅在「已有 run 但拉不到数据」时显示（多半是没接 InfluxDB）。
+         新任务（无 run）不显示，靠 0 值 KPI + 空网格表达，避免显得很空。 -->
     <div
-      v-if="!hasAnyData"
+      v-if="!hasAnyData && eRun"
       class="text-center text-[12px] py-3"
       :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.4)' }"
     >

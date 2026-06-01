@@ -117,8 +117,9 @@ class TaskRunSerializer(serializers.ModelSerializer):
             'pid', 'stop_port', 'last_heartbeat_at',
             'cancel_requested_at', 'archived_at',
             'thread_groups_config_snapshot', 'jmx_hash_snapshot',
+            'keep', 'is_baseline',  # 历史列表勾选「保留」/ 基准星标；写走 set-keep/set-baseline 端点
         ]
-        read_only_fields = fields  # 写入由 RunExecutor 控制，不通过 serializer
+        read_only_fields = fields  # 写入由 RunExecutor / set-keep / set-baseline 控制，不通过 serializer
 
     def get_max_wall_sec(self, obj):
         from .services.scheduler import estimate_max_wall_sec  # noqa: PLC0415

@@ -1,76 +1,109 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { ChevronDown, ChevronRight, Table2 } from 'lucide-vue-next'
-import { runsApi } from '@/lib/api'
-import type { SamplerSortKey, SamplerStat } from '@/types/task'
+import type { ErrorAggregateRow, SamplerStat } from '@/types/task'
+import { colorForHttpCode } from './dashboard/trends/semanticColors'
+import { errorMessageOf } from './dashboard/trends/errorMeta'
 
 const props = defineProps<{
-  runId: string | null
-  // 终态时定格；运行中也展示当前累积值（mock 模式下静态展示）
+  // 接口统计数据 + 错误聚合（由 SamplersTab 统一拉取后下传，含 'all' 行）
+  stats: SamplerStat[]
+  errorAggregates: ErrorAggregateRow[]
+  // 终态时定格；运行中也展示当前累积值
   isTerminal: boolean
   isDark: boolean
 }>()
 
-const stats = ref<SamplerStat[]>([])
-const loading = ref(false)
-const errorMessage = ref('')
-const sortKey = ref<SamplerSortKey>('error_rate_desc')
 const expandedLabel = ref<string | null>(null)
-// 竞态防御：切 run / 重复 mount 时，旧请求晚到不能覆盖新请求；
-// 上次失败的请求也不能污染新切过来的状态（避免"切回来还看到 HTTP 502"残留）
-let inflightToken = 0
+
+// 'all' 汇总行：后端预置(label==='all'),前端固定置顶,不参与排序
+const ALL_LABEL = 'all'
+function isAll(s: SamplerStat): boolean {
+  return s.label === ALL_LABEL
+}
+
+// 错误聚合按接口分组，给展开行用（融合原「错误明细」tab 的 code+message+count）
+const errorsByLabel = computed(() => {
+  const m = new Map<string, ErrorAggregateRow[]>()
+  for (const r of props.errorAggregates) {
+    const arr = m.get(r.label)
+    if (arr) arr.push(r)
+    else m.set(r.label, [r])
+  }
+  return m
+})
+
+// body = 完整响应体（sample_response_body，errors.xml 抓的真实响应，≤500 字）；
+// message 仅作 body 为空时的兜底（HTTP 派生短句）。
+interface ErrLine { code: string; body: string; message: string; count: number }
+function errorsFor(s: SamplerStat): ErrLine[] {
+  const rows = isAll(s) ? [...props.errorAggregates] : (errorsByLabel.value.get(s.label) ?? [])
+  if (rows.length) {
+    return rows
+      .sort((a, b) => b.count - a.count)
+      .slice(0, isAll(s) ? 10 : 50)
+      .map((r) => ({
+        code: (r.response_code || '').trim() || '0',
+        body: (r.sample_response_body || '').trim(),
+        message: errorMessageOf(r),
+        count: r.count,
+      }))
+  }
+  // 兜底：无错误聚合（老 run / 还没拉）但 top_errors 有 → 只显示 code
+  return (s.top_errors || []).map((e) => ({ code: e.reason, body: '', message: '', count: e.count }))
+}
 
 // SLA 阈值（暂用静态；v1.2 接 Service 模型后从那里取）
 const P99_SLA_MS = 1000
 
-const SORT_OPTIONS: { value: SamplerSortKey; label: string }[] = [
-  { value: 'error_rate_desc', label: '错误率降序' },
-  { value: 'total_desc', label: '请求数降序' },
-  { value: 'p99_desc', label: 'P99 降序' },
+// 点击表头排序：列 key + 取值。'success_rate' 派生,其余直接取字段。
+type ColKey = 'label' | 'total' | 'success_rate' | 'avg_ms'
+  | 'p50_ms' | 'p90_ms' | 'p99_ms' | 'max_ms' | 'avg_rps'
+const COLUMNS: { key: ColKey; label: string; align: 'left' | 'right' }[] = [
+  { key: 'label', label: '接口', align: 'left' },
+  { key: 'total', label: '请求数', align: 'right' },
+  { key: 'success_rate', label: '成功率', align: 'right' },
+  { key: 'avg_ms', label: 'Avg', align: 'right' },
+  { key: 'p50_ms', label: 'P50', align: 'right' },
+  { key: 'p90_ms', label: 'P90', align: 'right' },
+  { key: 'p99_ms', label: 'P99', align: 'right' },
+  { key: 'max_ms', label: 'Max', align: 'right' },
+  { key: 'avg_rps', label: 'RPS', align: 'right' },
 ]
+const sortCol = ref<ColKey>('total')
+const sortDir = ref<'asc' | 'desc'>('desc')
 
-async function load() {
-  if (!props.runId) {
-    stats.value = []
-    return
-  }
-  const token = ++inflightToken
-  loading.value = true
-  errorMessage.value = ''
-  try {
-    const data = await runsApi.samplerStats(props.runId)
-    if (token !== inflightToken) return   // 已被新请求顶掉，丢弃晚到结果
-    stats.value = data
-  } catch (e) {
-    if (token !== inflightToken) return
-    errorMessage.value = e instanceof Error ? e.message : String(e)
-    stats.value = []
-  } finally {
-    if (token === inflightToken) loading.value = false
+function setSort(key: ColKey) {
+  if (sortCol.value === key) {
+    sortDir.value = sortDir.value === 'desc' ? 'asc' : 'desc'
+  } else {
+    sortCol.value = key
+    sortDir.value = key === 'label' ? 'asc' : 'desc'  // 文本默认 A→Z,数值默认大→小
   }
 }
 
-onMounted(load)
-watch(() => props.runId, load)
+function colValue(s: SamplerStat, key: ColKey): number | string {
+  if (key === 'label') return s.label
+  if (key === 'success_rate') return s.total ? s.success / s.total : 0
+  return s[key]
+}
 
 const sortedStats = computed(() => {
-  const arr = [...stats.value]
-  switch (sortKey.value) {
-    case 'error_rate_desc':
-      return arr.sort(
-        (a, b) => errorRate(b) - errorRate(a) || b.total - a.total,
-      )
-    case 'total_desc':
-      return arr.sort((a, b) => b.total - a.total)
-    case 'p99_desc':
-      return arr.sort((a, b) => b.p99_ms - a.p99_ms)
-  }
+  // 'all' 汇总行固定置顶,不参与排序；其余按当前列 + 方向排
+  const all = props.stats.filter(isAll)
+  const rest = props.stats.filter((s) => !isAll(s))
+  const key = sortCol.value
+  const sign = sortDir.value === 'desc' ? -1 : 1
+  rest.sort((a, b) => {
+    const va = colValue(a, key)
+    const vb = colValue(b, key)
+    const c = typeof va === 'string'
+      ? String(va).localeCompare(String(vb))
+      : (va as number) - (vb as number)
+    return sign * c
+  })
+  return [...all, ...rest]
 })
-
-function errorRate(s: SamplerStat): number {
-  if (!s.total) return 0
-  return (s.error / s.total) * 100
-}
 
 function successRateColor(pct: number): string {
   if (pct < 99) return '#ef4444'
@@ -140,37 +173,16 @@ const rowHoverBg = computed(() =>
         >运行中累计</span>
       </div>
 
-      <select
+      <span
         v-if="stats.length"
-        v-model="sortKey"
-        class="text-[11.5px] px-2 py-1 rounded-md cursor-pointer outline-none"
-        :style="{
-          background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
-          border: isDark ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(0,0,0,0.08)',
-          color: isDark ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.75)',
-        }"
-      >
-        <option
-          v-for="opt in SORT_OPTIONS"
-          :key="opt.value"
-          :value="opt.value"
-        >{{ opt.label }}</option>
-      </select>
+        class="text-[10.5px]"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.4)' }"
+      >点击表头排序</span>
     </div>
 
-    <!-- 空 / 加载 / 错误态 -->
+    <!-- 空态 -->
     <div
-      v-if="loading"
-      class="text-center py-6 text-[12px]"
-      :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
-    >加载中…</div>
-    <div
-      v-else-if="errorMessage"
-      class="text-center py-6 text-[12px]"
-      :style="{ color: '#ef4444' }"
-    >加载失败：{{ errorMessage }}</div>
-    <div
-      v-else-if="!stats.length"
+      v-if="!stats.length"
       class="text-center py-6 text-[12px]"
       :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
     >运行结束后展示接口级统计</div>
@@ -180,28 +192,42 @@ const rowHoverBg = computed(() =>
       <table class="w-full text-[11.5px] tabular-nums">
         <thead>
           <tr :style="{ color: headerColor }">
-            <th class="text-left font-medium pb-2 pl-2 pr-3">接口</th>
-            <th class="text-right font-medium pb-2 px-3">请求数</th>
-            <th class="text-right font-medium pb-2 px-3">成功率</th>
-            <th class="text-right font-medium pb-2 px-3">Avg</th>
-            <th class="text-right font-medium pb-2 px-3">P50</th>
-            <th class="text-right font-medium pb-2 px-3">P90</th>
-            <th class="text-right font-medium pb-2 px-3">P99</th>
-            <th class="text-right font-medium pb-2 px-3">Max</th>
-            <th class="text-right font-medium pb-2 px-3 pr-2">RPS</th>
+            <th
+              v-for="(col, ci) in COLUMNS"
+              :key="col.key"
+              class="font-medium pb-2 px-3 cursor-pointer select-none whitespace-nowrap"
+              :class="[
+                col.align === 'left' ? 'text-left' : 'text-right',
+                ci === 0 ? 'pl-2' : '',
+                ci === COLUMNS.length - 1 ? 'pr-2' : '',
+              ]"
+              :style="{ color: sortCol === col.key ? (isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)') : headerColor }"
+              @click="setSort(col.key)"
+            >
+              <span class="inline-flex items-center gap-0.5" :class="col.align === 'right' ? 'flex-row-reverse' : ''">
+                {{ col.label }}
+                <ChevronDown
+                  v-if="sortCol === col.key"
+                  :size="11"
+                  :style="{ transform: sortDir === 'asc' ? 'rotate(180deg)' : 'none' }"
+                />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody>
           <template v-for="s in sortedStats" :key="s.label">
             <tr
               class="cursor-pointer transition-colors"
+              :class="isAll(s) ? 'font-medium' : ''"
               :style="{
                 color: cellColor,
                 borderTop: `1px solid ${dividerColor}`,
+                background: isAll(s) ? (isDark ? 'rgba(16,185,129,0.06)' : 'rgba(16,185,129,0.05)') : '',
               }"
               @click="toggleExpand(s.label)"
-              @mouseenter="(e) => ((e.currentTarget as HTMLElement).style.background = rowHoverBg)"
-              @mouseleave="(e) => ((e.currentTarget as HTMLElement).style.background = '')"
+              @mouseenter="(e) => { if (!isAll(s)) (e.currentTarget as HTMLElement).style.background = rowHoverBg }"
+              @mouseleave="(e) => { if (!isAll(s)) (e.currentTarget as HTMLElement).style.background = '' }"
             >
               <td class="py-2 pl-2 pr-3 max-w-[280px]">
                 <div class="flex items-center gap-1.5">
@@ -210,7 +236,7 @@ const rowHoverBg = computed(() =>
                     :size="11"
                     :color="isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)'"
                   />
-                  <span class="truncate" :title="s.label">{{ s.label }}</span>
+                  <span class="truncate" :title="isAll(s) ? '全部接口汇总' : s.label">{{ isAll(s) ? '全部' : s.label }}</span>
                 </div>
               </td>
               <td class="py-2 px-3 text-right">{{ fmtInt(s.total) }}</td>
@@ -245,25 +271,29 @@ const rowHoverBg = computed(() =>
                   <div>失败数 <span :style="{ color: '#ef4444' }">{{ fmtInt(s.error) }}</span> / <span :style="{ color: cellColor }">{{ fmtInt(s.total) }}</span></div>
                 </div>
                 <div
-                  v-if="s.top_errors.length"
+                  v-if="errorsFor(s).length"
                   class="mt-3 text-[11px]"
                 >
                   <div
                     class="font-medium mb-1"
                     :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-                  >Top 错误</div>
-                  <div class="flex flex-col gap-1">
+                  >错误明细</div>
+                  <div class="flex flex-col gap-1.5">
                     <div
-                      v-for="(err, i) in s.top_errors"
+                      v-for="(err, i) in errorsFor(s)"
                       :key="i"
-                      class="flex items-center gap-2"
+                      class="flex items-baseline gap-2 min-w-0"
                     >
                       <span
-                        class="inline-block w-1.5 h-1.5 rounded-full"
-                        :style="{ background: '#ef4444' }"
-                      />
-                      <span :style="{ color: cellColor }" class="truncate">{{ err.reason }}</span>
-                      <span :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }">×{{ err.count }}</span>
+                        class="font-medium tabular-nums flex-shrink-0"
+                        :style="{ color: colorForHttpCode(err.code) }"
+                      >{{ err.code }}</span>
+                      <!-- 完整响应 body 接在 code 后面（无 body 退回 HTTP 派生短句）-->
+                      <span
+                        class="font-mono text-[10.5px] break-all flex-1 min-w-0"
+                        :style="{ color: isDark ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.72)' }"
+                      >{{ err.body || err.message }}</span>
+                      <span class="flex-shrink-0 tabular-nums" :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }">×{{ fmtInt(err.count) }}</span>
                     </div>
                   </div>
                 </div>

@@ -1,21 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import {
-  Play, Square, Loader, History, ChevronDown, Check, Trash2,
-} from 'lucide-vue-next'
-import type { Environment, RunEvent, RunEventType, RunStatus, Task, TaskRun, ThreadGroupConfig } from '@/types/task'
-import { plannedDurationSec, plannedThreads } from '@/lib/planSummary'
-import { runsApi, ApiError } from '@/lib/api'
-import { getMarked, toggleMarked, removeMarked } from '@/lib/markedRuns'
-import { scenarioById, inferScenarioFromKind } from '@/components/tasks/configStageCtx'
-import RunPlanSummary from './RunPlanSummary.vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { Play, Square, Loader } from 'lucide-vue-next'
+import type { RunEvent, RunEventType, RunStatus, Task, TaskRun } from '@/types/task'
+import { plannedDurationSec } from '@/lib/planSummary'
+import { STATUS_META } from './runStatusMeta'
 
 const props = defineProps<{
   selectedRun: TaskRun | null
-  runs: TaskRun[]
   events: RunEvent[]
-  task: Task                   // 任务简介（第二行）用
-  environment: Environment | null
+  task: Task                   // 进度条阶段估算用
   durationSeconds: number      // task.duration_seconds，回退兜底
   busy: boolean
   startDisabled?: boolean      // config_stale 时上层 disable 开始按钮；兜底默认 false
@@ -25,67 +18,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'start'): void
   (e: 'stop'): void
-  (e: 'select', runId: string): void
-  (e: 'run-deleted', runId: string): void
 }>()
-
-// localStorage 「标记进数据分析」（v1.3 接后端时换字段，接口形态不变）
-const markedSet = ref<Set<string>>(new Set())
-const hoveredRunId = ref<string | null>(null)
-const deletingRunId = ref<string | null>(null)
-function refreshMarked() {
-  markedSet.value = props.task ? getMarked(props.task.id) : new Set()
-}
-onMounted(refreshMarked)
-watch(() => props.task?.id, refreshMarked)
-
-function onToggleMarked(rid: string) {
-  if (!props.task) return
-  markedSet.value = toggleMarked(props.task.id, rid)
-}
-
-function successRate(r: TaskRun): number {
-  return Math.max(0, 100 - (r.error_rate || 0))
-}
-function successColor(r: TaskRun): string {
-  // 终态前 error_rate 可能还在变；颜色按当前值染
-  if (r.status === 'pre_checking' || r.status === 'pending') return '#9ca3af'
-  const s = successRate(r)
-  if (s >= 99) return '#10b981'
-  if (s >= 95) return '#f59e0b'
-  return '#ef4444'
-}
-function scenarioOf(cfg: ThreadGroupConfig) {
-  const sid = cfg.scenario || inferScenarioFromKind(cfg.kind)
-  return scenarioById(sid)
-}
-
-function plannedVuOf(r: TaskRun): number {
-  // snapshot 算 sum(per-TG planned)。snapshot 空（旧 run）退回 r.virtual_users。
-  const snap = r.thread_groups_config_snapshot
-  if (snap && snap.length > 0) return plannedThreads(snap)
-  return r.virtual_users || 0
-}
-
-async function onDeleteRun(r: TaskRun) {
-  if (deletingRunId.value) return
-  const title = fmtRunTitle(r)
-  if (!window.confirm(`确认删除 ${title} 这次 run？\n该操作会清除磁盘归档 + InfluxDB 数据，不可恢复。\n（表行保留供大盘统计任务历史 run 数。）`)) {
-    return
-  }
-  deletingRunId.value = r.run_id
-  try {
-    await runsApi.delete(r.run_id)
-    if (props.task) removeMarked(props.task.id, r.run_id)
-    refreshMarked()
-    emit('run-deleted', r.run_id)
-  } catch (e) {
-    const msg = e instanceof ApiError ? e.humanMessage : (e instanceof Error ? e.message : String(e))
-    window.alert(`删除失败：${msg}`)
-  } finally {
-    deletingRunId.value = null
-  }
-}
 
 const ACTIVE: RunStatus[] = ['pre_checking', 'pending', 'running', 'cancelling']
 const isActive = computed(() => !!props.selectedRun && ACTIVE.includes(props.selectedRun.status))
@@ -268,18 +201,7 @@ function fillWidth(segStart: number, segEnd: number): number {
   return Math.max(0, Math.min(progressPct.value, segEnd) - segStart)
 }
 
-// ─── 状态徽章 ───
-const STATUS_META: Record<RunStatus, { label: string; color: string }> = {
-  pre_checking: { label: '预检中', color: '#9ca3af' },
-  pre_check_failed: { label: '预检失败', color: '#ef4444' },
-  pending: { label: '排队中', color: '#9ca3af' },
-  running: { label: '执行中', color: '#3b82f6' },
-  cancelling: { label: '取消中', color: '#f59e0b' },
-  success: { label: '成功', color: '#10b981' },
-  failed: { label: '失败', color: '#ef4444' },
-  timeout: { label: '超时', color: '#f59e0b' },
-  cancelled: { label: '已取消', color: '#9ca3af' },
-}
+// ─── 状态徽章 ───（STATUS_META 已抽到 runStatusMeta.ts 共享）
 const statusInfo = computed(() => {
   if (!props.selectedRun) return { label: '待执行', color: '#9ca3af' }
   return STATUS_META[props.selectedRun.status] || { label: props.selectedRun.status, color: '#6b7280' }
@@ -380,30 +302,6 @@ const eventMarkers = computed(() => {
     .filter((x): x is { meta: EventMeta; leftPct: number } => x !== null)
 })
 
-// ─── 历史 dropdown ───
-const historyOpen = ref(false)
-function toggleHistory() { historyOpen.value = !historyOpen.value }
-function closeHistory() { historyOpen.value = false }
-
-function selectRun(rid: string) {
-  emit('select', rid)
-  closeHistory()
-}
-
-function fmtRunTitle(r: TaskRun): string {
-  if (r.started_at) {
-    const d = new Date(r.started_at)
-    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
-  }
-  return r.run_id.slice(0, 6)
-}
-
-function clickOutsideHandler(e: MouseEvent) {
-  const target = e.target as HTMLElement
-  if (!target.closest('[data-history-dropdown]')) closeHistory()
-}
-onMounted(() => document.addEventListener('click', clickOutsideHandler))
-onBeforeUnmount(() => document.removeEventListener('click', clickOutsideHandler))
 </script>
 
 <template>
@@ -514,156 +412,11 @@ onBeforeUnmount(() => document.removeEventListener('click', clickOutsideHandler)
         <Square v-else :size="12" />
         {{ isCancelling ? '取消中…' : '停止' }}
       </button>
-
-      <!-- 历史 dropdown -->
-      <div v-if="runs.length" class="relative" data-history-dropdown>
-        <button
-          class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[12px] cursor-pointer"
-          :style="{
-            background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-            color: isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)',
-          }"
-          :title="`历史 ${runs.length} 个 run`"
-          @click.stop="toggleHistory"
-        >
-          <History :size="11" />
-          历史 ({{ runs.length }})
-          <ChevronDown :size="10" />
-        </button>
-        <div
-          v-if="historyOpen"
-          class="absolute right-0 mt-1 max-h-[360px] overflow-y-auto rounded-lg z-20 min-w-[440px]"
-          :style="{
-            background: isDark ? '#16161a' : '#ffffff',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
-          }"
-        >
-          <!-- 行结构：[checkbox] [status chip] [时间] [VU] [成功率] [TG hover] [trash] -->
-          <div
-            v-for="r in runs"
-            :key="r.run_id"
-            class="flex items-center gap-2 px-2.5 py-1.5 text-[11.5px]"
-            :style="{
-              background: r.run_id === selectedRun?.run_id
-                ? (isDark ? 'rgba(59,130,246,0.15)' : 'rgba(59,130,246,0.08)')
-                : 'transparent',
-            }"
-          >
-            <!-- checkbox：标记进数据分析 -->
-            <span
-              class="w-3.5 h-3.5 rounded border flex items-center justify-center cursor-pointer flex-shrink-0"
-              :style="{
-                background: markedSet.has(r.run_id) ? '#3b82f6' : 'transparent',
-                borderColor: markedSet.has(r.run_id) ? '#3b82f6'
-                  : (isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)'),
-              }"
-              :title="markedSet.has(r.run_id) ? '取消勾选' : '标记进数据分析'"
-              @click.stop="onToggleMarked(r.run_id)"
-            >
-              <Check v-if="markedSet.has(r.run_id)" :size="9" color="#fff" />
-            </span>
-
-            <!-- 状态 chip 替代原圆点 -->
-            <span
-              class="px-1 py-px rounded text-[10px] flex-shrink-0 whitespace-nowrap"
-              :style="{
-                background: `${STATUS_META[r.status]?.color || '#6b7280'}1f`,
-                color: STATUS_META[r.status]?.color || '#6b7280',
-              }"
-            >{{ STATUS_META[r.status]?.label || r.status }}</span>
-
-            <!-- 时间：点击切 selectedRun -->
-            <span
-              class="tabular-nums flex-shrink-0 cursor-pointer"
-              :style="{
-                color: r.run_id === selectedRun?.run_id
-                  ? (isDark ? '#93c5fd' : '#2563eb')
-                  : (isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)'),
-              }"
-              @click="selectRun(r.run_id)"
-            >{{ fmtRunTitle(r) }}</span>
-
-            <!-- 并发数：用 snapshot 算 sum(per-TG planned)，r.virtual_users 只记第一个
-                 标准 ThreadGroup 的 users，多 TG / 插件 TG 时不准（task 27 全 plugin TG
-                 时永远 = 1）-->
-            <span
-              class="text-[10px] tabular-nums flex-shrink-0"
-              :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-              title="启动时快照的总计划线程数（按各 TG 配置求和）"
-            >{{ plannedVuOf(r) }} VU</span>
-
-            <!-- 成功率 -->
-            <span
-              class="text-[10px] tabular-nums flex-shrink-0"
-              :style="{ color: successColor(r) }"
-              title="100 - error_rate"
-            >{{ successRate(r).toFixed(1) }}%</span>
-
-            <!-- TG 数 + hover popover -->
-            <span
-              class="text-[10px] tabular-nums flex-shrink-0 cursor-help relative ml-auto"
-              :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
-              @mouseenter="hoveredRunId = r.run_id"
-              @mouseleave="hoveredRunId = null"
-            >
-              {{ (r.thread_groups_config_snapshot?.length || 0) }} TG
-              <div
-                v-if="hoveredRunId === r.run_id && r.thread_groups_config_snapshot?.length"
-                class="absolute right-0 top-full mt-1 px-2 py-1.5 rounded shadow-lg z-30 min-w-[200px] text-[11px]"
-                :style="{
-                  background: isDark ? 'rgba(20,20,30,0.97)' : 'rgba(255,255,255,0.98)',
-                  border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
-                  backdropFilter: 'blur(20px)',
-                }"
-              >
-                <div
-                  class="text-[10px] uppercase tracking-wider mb-1.5"
-                  :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
-                >该 run 跑时 TG 快照</div>
-                <div
-                  v-for="(cfg, i) in r.thread_groups_config_snapshot"
-                  :key="i"
-                  class="flex items-center gap-1.5 py-0.5"
-                >
-                  <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                        :style="{ background: scenarioOf(cfg).color }" />
-                  <span :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)' }">
-                    {{ scenarioOf(cfg).label }}
-                  </span>
-                  <span class="ml-auto font-mono text-[10px] opacity-50">{{ cfg.path }}</span>
-                </div>
-              </div>
-            </span>
-
-            <!-- 删除 -->
-            <button
-              type="button"
-              class="p-1 rounded cursor-pointer flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-              :style="{
-                background: isDark ? 'transparent' : 'transparent',
-              }"
-              :disabled="deletingRunId === r.run_id"
-              title="删除该 run（清磁盘 + InfluxDB；表行保留供大盘统计）"
-              @click.stop="onDeleteRun(r)"
-            >
-              <Loader v-if="deletingRunId === r.run_id" :size="11" class="animate-spin" color="#ef4444" />
-              <Trash2 v-else :size="11" color="#ef4444" />
-            </button>
-          </div>
-        </div>
-      </div>
+      <!-- 历史下拉已迁到 RunDashboard 标签行（见 RunHistoryDropdown.vue）-->
     </div>
   </div>
 
-  <!-- 第二行：任务简介（场景 / TG 数 / 线程 / 时长 / 环境 / CSV 数 + 快照变化提示）-->
-  <RunPlanSummary
-    :task="task"
-    :selected-run="selectedRun"
-    :environment="environment"
-    :is-dark="isDark"
-    embedded
-  />
+  <!-- 任务简介条已挪到 RunDashboard 标签行末尾（见 RunDashboard.vue）-->
   </div>
 
   <!-- Hover 浮窗：Teleport 到 body 用 fixed 定位逃出卡片堆叠 -->

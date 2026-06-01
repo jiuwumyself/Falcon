@@ -328,12 +328,14 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     # 这里直接吃 transaction='all' + GROUP BY thread_group，得到 TG 级聚合
     # （而不是 sample label 级别 —— 那会把一个 TG 内 N 个 sampler 切成 N 条 chip）。
     by_tg: dict[str, dict] = {}
+    # count/rb/sb 跨 agent **可加** → sum(多机时同 (1s,TG) 桶有 N 个 agent 行,
+    # mean 会 ÷N，all 行用 sum 而 by_tg 用 mean 就对不上)。分位 pct 不可加,保持 mean。
     by_tg_q = (
-        "SELECT mean(\"count\") AS rps, "
+        "SELECT sum(\"count\") AS rps, "
         "mean(\"pct50.0\") AS p50_ms, "
         "mean(\"pct95.0\") AS p95_ms, "
         "mean(\"pct99.0\") AS p99_ms, "
-        "mean(\"rb\") AS rb, mean(\"sb\") AS sb "
+        "sum(\"rb\") AS rb, sum(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"='all' AND \"statut\"='all'{where_time} "
         "GROUP BY time(1s), \"thread_group\" fill(none)"
@@ -465,11 +467,11 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     sampler_thread_group: dict[str, list[str]] = {}
     # — 全部模式聚合：单维 GROUP BY transaction，同 ts 一条值
     by_sampler_q = (
-        "SELECT mean(\"count\") AS rps, "
+        "SELECT sum(\"count\") AS rps, "  # 跨 agent 可加 → sum(多机 mean 会 ÷agent 数)
         "mean(\"pct50.0\") AS p50_ms, "
         "mean(\"pct95.0\") AS p95_ms, "
         "mean(\"pct99.0\") AS p99_ms, "
-        "mean(\"rb\") AS rb, mean(\"sb\") AS sb "
+        "sum(\"rb\") AS rb, sum(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='all'{where_time} "
@@ -527,7 +529,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
         "mean(\"pct99.0\") AS p99_ok_ms, "
-        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        "sum(\"rb\") AS rb_ok, sum(\"sb\") AS sb_ok "  # 字节可加 → sum
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='ok'{where_time} "
@@ -555,11 +557,11 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         pass
     # — 切 TG 模式聚合：双维 GROUP BY (transaction, thread_group)，同时落 sampler→TG 映射
     by_sampler_by_tg_q = (
-        "SELECT mean(\"count\") AS rps, "
+        "SELECT sum(\"count\") AS rps, "  # 跨 agent 可加 → sum
         "mean(\"pct50.0\") AS p50_ms, "
         "mean(\"pct95.0\") AS p95_ms, "
         "mean(\"pct99.0\") AS p99_ms, "
-        "mean(\"rb\") AS rb, mean(\"sb\") AS sb "
+        "sum(\"rb\") AS rb, sum(\"sb\") AS sb "
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='all'{where_time} "
@@ -619,7 +621,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         "SELECT mean(\"pct50.0\") AS p50_ok_ms, "
         "mean(\"pct95.0\") AS p95_ok_ms, "
         "mean(\"pct99.0\") AS p99_ok_ms, "
-        "mean(\"rb\") AS rb_ok, mean(\"sb\") AS sb_ok "
+        "sum(\"rb\") AS rb_ok, sum(\"sb\") AS sb_ok "  # 字节可加 → sum
         f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
         f"AND \"transaction\"!='all' AND \"transaction\"!='internal' "
         f"AND \"statut\"='ok'{where_time} "
@@ -987,6 +989,43 @@ def delete_run_data(run_id: str) -> bool:
     safe_run = run_id.replace("'", "''")
     try:
         client.query(f"DELETE FROM \"jmeter\" WHERE \"run_id\"='{safe_run}'")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_RETENTION_ENSURED = False
+
+
+def ensure_retention_policy() -> bool:
+    """幂等确保 `falcon_default` 保留策略存在且为默认(INFLUXDB_RETENTION,默认 30d)。
+
+    关键:InfluxDB 靠 `INFLUXDB_DB` env 自动建库时,默认保留策略是 `autogen`(**无限期**)。
+    若运维忘了跑 `manage.py setup_influxdb`,数据永不过期 → 日积月累爆盘。这里在首次起
+    run 时自动建/校正策略,杜绝该坑(跟 setup_influxdb 命令同款 create/alter 逻辑)。
+    进程内只跑一次(成功后 short-circuit)。
+    """
+    global _RETENTION_ENSURED
+    if _RETENTION_ENSURED:
+        return True
+    client = get_client()
+    if client is None:
+        return False
+    db_name = getattr(settings, 'INFLUXDB_DB', 'jmeter')
+    retention = getattr(settings, 'INFLUXDB_RETENTION', '30d')
+    rp_name = 'falcon_default'
+    try:
+        rps = client.get_list_retention_policies(database=db_name)
+        if any(rp['name'] == rp_name for rp in rps):
+            client.alter_retention_policy(
+                rp_name, database=db_name, duration=retention,
+                replication=1, default=True,
+            )
+        else:
+            client.create_retention_policy(
+                rp_name, retention, '1', database=db_name, default=True,
+            )
+        _RETENTION_ENSURED = True
         return True
     except Exception:  # noqa: BLE001
         return False

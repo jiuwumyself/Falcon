@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { AnimatePresence, Motion } from 'motion-v'
 import {
-  Upload, Sliders, Play, LineChart, FileText, X, Loader, RotateCcw, Check,
+  Upload, Sliders, Play, LineChart, FileText, Loader, RotateCcw,
 } from 'lucide-vue-next'
 import { apiForm, ApiError, tasksApi } from '@/lib/api'
 import { useTheme } from '@/composables/useTheme'
@@ -312,7 +312,7 @@ const panelGlass = computed(() => ({
               class="w-9 h-9 rounded-full flex items-center justify-center transition-all"
               :style="{
                 background: isDone(i)
-                  ? s.color
+                  ? `${s.color}1a`
                   : currentStep === i
                     ? `${s.color}22`
                     : isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)',
@@ -324,9 +324,8 @@ const panelGlass = computed(() => ({
                 boxShadow: currentStep === i ? `0 0 0 4px ${s.color}1a` : 'none',
               }"
             >
-              <Check v-if="isDone(i)" :size="14" color="#fff" />
               <Motion
-                v-else-if="i === 0 && uploading"
+                v-if="i === 0 && uploading"
                 as="div"
                 :animate="{ rotate: 360 }"
                 :transition="{ duration: 1, repeat: Infinity, ease: 'linear' }"
@@ -338,7 +337,7 @@ const panelGlass = computed(() => ({
                 v-else
                 :is="s.icon"
                 :size="14"
-                :color="currentStep === i ? s.color : isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'"
+                :color="(currentStep === i || isDone(i)) ? s.color : isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)'"
               />
             </div>
 
@@ -382,17 +381,7 @@ const panelGlass = computed(() => ({
 
       <!-- ═══ Right content ═══ -->
       <main class="flex-1 min-w-0 relative overflow-hidden">
-        <!-- Floating close -->
-        <button
-          class="absolute top-3 right-3 w-7 h-7 rounded-full flex items-center justify-center cursor-pointer z-20"
-          :style="{
-            background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'}`,
-          }"
-          @click="emit('close')"
-        >
-          <X :size="13" :color="isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)'" />
-        </button>
+        <!-- 关闭按钮已移除：点顶部「性能」导航即可退出向导 -->
 
         <!-- Toast (re-upload feedback) -->
         <AnimatePresence>

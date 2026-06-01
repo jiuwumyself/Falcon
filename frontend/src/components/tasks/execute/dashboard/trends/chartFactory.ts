@@ -28,6 +28,8 @@ export interface SeriesSpec {
   /** echarts 折线平滑。默认 true（连续指标如 RPS / 延迟更可读）；离散阶梯量（VU
    *  并发数 / 计划曲线）必须 false，否则三角峰被磨成圆顶看不到真实峰值。 */
   smooth?: boolean
+  /** 虚线（计划/参照线用，如并发数图叠加的计划曲线）。默认实线。 */
+  dashed?: boolean
 }
 
 export const CONNECT_GROUP = 'falcon-trends'
@@ -121,7 +123,9 @@ export function buildSeriesOption(
       axisLine: { lineStyle: { color: axisColor(isDark) } },
       axisLabel: hideXAxisLabel
         ? { show: false }
-        : { color: labelColor(isDark), fontSize: 10 },
+        // hideOverlap：刚开跑时间窗很短，echarts 默认会把 10:40:50 / :51 / :52 全标出来挤一块；
+        // 开 hideOverlap 后会自动疏掉重叠的刻度文字。
+        : { color: labelColor(isDark), fontSize: 10, hideOverlap: true },
       splitLine: { show: false },
       ...(xRange ? { min: xRange[0], max: xRange[1] } : {}),
     },
@@ -146,7 +150,11 @@ export function buildSeriesOption(
       symbol: s.data.length <= 5 ? ('circle' as const) : ('none' as const),
       symbolSize: 5,
       stack: s.stack,
-      lineStyle: { color: s.color, width: s.lineWidth ?? 1.2 },
+      lineStyle: {
+        color: s.color,
+        width: s.lineWidth ?? 1.2,
+        type: s.dashed ? ('dashed' as const) : ('solid' as const),
+      },
       itemStyle: { color: s.color },
       areaStyle: s.area
         ? (s.solidArea

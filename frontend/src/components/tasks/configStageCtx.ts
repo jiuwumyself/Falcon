@@ -44,7 +44,7 @@ export const SCENARIOS: ScenarioDef[] = [
     kind: 'SteppingThreadGroup',
     defaultParams: {
       initial_threads: 0, step_users: 10, step_delay: 30,
-      step_count: 10, hold: 60, shutdown: 5,
+      step_count: 10, hold: 60, shutdown: 30,
     },
     tooltip: {
       purpose: '阶梯式加压观察系统从空载到饱和全过程，找性能拐点。',
@@ -58,7 +58,7 @@ export const SCENARIOS: ScenarioDef[] = [
     kind: 'SteppingThreadGroup',
     defaultParams: {
       initial_threads: 50, step_users: 50, step_delay: 30,
-      step_count: 10, hold: 60, shutdown: 5,
+      step_count: 10, hold: 60, shutdown: 30,
     },
     tooltip: {
       purpose: '起点已不低、继续阶梯加压，逼近系统极限。',
@@ -92,7 +92,7 @@ export const SCENARIOS: ScenarioDef[] = [
     id: 'throughput', label: '吞吐量', color: '#ec4899', icon: BarChart3,
     desc: '按目标 RPS 施压，验证 SLA（如 2000 RPS 下 P99<200ms）。底层：Arrivals ThreadGroup。',
     kind: 'ArrivalsThreadGroup',
-    defaultParams: { target_rps: 500, ramp_up: 60, steps: 10, hold: 600, unit: 'M' },
+    defaultParams: { target_rps: 500, ramp_up: 60, steps: 10, hold: 600, unit: 'S' },
     tooltip: {
       purpose: '按 RPS 目标驱动（不按用户数），验证"系统能否撑住 N qps"。',
       typical: '目标 500-5000 RPS（每分钟），跑 10 分钟看尾延迟。',

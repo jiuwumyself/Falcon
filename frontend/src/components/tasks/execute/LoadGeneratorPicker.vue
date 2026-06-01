@@ -23,7 +23,7 @@ const lgs = ref<LoadGenerator[]>([])
 const loading = ref(false)
 const scaling = ref(false)
 const error = ref('')
-const scaleCount = ref(1)
+const scaleCount = ref(3)
 
 let pollTimer: number | undefined
 

@@ -67,12 +67,12 @@ function defaultsFor(kind: TGKind): Record<string, number | string> {
   if (kind === 'ThreadGroup') return { users: 10, ramp_up: 5, duration: 60 }
   if (kind === 'SteppingThreadGroup') {
     return { initial_threads: 0, step_users: 10, step_delay: 30,
-             step_count: 10, hold: 60, shutdown: 5 }
+             step_count: 10, hold: 60, shutdown: 30 }
   }
   if (kind === 'ConcurrencyThreadGroup') {
     return { target_concurrency: 100, ramp_up: 10, steps: 5, hold: 60, unit: 'S' }
   }
-  return { target_rps: 500, ramp_up: 60, steps: 10, hold: 600, unit: 'M' }
+  return { target_rps: 500, ramp_up: 60, steps: 10, hold: 600, unit: 'S' }
 }
 
 function setParam(name: string, value: number | string) {
@@ -103,6 +103,11 @@ watch(
     const next = { ...p }
     for (const k of Object.keys(d)) {
       if (!(k in next)) { next[k] = d[k]; changed = true }
+    }
+    // Unit 固定为秒（不再让用户选择）；老配置存的 'M' 也归一化为 'S'
+    if ((props.config.kind === 'ConcurrencyThreadGroup' || props.config.kind === 'ArrivalsThreadGroup')
+        && next.unit !== 'S') {
+      next.unit = 'S'; changed = true
     }
     if (changed) emit('update:config', { ...props.config, params: next })
   },
@@ -137,13 +142,13 @@ const fields = computed<Field[]>(() => {
     { name: 'step_count', label: '步数', max: 1000 },
     { name: 'step_delay', label: '每步间隔 (秒)', max: MAX_DURATION_SECONDS },
     { name: 'hold', label: '保持时长 (秒)', max: MAX_DURATION_SECONDS },
-    { name: 'shutdown', label: '退出间隔 (秒)', max: MAX_DURATION_SECONDS },
+    { name: 'shutdown', label: '退出总时长 (秒)', max: MAX_DURATION_SECONDS, hint: '从峰值降到 0 的总时间（每台阶间隔由系统按 总时长 / 台阶数 算）' },
   ]
   if (k === 'ConcurrencyThreadGroup') return [
     { name: 'target_concurrency', label: '目标并发', max: MAX_USERS },
     { name: 'ramp_up', label: 'Ramp-up (秒)', max: MAX_DURATION_SECONDS },
     { name: 'steps', label: '阶梯数', max: 1000 },
-    { name: 'hold', label: '保持时长', max: MAX_DURATION_SECONDS, hint: '单位跟随 Unit' },
+    { name: 'hold', label: '保持时长 (秒)', max: MAX_DURATION_SECONDS },
   ]
   if (k === 'UltimateThreadGroup') return [
     { name: 'users', label: '峰值用户数', max: MAX_USERS },
@@ -157,14 +162,9 @@ const fields = computed<Field[]>(() => {
     { name: 'target_rps', label: '目标 RPS', max: 1_000_000 },
     { name: 'ramp_up', label: 'Ramp-up (秒)', max: MAX_DURATION_SECONDS },
     { name: 'steps', label: '阶梯数', max: 1000 },
-    { name: 'hold', label: '保持时长', max: MAX_DURATION_SECONDS, hint: '单位跟随 Unit' },
+    { name: 'hold', label: '保持时长 (秒)', max: MAX_DURATION_SECONDS },
   ]
 })
-
-const hasUnit = computed(() =>
-  props.config.kind === 'ConcurrencyThreadGroup' ||
-  props.config.kind === 'ArrivalsThreadGroup',
-)
 </script>
 
 <template>
@@ -246,21 +246,6 @@ const hasUnit = computed(() =>
             :style="inputStyle"
             @input="setParam(f.name, Number(($event.target as HTMLInputElement).value))"
           />
-        </div>
-        <div v-if="hasUnit">
-          <label
-            class="block text-[10px] uppercase tracking-wider mb-1"
-            :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }"
-          >Unit</label>
-          <select
-            :value="config.params.unit"
-            class="w-full px-2.5 py-1.5 rounded-md text-[13px] outline-none"
-            :style="inputStyle"
-            @change="setParam('unit', ($event.target as HTMLSelectElement).value)"
-          >
-            <option value="S">秒 (S)</option>
-            <option value="M">分 (M)</option>
-          </select>
         </div>
       </div>
     </template>

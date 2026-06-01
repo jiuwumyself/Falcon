@@ -261,7 +261,12 @@ await apiForm<Task>('/tasks/', fd)
 - `GET /api/performance/runs/:run_id/metrics/?since=...` → `RunMetrics { overall, by_tg, last_ts, run }`，`runsApi.metrics(runId, since?)`
 - `GET /api/performance/runs/:run_id/log/?tail=N` → `{lines}`，`runsApi.log(runId, tail)`
 - `GET /api/performance/runs/:run_id/jtl/` → 二进制 jtl 下载 URL = `runsApi.jtlUrl(runId)`
-- `GET /api/performance/runs/:run_id/report/` → JMeter HTML 报告 iframe URL = `runsApi.reportUrl(runId)`
+- `GET /api/performance/runs/:run_id/report/` → JMeter 原生 HTML 报告 iframe URL = `runsApi.reportUrl(runId)`
+
+**v1.3 资源治理（2026-05-26）前端要点**（后端架构详见 backend/CLAUDE.md §19）：
+- 显示端点响应形状**完全不变**（后端改读 DB，序列化对齐原 TS 类型），所以接口统计 / 错误明细 / 并发等组件**零改动**
+- **`ReportTab.vue` 改按需生成状态机**：原生报告不再自动出。`runsApi.reportStatus(runId)` → `{state:'none'|'ready', has_jtl}`；`none + has_jtl` 显示"生成报告"按钮 → `runsApi.generateReport(runId)`（jmeter -g，成功后后端删 results.jtl）→ `ready` 显示嵌入 iframe；`none + !has_jtl` 显示"原始已清理，去其他 tab"
+- **`ConcurrencyChart.vue` = 实测实线 + 计划虚线叠加**：实测来自 `runsApi.concurrency`（后端 JTL allThreads/grpThreads，分布式跨 agent 求和），计划来自 `lib/plannedCurve.ts`；`TrendsLayout` 的 `plannedActiveUsersFor` 对 ArrivalsThreadGroup(吞吐量)返回空（到达率驱动无计划并发，避免单位不符的误导线）；`chartFactory` 的 `smooth`/`dashed` 开关给离散 VU 用
 
 ## 10. 构建 / 类型检查
 
@@ -404,9 +409,9 @@ Wizard 是单一 glass panel：
 ### 12.5 Step 2 组件拆分（v2 场景驱动）
 
 - `ConfigStage.vue` —— Step 2 根组件。mount 时 `GET /thread-groups/`；local `configs: ThreadGroupConfig[]` 只含**启用**的 TG（禁用的不显示、保存时保留原样）；`currentPath` 决定右侧编辑哪个 TG（单 TG 时就一个、不显示切换器）。"保存"按钮一次 `PATCH` 全部 TG 配置 + environment_id；"校验"按钮 `POST /validate/`，结果填进 `ValidateResultTable`。
-- `ScenarioTabs.vue` —— 6 个场景 pill（基准/负载/压力/稳定性/峰值/吞吐量）。选中态：场景色渐变 + scale 1.04 + 外发光 + 右上角小圆点指示；下方常驻一条场景说明条（左边竖条染场景色 + label + desc）。切换场景 → emit `update:modelValue`，`ConfigStage` 把**当前 TG** 的 `kind` + `params` 整段重置为场景默认。
+- `ScenarioTabs.vue` —— 6 个场景 pill（基准/负载/压力/稳定性/峰值/吞吐量）。选中态：场景色渐变 + scale 1.04 + 外发光；下方常驻一条场景说明条（左边竖条染场景色 + label + desc）。切换场景 → emit `update:modelValue`，`ConfigStage` 把**当前 TG** 的 `kind` + `params` 整段重置为场景默认。
 - `ThreadGroupPicker.vue` —— 多 TG 切换器。`threadGroups.length > 1` 时才渲染；每个 TG 一个 pill，右侧小标签显示该 TG 已选场景（场景色）。点击 → emit `update:currentPath`。
-- `TgParamsForm.vue` —— 参数表单。`fields` computed 根据当前 `config.kind` 返回字段清单（5 种 kind 各自的字段组）；number input 都带 `min/max`（5000/43200，Arrivals 的 target_rps 除外）；`ConcurrencyThreadGroup` / `ArrivalsThreadGroup` 额外带 Unit 下拉（S/M）。**不自动切换 kind**——参数微调不改 scenario。
+- `TgParamsForm.vue` —— 参数表单。`fields` computed 根据当前 `config.kind` 返回字段清单（5 种 kind 各自的字段组）；number input 都带 `min/max`（5000/43200，Arrivals 的 target_rps 除外）；`ConcurrencyThreadGroup` / `ArrivalsThreadGroup` 的时间单位**固定为秒**（不再有 Unit 下拉；保存时 params 里 `unit` 恒为 `'S'`，老配置的 `'M'` 在 TgParamsForm 的 watch 里归一化为 `'S'`）。**不自动切换 kind**——参数微调不改 scenario。
 - `ThreadGroupChart.vue` —— echarts 线图（`vue-echarts` 包装）。按需引入 `LineChart + GridComponent + TooltipComponent + TitleComponent + MarkPointComponent + CanvasRenderer`。根据 kind + params 算 `(t, y)` 点列，渲染成折线 + 半透明场景色填充面 + 峰值 markPoint。y 轴名 `活跃用户数` 或 `RPS`（Arrivals kind 专用）。高度固定 320px。
 - `EnvironmentPicker.vue` —— 同 v1，无改动。
 - `ValidateResultTable.vue` —— 新增一行黄色警告显示 `unresolved_vars`（"⚠ 有未解析变量：username, token"）。

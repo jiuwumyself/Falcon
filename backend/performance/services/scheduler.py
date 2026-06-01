@@ -1,10 +1,16 @@
 """多机调度器（v1.2）。
 
 职责：
-  1. 按 vusers + 选中 LoadGenerator 列表算分片（每台一份）
-  2. 给每个分片生成 jmx：
+  1. 按 thread_groups_config + 选中 LoadGenerator 列表算分片（compute_shards）：
+     - **精确拆分**每个可拆字段（step_users/users/target_concurrency/rps/rows.users），
+       各 agent 份额之和恒 = task 配置值（_split_int，余数给容量最大的台）。旧实现对每个
+       TG 各自 ceil(value × factor) 再 max(1,…) → N 台各下钳到 1 → 每步总增量翻 N 倍。
+     - **自动减 agent**：粒度（如 step_users）不足以铺满所选 agent 时弃用多余台，
+       返回 dropped 台数供上层提示用户。
+  2. 给每个分片生成 jmx（build_shard_jmx）：
      - 复用 build_run_xml 拿到含 Step 2 完整配置的 xml
-     - 把每个 enabled TG 的 num_threads 改成本分片对应数
+     - _apply_shard_split 按 (shard.index, total_shards) 把每个 enabled TG 改成本片份额；
+       min=1 的字段（baseline users 等）拆成 0 时 **禁用** 该 TG（不能留全量 → 翻倍）
      - BackendListener 注入加 host=pod_name tag（InfluxDB 切片用）
   3. 切 CSV 到分片本地：按行偏移 (row_index % shards == shard_index) 写到 work_dir/csv/
 """
@@ -12,7 +18,6 @@ from __future__ import annotations
 
 import csv
 import io
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,7 +25,7 @@ from typing import TYPE_CHECKING
 from .jmx import (
     JmxParseError, _inject_backend_listener_per_tg, _inject_error_response_listener,
     _set_csv_filename_at_path,
-    build_run_xml, list_thread_groups, replace_thread_group,
+    build_run_xml, replace_thread_group, toggle_component,
 )
 
 if TYPE_CHECKING:
@@ -64,11 +69,10 @@ def _estimate_tg_seconds(kind: str, params: dict) -> int:
         return _i('duration')
     if kind == 'SteppingThreadGroup':
         ramp = _i('step_count') * _i('step_delay')
-        max_threads = _i('initial_threads') + _i('step_count') * _i('step_users')
-        stop_users = _i('Stop users count', 1) or _i('stop_users_count', 1) or 1
-        stop_period = _i('Stop users period') or _i('stop_users_period') or _i('shutdown', 5)
-        # plugin 用驼峰；Step 2 表单可能给 'shutdown' 字段映射成 stop period
-        shutdown_dur = -(-max_threads // max(stop_users, 1)) * stop_period  # ceil div
+        # 用户的 `shutdown` 字段语义 = 「退出总时长」(从峰值到 0 的总秒数)。
+        # jmx.py 已把它反算成 casutg Stop users period(=shutdown/(num_drops-1))，
+        # 所以这里直接当总时长用即可，不用再 ceil-div 乘一次。
+        shutdown_dur = _i('shutdown', 30)
         return ramp + _i('hold') + shutdown_dur
     if kind == 'ConcurrencyThreadGroup':
         return _i('ramp_up') + _i('hold') + _i('shutdown', 5)
@@ -165,6 +169,44 @@ def estimate_phase_anchors_sec(thread_groups_config: list[dict]) -> dict[str, in
     return {}
 
 
+def compute_planned_run_params(
+    thread_groups_config: list[dict],
+    *,
+    fallback_vusers: int = 0,
+    fallback_ramp: int = 0,
+    fallback_duration: int = 0,
+) -> tuple[int, int, int]:
+    """Step 3 起 run 时算快照三元组 (virtual_users, ramp_up_seconds, duration_seconds)。
+
+    为什么不直接 copy task.virtual_users / ramp_up_seconds / duration_seconds：这三个
+    旧单字段只在「第一个标准 ThreadGroup」存在时才同步（见 views.thread_groups PATCH），
+    用户在 Step 2 切到 plugin TG（Stepping / Concurrency / Ultimate / Arrivals）后它们
+    停在旧值失真——例如 Stepping 实跑 220s，duration_seconds 仍是上传时的 125s，导致
+    进度条 / Timeline / RunStatusCard 显示的时长跟真实场景对不上。这里统一从配置算，
+    单一真相。
+
+    语义（对齐 TaskRun.duration_seconds 注释「仅 steady 期」+ Timeline 端点 + 前端
+    phaseSegments / RunStatusCard，三者都按 total = ramp + duration 用）：
+      ramp_up_seconds  = 加压段秒数（爬到峰值并发）
+      duration_seconds = 加压之后（稳态 + 收尾）秒数，**不含 ramp**
+      整 run 估算时长 = ramp_up_seconds + duration_seconds = estimate_max_wall_sec
+
+    多 TG：total 取最长 TG（JMeter 并行），ramp 取首个 enabled TG 锚点——单字段模型对
+    多 TG 天然有损，精确时间轴另走 executor 写的真实事件锚点（first_sample / ramp_done /
+    shutdown_start）。
+    """
+    if not thread_groups_config:
+        return fallback_vusers, fallback_ramp, fallback_duration
+    total = estimate_max_wall_sec(thread_groups_config, fallback_duration)
+    anchors = estimate_phase_anchors_sec(thread_groups_config)
+    ramp = int(anchors.get('ramp_done_sec') or 0)
+    if ramp < 0 or ramp > total:
+        ramp = 0  # 防御：ramp 不应超过总时长
+    steady = max(1, total - ramp)
+    vusers = compute_planned_vusers_total(thread_groups_config, fallback_vusers)
+    return vusers, ramp, steady
+
+
 def _planned_vusers_for_tg(kind: str, params: dict) -> int:
     """单个 TG 的"计划线程数"（thread 驱动 TG 的并发上限）。
 
@@ -257,162 +299,269 @@ def estimate_max_wall_sec(
 
 # ── 分配 ────────────────────────────────────────────────────────────────
 
+def _split_int(value: int, n: int) -> list[int]:
+    """把整数 value 平均拆成 n 份，**余数压到前几份**（前 = 容量最大的 agent，调用方
+    已按 max_vusers 降序排好）。和恒等于 value（不向上取整、不丢余数）。
+
+    这是根治"翻倍 bug"的核心：旧实现对每个 TG 各自 ceil(value × factor) 再 max(1,…)，
+    N 台各自下钳到 1 → 每步总增量 = N × step_users 而非 step_users。改成精确拆分后
+    各 agent 份额之和恒 = task 配置值。
+
+      _split_int(1, 2)   → [1, 0]      （3VU 2agent、S=1：只第一台加，第二台 0）
+      _split_int(10, 3)  → [4, 3, 3]   （101VU 3agent、S=10：每步跨 agent 共加 10）
+      _split_int(0, 3)   → [0, 0, 0]
+    """
+    if n <= 0:
+        return []
+    if value <= 0:
+        return [0] * n
+    base, rem = divmod(value, n)
+    return [base + (1 if i < rem else 0) for i in range(n)]
+
+
+def _tg_i(params: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(params.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _useful_agents_for_tg(kind: str, params: dict) -> int:
+    """该 TG 最多能"铺满"几台 agent —— 每台至少分到 1 个不可再分的工作单元。
+
+    决定自动减 agent：所选 agent 数 > 所有 TG useful 上限时，多出来的 agent 分不到活，
+    自动弃用并提示用户。
+
+      ThreadGroup            : users（每台 ≥1 线程）
+      SteppingThreadGroup    : max(step_users, initial_threads)
+                               （每步增量按 step_users 拆，最细每台 1；initial 也各占 1）
+      ConcurrencyThreadGroup : target_concurrency
+      ArrivalsThreadGroup    : target_rps（每台 ≥1 RPS，rps 是整数）
+      UltimateThreadGroup    : max(rows.users)（线程最多的那行决定能铺几台）
+    """
+    p = params or {}
+    if kind == 'ThreadGroup':
+        return max(0, _tg_i(p, 'users') or _tg_i(p, 'num_threads'))
+    if kind == 'SteppingThreadGroup':
+        return max(_tg_i(p, 'step_users'), _tg_i(p, 'initial_threads'))
+    if kind == 'ConcurrencyThreadGroup':
+        return max(0, _tg_i(p, 'target_concurrency'))
+    if kind == 'ArrivalsThreadGroup':
+        return max(0, _tg_i(p, 'target_rps'))
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows')
+        if isinstance(rows, list) and rows:
+            return max((int(r.get('users') or 0) for r in rows if isinstance(r, dict)),
+                       default=0)
+        return max(0, _tg_i(p, 'users'))
+    return 0
+
+
+def _shard_thread_peak(kind: str, params: dict, i: int, n: int) -> int:
+    """第 i 片在该 TG 上的线程峰值（用作 num_threads cap + 容量校验）。
+    Arrivals 是 RPS 驱动、不按线程数计 → 返 0。"""
+    p = params or {}
+    if kind == 'ThreadGroup':
+        return _split_int(_tg_i(p, 'users') or _tg_i(p, 'num_threads'), n)[i]
+    if kind == 'SteppingThreadGroup':
+        su = _split_int(_tg_i(p, 'step_users'), n)[i]
+        ini = _split_int(_tg_i(p, 'initial_threads'), n)[i]
+        return ini + su * _tg_i(p, 'step_count')
+    if kind == 'ConcurrencyThreadGroup':
+        return _split_int(_tg_i(p, 'target_concurrency'), n)[i]
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows')
+        if isinstance(rows, list) and rows:
+            return sum(_split_int(int(r.get('users') or 0), n)[i]
+                       for r in rows if isinstance(r, dict))
+        return _split_int(_tg_i(p, 'users'), n)[i]
+    return 0  # Arrivals / 未知
+
+
 def compute_shards(
-    vusers: int,
+    thread_groups_config: list[dict],
     available_lgs: list['LoadGenerator'],
-) -> list[Shard]:
-    """
-    平均分配 vusers 到各 agent：floor(vusers/n) 平摊，余数压到容量最大的那台。
+    *,
+    fallback_vusers: int = 1,
+) -> tuple[list[Shard], int]:
+    """按 thread_groups_config 把任务精确拆到各 agent，返回 (shards, dropped_agents)。
 
-    - vusers=3, n=2 → [2, 1]  （base=1，余 1 给第一台）
-    - vusers=10, n=3 → [4, 3, 3]
-    - vusers=2, n=3 → [2, 0, 0]  （base=0，余 2 全给第一台；后两台不建 shard）
-    - 异构容量 cap=[100, 50]、vusers=150 → 按容量降序后排成 [100,50]，
-      base=75,余 0 → [75, 75]，但第二台 cap=50 不够 → 抛 ValueError 让用户加机器
+    精确拆分（不翻倍）：每个可拆字段（step_users / users / target_concurrency / rps /
+    ultimate rows.users）用 _split_int 拆，各 agent 份额之和恒 = task 配置值。
 
-    旧"贪心填充"会把 3 vusers 全塞第一台，第二台闲着——多机验证场景退化为单机。
+    自动减 agent（点 2）：n_eff = min(选中 agent 数, 所有 TG useful 上限的最大值)。
+    多出来的 agent 分不到活 → 弃用，dropped_agents 返回弃用台数供上层提示用户。
+      - 3VU 2agent、S=1 → useful=1 → n_eff=1，dropped=1
+      - 101VU 3agent、S=10 → useful=10 → n_eff=3，dropped=0
+
+    余数给容量最大的台（点 3：sorted desc 后 _split_int 余数压前几份）。
+    每片线程峰值 = 各 TG 拆分后线程数之和（derived），即 num_threads cap，再做容量校验
+    —— 不能像旧实现独立拆 peak，否则 cap 会比真实峰值小、把最大那台截短（101/3 时
+    旧法给 [34,34,33]，真实峰值 [41,30,30]，第一台被截到 34）。
     """
-    if vusers <= 0:
-        raise ValueError(f'vusers must be positive, got {vusers}')
     if not available_lgs:
         raise ValueError('no available load generators')
+    tgs = [t for t in (thread_groups_config or []) if isinstance(t, dict)]
 
+    # 容量校验（总量）：所选 agent 合计要装得下总线程数
+    total_planned = compute_planned_vusers_total(tgs, fallback=fallback_vusers)
     total_capacity = sum(lg.max_vusers for lg in available_lgs)
-    if total_capacity < vusers:
+    if total_capacity < total_planned:
         raise ValueError(
-            f'insufficient capacity: need {vusers}, available {total_capacity} '
+            f'insufficient capacity: need {total_planned}, available {total_capacity} '
             f'across {len(available_lgs)} agents',
         )
 
-    # 容量大的优先（让"第一台"扛得住余数 + 单 agent cap 不够时早暴露）
+    # 容量大的优先（扛余数 + 单台 cap 不够时早暴露）
     sorted_lgs = sorted(available_lgs, key=lambda lg: (-lg.max_vusers, lg.id))
-    n = len(sorted_lgs)
-    base = vusers // n
-    remainder = vusers % n
-    # 余数全给第一台
-    shares = [base + remainder if i == 0 else base for i in range(n)]
 
-    # 容量校验：异构 cap 时某台 share 可能超它自己的 max_vusers
-    for lg, sh in zip(sorted_lgs, shares):
-        if sh > lg.max_vusers:
-            raise ValueError(
-                f'agent {lg.pod_name} cap={lg.max_vusers} 装不下 share={sh}：'
-                f'平均分配后该台超容量，建议加机器或减 vusers',
-            )
+    # n_eff：所有 TG useful 上限的最大值（任一 TG 能给某台派活 → 该台有用）
+    governing = 0
+    for t in tgs:
+        governing = max(governing, _useful_agents_for_tg(
+            t.get('kind') or 'ThreadGroup', t.get('params') or {},
+        ))
+    if governing <= 0:
+        governing = 1  # 纯 Arrivals 且 rps 解析不出等极端兜底
+    n_eff = max(1, min(len(sorted_lgs), governing))
 
     shards: list[Shard] = []
-    for i, (lg, sh) in enumerate(zip(sorted_lgs, shares)):
-        if sh <= 0:
-            continue   # share=0 的 agent 不建 shard，避免起 0 thread 的 jmeter
+    for i in range(n_eff):
+        lg = sorted_lgs[i]
+        peak = sum(
+            _shard_thread_peak(t.get('kind') or 'ThreadGroup', t.get('params') or {}, i, n_eff)
+            for t in tgs
+        )
+        if peak > lg.max_vusers:
+            raise ValueError(
+                f'agent {lg.pod_name} cap={lg.max_vusers} 装不下 share={peak}：'
+                f'拆分后该台超容量，建议加机器或减 vusers',
+            )
         shards.append(Shard(
             index=i,
             load_generator_id=lg.id,
             pod_name=lg.pod_name,
             base_url=lg.base_url,
-            vusers=sh,
+            vusers=peak,
         ))
-    return shards
+    dropped = len(available_lgs) - n_eff
+    return shards, dropped
 
 
 # ── jmx 切片 ────────────────────────────────────────────────────────────
 
-def _scale_thread_groups_to_shard(
+def _split_tg_params(kind: str, params: dict, i: int, n: int) -> tuple[dict, bool]:
+    """算第 i 片（共 n 片）某 TG 的参数。返回 (new_params, disable)。
+
+    disable=True 表示该片分不到这个 TG（min=1 的字段被拆成 0）→ 调用方禁用该 TG，
+    **不能留原配置**（否则 base xml 里的全量 TG 会照跑 = 翻倍 bug 重现）。
+    Stepping 的 step_users/initial 允许 0（min=0），拆成 0 也合法（0 线程），不禁用。
+    """
+    p = params or {}
+    if kind == 'ThreadGroup':
+        u = _split_int(_tg_i(p, 'users') or _tg_i(p, 'num_threads'), n)[i]
+        if u <= 0:
+            return {}, True
+        return {
+            'users': u,
+            'ramp_up': _tg_i(p, 'ramp_up') or _tg_i(p, 'ramp_time'),
+            'duration': _tg_i(p, 'duration'),
+        }, False
+    if kind == 'SteppingThreadGroup':
+        return {
+            'initial_threads': _split_int(_tg_i(p, 'initial_threads'), n)[i],
+            'step_users': _split_int(_tg_i(p, 'step_users'), n)[i],
+            'step_delay': _tg_i(p, 'step_delay'),
+            'step_count': _tg_i(p, 'step_count'),
+            'hold': _tg_i(p, 'hold'),
+            'shutdown': _tg_i(p, 'shutdown'),
+        }, False
+    if kind == 'ConcurrencyThreadGroup':
+        tc = _split_int(_tg_i(p, 'target_concurrency'), n)[i]
+        if tc <= 0:
+            return {}, True
+        return {
+            'target_concurrency': tc,
+            'ramp_up': _tg_i(p, 'ramp_up'),
+            'steps': _tg_i(p, 'steps') or 1,
+            'hold': _tg_i(p, 'hold'),
+            'unit': p.get('unit') or 'S',
+        }, False
+    if kind == 'ArrivalsThreadGroup':
+        rps = _split_int(_tg_i(p, 'target_rps'), n)[i]
+        if rps <= 0:
+            return {}, True
+        return {
+            'target_rps': rps,
+            'ramp_up': _tg_i(p, 'ramp_up'),
+            'steps': _tg_i(p, 'steps') or 1,
+            'hold': _tg_i(p, 'hold'),
+            'unit': p.get('unit') or 'M',
+        }, False
+    if kind == 'UltimateThreadGroup':
+        rows = p.get('rows')
+        if isinstance(rows, list) and rows:
+            new_rows = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                ru = _split_int(int(r.get('users') or 0), n)[i]
+                if ru <= 0:
+                    continue  # users 不能为 0：这片分不到这行 → 丢掉该行
+                new_rows.append({
+                    'users': ru,
+                    'initial_delay': int(r.get('initial_delay') or 0),
+                    'ramp_up': int(r.get('ramp_up') or 0),
+                    'hold': int(r.get('hold') or 0),
+                    'shutdown': int(r.get('shutdown') or 0),
+                })
+            if not new_rows:
+                return {}, True
+            return {'rows': new_rows}, False
+        # 老单行兼容
+        u = _split_int(_tg_i(p, 'users'), n)[i]
+        if u <= 0:
+            return {}, True
+        return {
+            'users': u,
+            'initial_delay': _tg_i(p, 'initial_delay'),
+            'ramp_up': _tg_i(p, 'ramp_up'),
+            'hold': _tg_i(p, 'hold'),
+            'shutdown': _tg_i(p, 'shutdown'),
+        }, False
+    return {}, False  # 未知 kind：不动（disable=False + 空 params → 原样保留）
+
+
+def _apply_shard_split(
     xml_bytes: bytes,
-    shard_vusers: int,
-    total_vusers: int,
+    thread_groups_config: list[dict],
+    shard_index: int,
+    n_shards: int,
 ) -> bytes:
+    """把 base xml（已含 Step 2 全量 TG 配置）里每个 enabled TG 改写成第 shard_index 片的
+    精确份额。n_shards<=1 时不动（单 agent 跑全量 = 与非分布式完全一致）。
+
+    驱动数据 = task.thread_groups_config（build_run_xml 同源），不再 re-parse xml。
     """
-    把 xml 中每个 enabled 的 ThreadGroup（标准 / 插件型）按比例缩到本分片。
-    比如 total=120, shard=60 → 系数 0.5；每个 TG 的 users / target_concurrency /
-    target_rps 字段乘 0.5（向上取整保证 ≥ 1）。
-    """
-    if total_vusers <= 0 or shard_vusers <= 0:
+    if n_shards <= 1:
         return xml_bytes
-    factor = shard_vusers / total_vusers
-    if factor >= 1.0 - 1e-9:
-        return xml_bytes  # 单机跑全部
-
-    tgs = list_thread_groups(xml_bytes)
     out = xml_bytes
-    for tg in tgs:
-        if not tg['enabled']:
+    for tg in thread_groups_config:
+        if not isinstance(tg, dict):
             continue
-        kind = tg['kind']
-        params = dict(tg['current_params'])
-        # 按 kind 缩 vusers / RPS 字段
-        if kind == 'ThreadGroup':
-            users = params.get('users') or params.get('num_threads') or 1
-            params = {
-                'users': max(1, math.ceil(int(users) * factor)),
-                'ramp_up': params.get('ramp_up') or params.get('ramp_time') or 0,
-                'duration': params.get('duration') or 0,
-            }
-        elif kind == 'SteppingThreadGroup':
-            init_t = params.get('initial_threads') or 0
-            step_u = params.get('step_users') or 0
-            params = {
-                'initial_threads': max(0, math.ceil(int(init_t) * factor)),
-                'step_users': max(1, math.ceil(int(step_u) * factor)),
-                'step_delay': params.get('step_delay') or 0,
-                'step_count': params.get('step_count') or 0,
-                'hold': params.get('hold') or 0,
-                'shutdown': params.get('shutdown') or 0,
-            }
-        elif kind == 'ConcurrencyThreadGroup':
-            tc = params.get('target_concurrency') or 1
-            params = {
-                'target_concurrency': max(1, math.ceil(int(tc) * factor)),
-                'ramp_up': params.get('ramp_up') or 0,
-                'steps': params.get('steps') or 1,
-                'hold': params.get('hold') or 0,
-                'unit': params.get('unit') or 'S',
-            }
-        elif kind == 'UltimateThreadGroup':
-            # task.thread_groups_config 用的是多峰 `rows: [...]` 格式（jmx.py 的
-            # `list_thread_groups` 也是这么回出来的）。原实现拿 params.get('users')
-            # 当作单行兼容字段，多行配置时它一定是 None → 缩成 users=1 + 所有时间
-            # 字段=0 的退化 TG，每 agent 实际只跑 1 个瞬退 user。3 agent × 1 user =
-            # 3 个 spike sample 与 JTL 完全吻合。
-            rows = params.get('rows')
-            if isinstance(rows, list) and rows:
-                params = {
-                    'rows': [
-                        {
-                            'users': max(1, math.ceil(int(r.get('users') or 0) * factor)),
-                            'initial_delay': int(r.get('initial_delay') or 0),
-                            'ramp_up': int(r.get('ramp_up') or 0),
-                            'hold': int(r.get('hold') or 0),
-                            'shutdown': int(r.get('shutdown') or 0),
-                        }
-                        for r in rows if isinstance(r, dict)
-                    ],
-                }
-            else:
-                # 老单行兼容（极少见，仅手工脚本可能走到）
-                users = params.get('users') or 1
-                params = {
-                    'users': max(1, math.ceil(int(users) * factor)),
-                    'initial_delay': params.get('initial_delay') or 0,
-                    'ramp_up': params.get('ramp_up') or 0,
-                    'hold': params.get('hold') or 0,
-                    'shutdown': params.get('shutdown') or 0,
-                }
-        elif kind == 'ArrivalsThreadGroup':
-            rps = params.get('target_rps') or 1
-            params = {
-                'target_rps': max(1, math.ceil(float(rps) * factor)),
-                'ramp_up': params.get('ramp_up') or 0,
-                'steps': params.get('steps') or 1,
-                'hold': params.get('hold') or 0,
-                'unit': params.get('unit') or 'S',
-            }
-        else:
-            continue  # 未知 kind 不动
-
+        path = tg.get('path')
+        if not path:
+            continue
+        kind = tg.get('kind') or 'ThreadGroup'
+        new_params, disable = _split_tg_params(kind, tg.get('params') or {}, shard_index, n_shards)
         try:
-            out = replace_thread_group(out, path=tg['path'], kind=kind, params=params)
+            if disable:
+                out = toggle_component(out, path=path, enabled=False)
+            elif new_params:
+                out = replace_thread_group(out, path=path, kind=kind, params=new_params)
+            # new_params 空且未 disable（未知 kind）→ 原样保留
         except JmxParseError:
-            # path 在 build_run_xml 之后理论上一定有效；忽略边界情况
+            # path 在 build_run_xml 之后理论上一定有效；脏数据跳过（保留原配置）
             continue
     return out
 
@@ -422,17 +571,16 @@ def build_shard_jmx(
     *,
     run_id: str,
     shard: Shard,
-    total_vusers: int,
     total_shards: int,
     influxdb_url: str,
     influxdb_db: str,
 ) -> bytes:
     """
     生成本分片的可执行 JMX：
-      Step 2 完整 xml → 缩 TG 参数到本分片 → 注入 BackendListener（带 host tag）
+      Step 2 完整 xml → 按 (shard.index, total_shards) 精确拆 TG 到本分片
+      → 注入 BackendListener（带 host tag）
 
-    total_shards 由 _run_distributed 传 len(shards)；旧版本拿 total_vusers/shard.vusers
-    现算，容量分配不均时各片算出来不一致（80+20+20 三片各报 2/6/6）。
+    total_shards 由 _run_distributed 传 len(shards)，也是 _apply_shard_split 拆分的分母。
     """
     # 先拿基础 xml（含 Step 2 thread-groups + csv-bindings + DNS 注入）
     # 不让 build_run_xml 注入 BackendListener，scheduler 自己加（要带 host tag）
@@ -441,8 +589,10 @@ def build_shard_jmx(
         inject_environment_dns=True,
         inject_backend_listener=False,
     )
-    # 按分片缩 TG vusers
-    sliced = _scale_thread_groups_to_shard(base, shard.vusers, total_vusers)
+    # 按分片精确拆 TG（驱动数据 = task.thread_groups_config，与 base 同源）
+    sliced = _apply_shard_split(
+        base, task.thread_groups_config or [], shard.index, total_shards,
+    )
 
     # 阶段 3：CSVDataSet filename 改写到 agent 端相对路径 csv/<filename>。
     # build_run_xml 第 2 步已经 patch 成宿主 scripts/ 的绝对路径（LOCAL_FALLBACK 用），

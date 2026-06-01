@@ -315,6 +315,13 @@ class TaskRun(models.Model):
     is_deleted = models.BooleanField(default=False, db_index=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
+    # 用户在历史 run 列表勾选「保留」：keep=True 的 run 目录永不被 cleanup_old_runs
+    # 自动清理（未勾选的超 settings.RUN_RETENTION_DAYS 天才删）；DB 分析行始终保留。
+    keep = models.BooleanField(default=False, db_index=True)
+    # 历史基准：每 task 单选一个 run 作版本对比基线（BaselineVersionBar 用）。
+    # set-baseline 端点设 true 时会清掉同 task 其它 run 的该标记。
+    is_baseline = models.BooleanField(default=False, db_index=True)
+
     objects = TaskRunManager()
     all_objects = models.Manager()
 
@@ -628,3 +635,74 @@ class Service(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+# ── 终态分析数据(2026-05 资源治理)──────────────────────────────────────────
+# 跑完后台一次扫 JTL,把分析数据抽进下面 3 张表,然后删 errors.xml(数据已入库)。
+# 显示 / 查历史全走 DB,不再依赖原始文件还在不在(results.jtl 只留供按需生成原生报告)。
+# 字段命名对齐前端 TS 类型(SamplerStat / ErrorAggregateRow / ConcurrencyResponse 等),
+# 序列化形状跟原文件扫描端点完全一致 → 前端显示组件零改动。
+
+class RunSamplerStat(models.Model):
+    """接口级统计,一个 run 的每个 sampler 一行(对齐前端 SamplerStat)。"""
+    run = models.ForeignKey(TaskRun, on_delete=models.CASCADE, related_name='sampler_stats')
+    label = models.CharField(max_length=255)
+    total = models.PositiveIntegerField(default=0)
+    success = models.PositiveIntegerField(default=0)
+    error = models.PositiveIntegerField(default=0)
+    avg_ms = models.FloatField(default=0)
+    min_ms = models.FloatField(default=0)
+    max_ms = models.FloatField(default=0)
+    p50_ms = models.FloatField(default=0)
+    p90_ms = models.FloatField(default=0)
+    p99_ms = models.FloatField(default=0)
+    avg_rps = models.FloatField(default=0)
+    avg_bytes = models.FloatField(default=0)
+    top_errors = models.JSONField(default=list, blank=True)  # [{reason, count}, ...]
+
+    class Meta:
+        indexes = [models.Index(fields=['run'])]
+        constraints = [
+            models.UniqueConstraint(fields=['run', 'label'], name='uniq_run_sampler'),
+        ]
+
+
+class RunErrorAggregate(models.Model):
+    """错误明细聚合,一个 run 的每个 (response_code, label) 一行(对齐前端 ErrorAggregateRow)。
+
+    sample_response_body 是从 errors.xml 抽的代表 body(每组一条够用,用户确认);抽完
+    errors.xml 即删。
+    """
+    run = models.ForeignKey(TaskRun, on_delete=models.CASCADE, related_name='error_aggregates')
+    response_code = models.CharField(max_length=255)
+    label = models.CharField(max_length=255)
+    count = models.PositiveIntegerField(default=0)
+    sample_message = models.TextField(blank=True)
+    sample_failure_message = models.TextField(blank=True)
+    sample_url = models.TextField(blank=True)
+    sample_response_body = models.TextField(blank=True)  # 截断 ≤500 字
+
+    class Meta:
+        indexes = [models.Index(fields=['run'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['run', 'response_code', 'label'], name='uniq_run_err_agg',
+            ),
+        ]
+
+
+class RunAnalysis(models.Model):
+    """run 的时序分析(并发 / 延迟拆解 / 错误时序),JSON 存。都来自 JTL,入库后 JTL
+    删了也能查历史。按秒桶 → 体积受时长约束(1 小时 run ~3600 点/series),适合 JSON。
+    """
+    run = models.OneToOneField(TaskRun, on_delete=models.CASCADE, related_name='analysis')
+    # {overall: [[ts,n]], by_tg: {name: [[ts,n]]}}
+    concurrency = models.JSONField(default=dict, blank=True)
+    # {connect_ms, server_ms, receive_ms: [[ts,ms]]}
+    latency_breakdown = models.JSONField(default=dict, blank=True)
+    # {4xx, 5xx, assertion, timeout, connect_error, other: [[ts,count]]}
+    error_breakdown_ts = models.JSONField(default=dict, blank=True)
+    # 真·每秒整体延迟分位(从 JTL 重算,替代 InfluxDB 跨 agent 平均预聚合分位的虚高):
+    # {p50_ms,p95_ms,p99_ms, p50_ok_ms,p95_ok_ms,p99_ok_ms: [[ts,ms]]}
+    latency_overall = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)

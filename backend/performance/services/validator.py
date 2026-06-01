@@ -241,9 +241,14 @@ def validate_task(
 
     work_dir = get_runs_dir() / f'_validate_{task.id}'
     # save_response_data=True 让 JTL 出 XML 格式，附带响应体 / 头 / sampler 数据
-    samples = run_jmeter(xml_bytes, work_dir, save_response_data=True)
-
-    return warnings, _match_samples_to_paths(samplers, samples), executed_tgs
+    try:
+        samples = run_jmeter(xml_bytes, work_dir, save_response_data=True)
+        return warnings, _match_samples_to_paths(samplers, samples), executed_tgs
+    finally:
+        # 校验结果已解析进内存，临时目录无保留价值；用完即删,避免每 task 每次校验
+        # 累积一份带 .jtl 的 _validate_<id>/ 目录(原来从不清,爆盘隐患之一)。
+        import shutil  # noqa: PLC0415
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # 兼容用：旧 import 还在引用

@@ -6,7 +6,7 @@ import type { Service } from '@/types/task'
 
 const MOCK_SERVICES: Service[] = [
   {
-    id: 'svc-user',
+    id: 1,
     name: '用户中心',
     base_url: 'https://user.example.com',
     grafana_url: 'https://grafana.example.com/d/user-overview',
@@ -42,7 +42,7 @@ const MOCK_SERVICES: Service[] = [
     ],
   },
   {
-    id: 'svc-order',
+    id: 2,
     name: '订单服务',
     base_url: 'https://order.example.com',
     grafana_url: 'https://grafana.example.com/d/order-overview',
@@ -68,7 +68,7 @@ const MOCK_SERVICES: Service[] = [
     ],
   },
   {
-    id: 'svc-payment',
+    id: 3,
     name: '支付网关',
     base_url: 'https://pay.example.com',
     grafana_url: 'https://grafana.example.com/d/payment-overview',
@@ -89,7 +89,7 @@ const MOCK_SERVICES: Service[] = [
     ],
   },
   {
-    id: 'svc-ai',
+    id: 4,
     name: 'AI 推理服务',
     base_url: 'https://ai.example.com',
     grafana_url: 'https://grafana.example.com/d/ai-inference',

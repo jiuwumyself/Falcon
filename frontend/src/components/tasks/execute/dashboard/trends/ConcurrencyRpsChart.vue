@@ -4,13 +4,13 @@ import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { ScatterChart, LineChart } from 'echarts/charts'
 import {
-  GridComponent, TooltipComponent, TitleComponent, VisualMapComponent,
+  GridComponent, TooltipComponent, TitleComponent, VisualMapComponent, MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { SeriesPoint } from '@/types/task'
 import HoverTip from './HoverTip.vue'
 
-use([ScatterChart, LineChart, GridComponent, TooltipComponent, TitleComponent, VisualMapComponent, CanvasRenderer])
+use([ScatterChart, LineChart, GridComponent, TooltipComponent, TitleComponent, VisualMapComponent, MarkLineComponent, CanvasRenderer])
 
 // 并发-RPS 关系散点图：横轴并发 VU / 纵轴 RPS / 每个时间点一个散点
 // 用时间维度做 visualMap 颜色梯度（早期淡 → 后期深），看出压力推进路径
@@ -49,18 +49,23 @@ const points = computed<ScatterPoint[]>(() => {
   return out
 })
 
-// 散点图实际渲染用的稳态点（剔除 ramp-up 阶段的 VU<80% 目标 的样本）
-// 否则恒定 VU 场景会出现"X=2 那个孤零零的 ramp 期点"
-const steadyPoints = computed(() => steadyStatePoints(points.value))
+// 渲染用点：
+//  - 梯度场景(load/stress，非 flat)：保留**全量**。X=VU 是完整容量曲线，每个 VU 档
+//    都要看（爬坡 1→6 全程就是 stress 的信号），不能只留 ≥80% 峰值那一截。
+//  - 恒定并发(baseline，flat)：剔除初始 ramp-up 的 VU<80% 样本，只留稳态，
+//    否则会出现"X=2 那个孤零零的 ramp 期点"。
+const displayPoints = computed(() =>
+  summary.value?.isFlatVu ? steadyStatePoints(points.value) : points.value,
+)
 
 const tsRange = computed(() => {
-  const pts = steadyPoints.value
+  const pts = displayPoints.value
   if (!pts.length) return [0, 0]
   return [pts[0].ts, pts[pts.length - 1].ts]
 })
 
 const option = computed(() => {
-  const pts = steadyPoints.value
+  const pts = displayPoints.value
   // 恒定并发场景（稳定性 / soak）：X 轴改时间，让点散开成"RPS 时序气泡图"
   // 否则所有点挤在 X=VU 一条竖线，浪费 80% 水平空间
   const flat = summary.value?.isFlatVu ?? false
@@ -133,12 +138,31 @@ const option = computed(() => {
       splitLine: { lineStyle: { color: gridLine } },
     },
     series: (() => {
+      // 压力梯度模式（非恒定并发）标注容量拐点：峰值 RPS 对应的 VU 处画红色竖线。
+      // flat（基准/soak 恒定并发）无"拐点"语义，不画。
+      const kneeVu = (!flat && summary.value && summary.value.peakRpsAtVu > 0)
+        ? summary.value.peakRpsAtVu
+        : null
       const list: any[] = [
         {
           type: 'scatter' as const,
           symbolSize: 6,
           data,
           emphasis: { focus: 'self' as const },
+          ...(kneeVu != null ? {
+            markLine: {
+              symbol: 'none',
+              silent: true,
+              lineStyle: { color: '#ef4444', type: 'dashed' as const, width: 1.5 },
+              label: {
+                formatter: `拐点 ≈ ${kneeVu} VU`,
+                color: '#ef4444',
+                fontSize: 10,
+                position: 'insideEndTop' as const,
+              },
+              data: [{ xAxis: kneeVu }],
+            },
+          } : {}),
         },
       ]
       // soak 模式：叠一条线性回归直线（仅 flat + showTrendLine + trend 算得出）

@@ -8,8 +8,8 @@ import FalconLogo from '@/components/FalconLogo.vue'
 import GlassNav from '@/components/GlassNav.vue'
 
 // Top-nav tabs — each maps to a peer top-level route (平级，不是嵌在 /home 下)
+// 「概览」tab 已移除（点左上角商标回 /home 即可，避免重复入口）。
 const NAV_ITEMS = [
-  { name: 'home', path: '/home', label: '概览' },
   { name: 'performance', path: '/performance', label: '性能板块' },
   { name: 'ui', path: '/ui', label: 'UI 板块' },
   { name: 'api', path: '/api', label: '接口板块' },
@@ -23,9 +23,9 @@ const router = useRouter()
 // "performance-tasks" and future nested routes still light up their parent tab.
 const activeTabName = computed(() => {
   const r = route.name as string | undefined
-  if (!r) return 'home'
+  if (!r) return 'performance'
   if (r.startsWith('performance')) return 'performance'
-  return r
+  return r            // 'home' 时无对应 tab → 不高亮任何项（点商标进的首页）
 })
 
 const tabRefs = reactive<Record<string, HTMLButtonElement | null>>({})
@@ -69,7 +69,11 @@ watch(activeTabName, () => nextTick(updateSlider))
       <GlassNav>
         <div class="flex items-center justify-between px-3 py-1.5">
           <div class="flex items-center gap-3">
-            <div class="flex items-center gap-1.5 pr-3 border-r border-white/[0.06]">
+            <div
+              class="flex items-center gap-1.5 pr-3 border-r border-white/[0.06] cursor-pointer"
+              title="返回概览"
+              @click="router.push('/home')"
+            >
               <FalconLogo :size="18" />
               <span
                 class="text-[11px] tracking-tight hidden sm:block"

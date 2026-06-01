@@ -49,8 +49,26 @@ function rawPoints(kind: TGKind, params: Record<string, any>): RawPoint[] {
     }
     curT += hold
     pts.push({ t: curT, y: curY })
-    curT += shutdown
-    pts.push({ t: curT, y: 0 })
+    // 关机段：`shutdown` 字段 = **退出总时长**（从峰值降到 0 的总秒数）。
+    // 按 casutg 的 Stop users count/period 循环（事件先发、再等 period）做阶梯：
+    //   num_drops = ceil(peak / step_users)
+    //   period   = round(shutdown / (num_drops - 1))   ← 每两档之间的等待
+    //   总时长 = (num_drops - 1) × period ≈ shutdown
+    // 注：用 round + 整数（JMeter Stop users period 接受整数秒），所以可能跟用户输入差 ≤1s。
+    if (shutdown <= 0 || stepU <= 0) {
+      pts.push({ t: curT, y: 0 })
+    } else {
+      const numDrops = Math.ceil(curY / stepU)
+      const period = numDrops > 1 ? Math.max(1, Math.round(shutdown / (numDrops - 1))) : 0
+      while (curY > 0) {
+        curY = Math.max(0, curY - stepU)
+        pts.push({ t: curT, y: curY })       // 立刻下降到新档(同 curT)
+        if (curY > 0) {
+          curT += period
+          pts.push({ t: curT, y: curY })     // 在新档停 period 秒
+        }
+      }
+    }
     return pts
   }
   if (kind === 'ConcurrencyThreadGroup' || kind === 'ArrivalsThreadGroup') {
@@ -67,8 +85,11 @@ function rawPoints(kind: TGKind, params: Record<string, any>): RawPoint[] {
     if (steps > 0 && ramp > 0) {
       const dt = ramp / steps
       const dy = target / steps
+      // JMeter ConcurrencyThreadGroup/ArrivalsThreadGroup 第 1 个台阶在 t=0 就抬升
+      // （实测 ~1s 内即到第 1 级），而非等满一个 dt 才升。所以每个台阶在区间**开头**
+      // 升到 i*dy 并保持到区间末，避免计划线整体滞后实测一个台阶（off-by-one）。
       for (let i = 1; i <= steps; i++) {
-        pts.push({ t: i * dt, y: (i - 1) * dy })
+        pts.push({ t: (i - 1) * dt, y: i * dy })
         pts.push({ t: i * dt, y: i * dy })
       }
     } else {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Layers, Users, Clock, Globe, FileSpreadsheet, AlertTriangle } from 'lucide-vue-next'
+import { Layers, Users, Clock, Globe, FileSpreadsheet } from 'lucide-vue-next'
 import type { Environment, Task, TaskRun } from '@/types/task'
 import { plannedThreads, plannedDurationSec, formatDuration, hasOnlyArrivals, targetRps } from '@/lib/planSummary'
 import { scenarioById, inferScenarioFromKind } from '@/components/tasks/configStageCtx'
@@ -29,6 +29,8 @@ const durationSec = computed(() => plannedDurationSec(effectiveCfgs.value))
 const onlyArrivals = computed(() => hasOnlyArrivals(effectiveCfgs.value))
 const rpsTarget = computed(() => targetRps(effectiveCfgs.value))
 const csvCount = computed(() => (props.task.csv_bindings || []).length)
+// 「脚本/线程组配置已变化」提示已移出本行 —— 改由 ExecuteStage 顶部 banner 提醒
+// （见 ExecuteStage selectedRunConfigChanged），避免撑满标签行。
 
 const showTgPop = ref(false)
 
@@ -41,26 +43,6 @@ const tgDetails = computed(() =>
   }),
 )
 
-// 主场景徽章：取 effectiveCfgs 第一个 TG 的场景；多 TG 时附 +N 提示
-const scenario = computed(() => {
-  const first = effectiveCfgs.value[0]
-  if (!first) return null
-  const sid = first.scenario || inferScenarioFromKind(first.kind)
-  return scenarioById(sid)
-})
-const extraN = computed(() => Math.max(0, effectiveCfgs.value.length - 1))
-
-// 变化提示：snapshot 跟当前 task 不一致 → 显示"脚本或线程组配置已变化"
-// jmx_hash 变（重新上传 / Step 1 改 enabled/testname）或 thread_groups_config 变
-// （Step 2 改场景 / 参数）任一命中即提示。文案统一不区分。
-const hasChanged = computed(() => {
-  const r = props.selectedRun
-  if (!r) return false
-  if (r.jmx_hash_snapshot && r.jmx_hash_snapshot !== (props.task.jmx_hash || '')) return true
-  const snap = r.thread_groups_config_snapshot || []
-  const curr = props.task.thread_groups_config || []
-  return JSON.stringify(snap) !== JSON.stringify(curr)
-})
 </script>
 
 <template>
@@ -76,23 +58,7 @@ const hasChanged = computed(() => {
           border: isDark ? '1px solid rgba(255,255,255,0.05)' : '1px solid rgba(0,0,0,0.04)',
         }"
   >
-    <!-- 场景徽章（从 KpiBar 搬过来）：主场景 + 多 TG 时显示 +N。
-         hover 触发 showTgPop 跟下面"N 个 TG" 共用 popover，省一份代码。 -->
-    <span
-      v-if="scenario"
-      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] flex-shrink-0 cursor-default"
-      :style="{
-        background: `${scenario.color}1f`,
-        color: scenario.color,
-        border: `1px solid ${scenario.color}33`,
-      }"
-      @mouseenter="showTgPop = true"
-      @mouseleave="showTgPop = false"
-    >
-      <component :is="scenario.icon" :size="11" />
-      {{ scenario.label }}
-      <span v-if="extraN > 0" class="opacity-60 ml-0.5">+{{ extraN }}</span>
-    </span>
+    <!-- 场景徽章已移除：场景在下方 Trends 的 TG 切换器已展示且可点 -->
 
     <!-- TG 数（hover 弹详情） -->
     <div
@@ -175,17 +141,6 @@ const hasChanged = computed(() => {
       <span :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)' }">
         <b class="font-semibold">{{ csvCount }}</b> CSV
       </span>
-    </div>
-
-    <!-- 变化提示：所选历史 run 的快照跟当前 task 不一致时显示 -->
-    <div
-      v-if="hasChanged"
-      class="inline-flex items-center gap-1 ml-auto cursor-help"
-      :style="{ color: '#f59e0b' }"
-      title="所选历史 run 的脚本或线程组配置已被改动；左侧显示的是该 run 跑时的快照（与当前任务配置不一致）"
-    >
-      <AlertTriangle :size="12" />
-      <span class="text-[11px]">脚本或线程组配置已变化</span>
     </div>
   </div>
 

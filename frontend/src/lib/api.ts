@@ -1,7 +1,7 @@
 import type {
-  Environment, ErrorAggregatesResponse, ErrorSamplesQuery, ErrorSamplesResponse,
-  LatencyBreakdownResponse, LoadGenerator, Paginated, PinpointTrace, RunEvent,
-  RunMetrics, SamplerStat, Service, Task, TaskRun,
+  ConcurrencyResponse, Environment, ErrorAggregatesResponse, ErrorSamplesQuery,
+  ErrorSamplesResponse, LatencyBreakdownResponse, LoadGenerator, Paginated,
+  PinpointTrace, RunEvent, RunMetrics, SamplerStat, Service, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -133,6 +133,17 @@ export const runsApi = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  // 历史列表：勾选「保留」(keep) → run 目录不被自动清理；星标「历史基准」(每 task 单选)
+  setKeep: (runId: string, keep: boolean) =>
+    api<TaskRun>(`/runs/${runId}/set-keep/`, {
+      method: 'POST',
+      body: JSON.stringify({ keep }),
+    }),
+  setBaseline: (runId: string, isBaseline: boolean) =>
+    api<TaskRun>(`/runs/${runId}/set-baseline/`, {
+      method: 'POST',
+      body: JSON.stringify({ is_baseline: isBaseline }),
+    }),
   metrics: (runId: string, since?: string) => {
     const qs = since ? `?since=${encodeURIComponent(since)}` : ''
     return api<RunMetrics>(`/runs/${runId}/metrics/${qs}`)
@@ -141,6 +152,12 @@ export const runsApi = {
     api<{ lines: string[] }>(`/runs/${runId}/log/?tail=${tail}`),
   jtlUrl: (runId: string) => `/api/performance/runs/${runId}/jtl/`,
   reportUrl: (runId: string) => `/api/performance/runs/${runId}/report/`,
+  // 报告按需生成:跑压测不再自动出 -e -o 报告,用户点"生成报告"才跑 jmeter -g,
+  // 成功后删 results.jtl 腾盘(显示/分析走 DB,不依赖原始文件)。
+  reportStatus: (runId: string): Promise<{ state: 'none' | 'ready'; has_jtl: boolean }> =>
+    api(`/runs/${runId}/report-status/`),
+  generateReport: (runId: string): Promise<{ state: 'ready'; has_jtl: boolean }> =>
+    api(`/runs/${runId}/generate-report/`, { method: 'POST' }),
   // Step 3 接口级统计 + 错误明细（v1.2 起接真端点，mock 已删）
   samplerStats: (runId: string): Promise<SamplerStat[]> =>
     api<SamplerStat[]>(`/runs/${runId}/sampler-stats/`),
@@ -178,6 +195,10 @@ export const runsApi = {
     const qs = excludeKO ? '?exclude_ko=true' : ''
     return api<LatencyBreakdownResponse>(`/runs/${runId}/latency-breakdown/${qs}`)
   },
+  // 真实并发：扫 JTL allThreads/grpThreads 每秒峰值。并发数图实测实线用，跟计划虚线叠加。
+  // 运行中 5s 轮询(JTL 周期增长)、终态 one-shot。
+  concurrency: (runId: string): Promise<ConcurrencyResponse> =>
+    api<ConcurrencyResponse>(`/runs/${runId}/concurrency/`),
   // § 11 Pinpoint 接入 v0：run 终态拉到的慢 trace 元数据；run 还在跑 / Pinpoint
   // 未启用 / 无数据时返回空数组
   pinpointTraces: (runId: string): Promise<PinpointTrace[]> =>

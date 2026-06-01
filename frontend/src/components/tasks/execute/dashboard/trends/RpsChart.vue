@@ -46,14 +46,6 @@ function subtractErrors(rps: SeriesPoint[], errs: SeriesPoint[]): SeriesPoint[] 
   return rps.map(([t, v]) => [t, Math.max(0, v - (errMap.get(t) || 0))] as SeriesPoint)
 }
 
-/** 比例近似：rps * (1 - error_rate/100)，error_rate 来自 overall */
-function scaleByErrorRate(rps: SeriesPoint[], errRate: SeriesPoint[]): SeriesPoint[] {
-  if (!errRate?.length) return rps
-  const rateMap = new Map<number, number>()
-  for (const [t, v] of errRate) rateMap.set(t, v)
-  return rps.map(([t, v]) => [t, Math.max(0, v * (1 - (rateMap.get(t) || 0) / 100))] as SeriesPoint)
-}
-
 function rpsFor(series: RunMetricsSeries | null | undefined): SeriesPoint[] {
   if (!series) return []
   if (!props.excludeKo) return series.rps || []

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  Activity, BarChart3, AlertOctagon, Server, GitBranch, Cpu, FileText, FileSearch,
+  Activity, BarChart3, Server, GitBranch, Cpu, FileText, FileSearch,
 } from 'lucide-vue-next'
-import type { RunMetrics, Task, TaskRun } from '@/types/task'
+import type { Environment, RunMetrics, Task, TaskRun } from '@/types/task'
+import RunPlanSummary from './RunPlanSummary.vue'
+import RunHistoryDropdown from './RunHistoryDropdown.vue'
 import TrendsTab from './dashboard/TrendsTab.vue'
 import SamplersTab from './dashboard/SamplersTab.vue'
-import ErrorsTab from './dashboard/ErrorsTab.vue'
 import ServicePanelsTab from './dashboard/ServicePanelsTab.vue'
 import TracePanelsTab from './dashboard/TracePanelsTab.vue'
 import JvmTab from './dashboard/JvmTab.vue'
@@ -16,16 +17,23 @@ import ReportTab from './dashboard/ReportTab.vue'
 const props = defineProps<{
   task: Task
   run: TaskRun | null
+  runs: TaskRun[]
   metrics: RunMetrics | null
+  environment: Environment | null
   isDark: boolean
 }>()
 
-type TabId = 'trends' | 'samplers' | 'errors' | 'service' | 'trace' | 'jvm' | 'runlog' | 'report'
+defineEmits<{
+  (e: 'select', runId: string): void
+  (e: 'run-deleted', runId: string): void
+}>()
+
+type TabId = 'trends' | 'samplers' | 'service' | 'trace' | 'jvm' | 'runlog' | 'report'
 
 const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'trends', label: '指标趋势', icon: Activity },
+  // 「错误明细」已并入「接口统计」（donut 错误构成 + 展开行 code+message+count）
   { id: 'samplers', label: '接口统计', icon: BarChart3 },
-  { id: 'errors', label: '错误明细', icon: AlertOctagon },
   // 「运行时间轴」并入 RunControlBar 进度条（phase 染色 + 事件锚点），tab 删除
   { id: 'service', label: '服务面板', icon: Server },
   { id: 'trace', label: '链路面板', icon: GitBranch },
@@ -72,6 +80,29 @@ const isTerminal = computed(() =>
         <component :is="t.icon" :size="12" />
         {{ t.label }}
       </button>
+
+      <!-- 历史下拉：紧跟「查看报告」之后 -->
+      <RunHistoryDropdown
+        :runs="runs"
+        :selected-run="run"
+        :is-dark="isDark"
+        @select="$emit('select', $event)"
+        @run-deleted="$emit('run-deleted', $event)"
+      />
+
+      <!-- 标签行末尾：任务简介 chips（｜分隔；场景徽章已去掉，看 Trends 切换器）-->
+      <div
+        class="ml-auto flex items-center pl-3 flex-shrink-0"
+        :style="{ borderLeft: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }"
+      >
+        <RunPlanSummary
+          :task="task"
+          :selected-run="run"
+          :environment="environment"
+          :is-dark="isDark"
+          embedded
+        />
+      </div>
     </div>
 
     <!-- 当前 tab 内容（占满剩余高度）-->
@@ -79,15 +110,13 @@ const isTerminal = computed(() =>
       <TrendsTab v-if="active === 'trends'"
                  :task="task"
                  :run="run"
+                 :runs="runs"
                  :metrics="metrics" :is-dark="isDark" />
       <SamplersTab v-else-if="active === 'samplers'"
+                   :run="run"
                    :run-id="run?.run_id || null"
                    :is-terminal="isTerminal"
                    :is-dark="isDark" />
-      <ErrorsTab v-else-if="active === 'errors'"
-                 :run="run"
-                 :run-id="run?.run_id || null"
-                 :is-dark="isDark" />
       <ServicePanelsTab v-else-if="active === 'service'"
                         :task="task" :run="run" :is-dark="isDark" />
       <TracePanelsTab v-else-if="active === 'trace'"

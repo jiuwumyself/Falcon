@@ -15,42 +15,62 @@ import HoverTip from './HoverTip.vue'
 use([LineChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
 const props = defineProps<{
+  // 实测并发(JTL allThreads/grpThreads 每秒峰值)，画实线。空 = 还没拉到/运行早期
   data: SeriesPoint[]
+  // 计划并发(plannedCurve 按配置算)，画虚线当参照
+  plannedData?: SeriesPoint[]
   xRange?: [number, number] | null
   isDark: boolean
 }>()
 
 const chartRef = ref<any>(null)
 
-const option = computed(() =>
-  buildSeriesOption(
-    [
-      {
-        name: 'Threads',
-        data: props.data,
-        color: SEMANTIC.saturation,
-        lineWidth: 1.6,
-        area: true,
-        // VU 是离散整数 + 线性 ramp，禁用 smooth 避免 spike/Ultimate 5 三角峰被
-        // 磨成 5 个圆顶（峰值显示 ~4.5 而不是真实的 5，并且看上去像"一直在跑"
-        // 不下来）
-        smooth: false,
-        formatter: (v: number) => `${Math.round(v)}`,
-      },
-    ],
+const hasReal = computed(() => props.data.length > 0)
+
+const option = computed(() => {
+  const specs = []
+  // 计划虚线(参照基准)：始终画，无填充、muted
+  if (props.plannedData && props.plannedData.length) {
+    specs.push({
+      name: '计划',
+      data: props.plannedData,
+      color: props.isDark ? 'rgba(148,163,184,0.7)' : 'rgba(100,116,139,0.7)',
+      lineWidth: 1.4,
+      smooth: false,
+      dashed: true,
+      formatter: (v: number) => `${Math.round(v)}`,
+    })
+  }
+  // 实测实线：有数据才画。VU 离散 + 线性 ramp，关 smooth 保峰值真实
+  if (hasReal.value) {
+    specs.push({
+      name: '实测',
+      data: props.data,
+      color: SEMANTIC.saturation,
+      lineWidth: 1.8,
+      area: true,
+      smooth: false,
+      formatter: (v: number) => `${Math.round(v)}`,
+    })
+  }
+  return buildSeriesOption(
+    specs,
     props.isDark,
     'VU',
-    { showLegend: false, gridBottom: 24, xRange: props.xRange ?? null },
-  ),
-)
+    { showLegend: specs.length > 1, gridBottom: 24, xRange: props.xRange ?? null },
+  )
+})
 
+// 当前/峰值统计：优先实测，没拉到则用计划
+const statSource = computed(() =>
+  hasReal.value ? props.data : (props.plannedData ?? []),
+)
 const current = computed(() => {
-  const arr = props.data
+  const arr = statSource.value
   if (!arr.length) return 0
   return arr[arr.length - 1][1]
 })
-
-const peak = computed(() => statsOf(props.data).max)
+const peak = computed(() => statsOf(statSource.value).max)
 
 onMounted(() => {
   if (chartRef.value && chartRef.value.chart) {
@@ -70,7 +90,7 @@ watch(chartRef, (v) => {
   <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-1 mb-1">
       <HoverTip
-        :tip="'核心问题：当前实际有多少 VU 在打？ramp 过程平不平？\n\n判读条件：\n· 单 TG 显示实测 active_users；多 TG 切到具体 TG 时显示计划曲线（兜底）\n· baseline/soak 应该是水平直线（恒定 VU）\n· load/stress 应该是阶梯爬升（看每阶 hold 时段是否平直）\n· spike 应该是单峰（5s 起冲 → hold → 5s 退）\n· throughput 由 JMeter 自适应，看系统响应越慢用得 VU 越多'"
+        :tip="'核心问题：JMeter 实际打出的并发(实线)有没有跟上计划(虚线)？\n\n判读条件：\n· 实测(实线)来自 JTL 的 allThreads/grpThreads 每秒峰值——真实活跃线程数\n· 计划(虚线)按线程组配置算的目标曲线，全程当参照基准\n· 实测 < 计划 → 压力机线程起不来 / 系统拖慢到要堆线程(ArrivalsTG)\n· baseline/soak 应该是水平直线、load/stress 阶梯爬升、spike 单峰\n· 运行早期实测还在从 JTL 长出来，只见计划虚线属正常'"
         :is-dark="isDark"
       >
         <span class="text-[11.5px]"
@@ -82,7 +102,7 @@ watch(chartRef, (v) => {
         class="text-[10.5px] tabular-nums"
         :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
       >
-        当前 {{ Math.round(current) }} · 峰值 {{ Math.round(peak) }}
+        {{ hasReal ? '实测' : '计划' }} 当前 {{ Math.round(current) }} · 峰值 {{ Math.round(peak) }}
       </div>
     </div>
     <div class="flex-1 min-h-0">

@@ -91,8 +91,9 @@ _ERRORS_XML_PULL_INTERVAL_SEC = 10
 # 不拉 → 运行中聚合表只能等所有 agent 终态后才能出数据（用户看到的「暂无错误样本」）
 _PULL_JTL_INTERVAL_SEC = 10
 
-# 保留最新 N 个 run 目录，更老的自动归档为 tar.gz
-_RUN_KEEP_COUNT = 20
+# 保留最新 N 个 run 目录(更老的整删,分析数据已入 DB)。默认走 settings.RUN_KEEP_COUNT。
+# 留 None 让 cleanup_old_runs 取 settings 默认(5),不在这里写死。
+_RUN_KEEP_COUNT = None
 
 
 def get_executor(run_id: str) -> 'RunExecutor | None':
@@ -392,6 +393,9 @@ class RunExecutor:
         t0 = time.monotonic()
         try:
             if influxdb_svc.ping():
+                # 幂等确保 falcon_default 30d 保留策略存在(忘跑 setup_influxdb 时
+                # autogen 默认无限期会爆盘)。失败不阻断 pre_check。
+                influxdb_svc.ensure_retention_policy()
                 lines.append(f'✅ InfluxDB 可达 ({_ms(t0)}ms)')
                 lines.append(
                     f'   └─ {settings.INFLUXDB_URL} '
@@ -658,26 +662,30 @@ class RunExecutor:
         run_dir = get_run_dir(self.run.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # 总并发要走 thread_groups_config 聚合：task.virtual_users 是 jmx parse 时
-        # 的初值（来自第一个标准 TG，可能 = 1 或解析兜底），多 TG 场景严重失真 →
-        # compute_shards 拿到偏小的 vusers，share 算少甚至只塞第一台 agent。
-        # snapshot 优先（已快照当时的 TG 配置），无 snapshot 走当前 task 配置兜底。
-        tg_cfgs = (
-            self.run.thread_groups_config_snapshot
-            or self.run.task.thread_groups_config
-            or []
+        # 分片必须吃 build_run_xml 同源的配置（task.thread_groups_config）：jmx 是按
+        # live 配置生成的，_apply_shard_split 也按它拆，否则拆出来的份额和 jmx 里的 TG
+        # 对不上。compute_shards 精确拆分（不再翻倍）+ 自动减 agent（step_users 等粒度
+        # 不足以铺满所选 agent 时弃用多余的台）。
+        tg_cfgs = self.run.task.thread_groups_config or []
+        shards, dropped = scheduler_svc.compute_shards(
+            tg_cfgs, self._selected_lgs, fallback_vusers=self.run.virtual_users or 1,
         )
-        total_vusers = scheduler_svc.compute_planned_vusers_total(
-            tg_cfgs, fallback=self.run.virtual_users or 1,
-        )
-        shards = scheduler_svc.compute_shards(total_vusers, self._selected_lgs)
+        if not shards:
+            self._append_runtime_log('ERROR', '分片计算结果为空 → 无可用 agent')
+            self._update_run(error_message='分片计算结果为空：无可用 agent')
+            return 1
+        if dropped > 0:
+            self._append_runtime_log(
+                'INFO',
+                f'任务并发粒度不足以铺满所选 agent：已自动减用 {len(shards)} 台'
+                f'（弃用 {dropped} 台空转 agent）',
+            )
         # 每台 agent 起一个分片任务
         for shard in shards:
             shard_jmx = scheduler_svc.build_shard_jmx(
                 self.run.task,
                 run_id=self.run.run_id,
                 shard=shard,
-                total_vusers=total_vusers,
                 total_shards=len(shards),
                 # 分布式：jmx 在 agent 容器里跑，烤进容器可达的 InfluxDB URL
                 # （主控自己读 InfluxDB 仍走 settings.INFLUXDB_URL）
@@ -964,7 +972,12 @@ class RunExecutor:
         run_dir = run_jmx.parent
         jtl = run_dir / 'results.jtl'
         log = run_dir / 'jmeter.log'
-        report_dir = run_dir / 'report'
+        # JMeter 自带 temp 收进 run 目录(随 run 归档/淘汰一起清),不漏到系统 /tmp。
+        jtmp = run_dir / 'jtmp'
+        try:
+            jtmp.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            jtmp = run_dir
 
         cmd = [
             str(get_jmeter_bin()),
@@ -972,8 +985,11 @@ class RunExecutor:
             '-t', str(run_jmx),
             '-l', str(jtl),
             '-j', str(log),
-            '-e', '-o', str(report_dir),
+            # 不再跑 `-e -o report/`:原生 HTML 报告改按需生成(POST generate-report,
+            # jmeter -g)。避免每 run 跑完都耗时生成 + 留 50-200MB report/ + temp 残留;
+            # 显示/分析全走终态入库的 DB,不依赖原生报告。
             f'-Jjmeterengine.nongui.port={stop_port}',
+            f'-Djava.io.tmpdir={jtmp}',
             '-Jjmeterengine.stopfail.system.exit=false',
             '-Jjmeterengine.remote.system.exit=false',
             # 显式开启 JTL 关键字段保存，避免依赖 jmeter.properties 默认值（不同版本/环境会漂移）。
@@ -1218,7 +1234,14 @@ class RunExecutor:
         except Exception as e:  # noqa: BLE001
             print(f'[executor] WARN: phase anchors record failed: {e}', file=sys.stderr)
 
-        # 旧 run 自动归档
+        # 终态分析数据入库(接口统计/错误聚合/并发/延迟/错误时序)→ 删 errors.xml。
+        # 必须在 cleanup_old_runs 之前(否则本 run 可能被淘汰、文件先没了)。
+        try:
+            _extract_and_persist_analysis(run)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: analysis persist failed: {e}', file=sys.stderr)
+
+        # 旧 run 淘汰(留最近 N 个,超出整删 + 清 InfluxDB;分析数据已入 DB,查历史走库)
         try:
             cleanup_old_runs(keep=_RUN_KEEP_COUNT)
         except Exception as e:  # noqa: BLE001
@@ -1480,8 +1503,10 @@ def _summarize_jtl(jtl_path: Path) -> dict:
     URL,Latency,IdleTime,Connect
 
     § 12 S2：同时按 jmeter_runner.classify_jtl_error 算 error_breakdown 5 桶。
+    内存有界：用定长直方图算 p99(原来收集全部 elapsed 的 list 在 GB 级 JTL 会 OOM)。
     """
     from .jmeter_runner import classify_jtl_error, empty_error_breakdown  # noqa: PLC0415
+    from .jtl_analysis import LatencyHistogram  # noqa: PLC0415
     empty = {
         'avg_rps': 0, 'p99_ms': 0, 'error_rate': 0, 'total_requests': 0,
         'error_breakdown': empty_error_breakdown(),
@@ -1489,7 +1514,7 @@ def _summarize_jtl(jtl_path: Path) -> dict:
     if not jtl_path.exists() or jtl_path.stat().st_size == 0:
         return empty
 
-    elapsed_list: list[int] = []
+    hist = LatencyHistogram()
     error_count = 0
     total = 0
     first_ts: int | None = None
@@ -1506,7 +1531,7 @@ def _summarize_jtl(jtl_path: Path) -> dict:
                 except (KeyError, ValueError):
                     continue
                 total += 1
-                elapsed_list.append(elapsed)
+                hist.add(elapsed)
                 if first_ts is None:
                     first_ts = ts
                 last_ts = ts
@@ -1518,12 +1543,6 @@ def _summarize_jtl(jtl_path: Path) -> dict:
     except OSError:
         return empty
 
-    p99 = 0
-    if elapsed_list:
-        elapsed_list.sort()
-        idx = max(0, int(len(elapsed_list) * 0.99) - 1)
-        p99 = elapsed_list[idx]
-
     avg_rps = 0.0
     if first_ts and last_ts and last_ts > first_ts and total > 0:
         span_sec = (last_ts - first_ts) / 1000.0
@@ -1532,8 +1551,60 @@ def _summarize_jtl(jtl_path: Path) -> dict:
 
     return {
         'avg_rps': avg_rps,
-        'p99_ms': p99,
+        'p99_ms': hist.percentile(99),
         'error_rate': (error_count / total * 100) if total else 0,
         'total_requests': total,
         'error_breakdown': error_breakdown,
     }
+
+
+def _extract_and_persist_analysis(run) -> None:
+    """终态把分析数据从 JTL/errors.xml 抽进 DB,然后删 errors.xml(数据已入库)。
+
+    显示 / 查历史走 DB,不再依赖原始文件还在(results.jtl 留供按需生成原生报告)。
+    复用 services/jtl_analysis 的纯计算函数(端点 DB 无数据时也用同一套兜底)。
+    失败不阻断终态 —— 端点会回退到文件扫描。
+    """
+    from ..models import RunSamplerStat, RunErrorAggregate, RunAnalysis  # noqa: PLC0415
+    from . import jtl_analysis as ja  # noqa: PLC0415
+    run_dir = get_run_dir(run.run_id)
+    jtl = run_dir / 'results.jtl'
+    if not jtl.exists() or jtl.stat().st_size == 0:
+        return
+
+    sampler_stats = ja.compute_sampler_stats(jtl)
+    error_aggs = ja.compute_error_aggregates(jtl, run_dir)
+    concurrency = ja.compute_concurrency(run_dir)
+    latency = ja.compute_latency_breakdown(jtl)
+    error_ts = ja.compute_error_breakdown_ts(jtl)
+    # 真·每秒整体延迟分位(替代 InfluxDB 跨 agent 平均预聚合分位的 p99 虚高)
+    latency_overall = ja.compute_latency_timeseries(jtl)
+
+    # 幂等：重算时先清旧行(同 run 重新终态/调试)
+    RunSamplerStat.objects.filter(run=run).delete()
+    RunErrorAggregate.objects.filter(run=run).delete()
+    if sampler_stats:
+        RunSamplerStat.objects.bulk_create([
+            RunSamplerStat(run=run, **s) for s in sampler_stats
+        ])
+    if error_aggs:
+        RunErrorAggregate.objects.bulk_create([
+            RunErrorAggregate(run=run, **a) for a in error_aggs
+        ])
+    RunAnalysis.objects.update_or_create(
+        run=run,
+        defaults={
+            'concurrency': concurrency,
+            'latency_breakdown': latency,
+            'error_breakdown_ts': error_ts,
+            'latency_overall': latency_overall,
+        },
+    )
+
+    # 数据已入库 → 删 errors.xml(失败样本 body 已抽进 RunErrorAggregate)。
+    # results.jtl 保留(供按需生成原生报告;生成后或淘汰时再删)。
+    for x in run_dir.glob('errors*.xml'):
+        try:
+            x.unlink()
+        except OSError:
+            pass

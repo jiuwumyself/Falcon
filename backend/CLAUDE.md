@@ -24,7 +24,7 @@ backend/
 │   └── __init__.py
 ├── performance/            ✅ v1 已建好的业务 app（压测领域；原名 tasks，2026-04-23 按板块拆分重命名）
 │   ├── apps.py
-│   ├── models.py           Task / TaskRun / MetricSample / Environment / BackendListenerConfig 五张表
+│   ├── models.py           Task / TaskRun / Environment / RunSamplerStat / RunErrorAggregate / RunAnalysis 等（§19 终态分析表）
 │   ├── serializers.py      Task / TaskRun / MetricSample / Environment Serializer
 │   ├── views.py            TaskViewSet + EnvironmentViewSet
 │   ├── urls.py             DefaultRouter 注册两个 ViewSet（URL 前缀 `/api/performance/`）
@@ -167,10 +167,17 @@ DB_PORT=5432
 Environment (压测环境，hosts 映射等，Step 2 用)
 Task (压测任务定义 + JMX 文件 + Step 2 配置 JSON + environment FK)
  ├─── TaskCsvBinding (按 CSVDataSet 组件 path 绑定 CSV，多个)
- └─── TaskRun (一次执行记录，v1.1 才会有数据)
-       └─── MetricSample (时序采样点，v1.1 才会有数据)
+ └─── TaskRun (一次执行记录)
+       ├─── MetricSample (时序采样点，已废弃→走 InfluxDB，表空着)
+       ├─── RunSamplerStat (终态接口统计，§19 入库)
+       ├─── RunErrorAggregate (终态错误聚合 + 代表 body，§19 入库)
+       └─── RunAnalysis (终态并发/延迟/错误时序 JSON，§19 入库)
 BackendListenerConfig (singleton pk=1, admin 配置，build_run_xml 注入)
 ```
+
+> **§19 终态数据入库（重要）**：跑完一次扫 JTL 把分析数据抽进 RunSamplerStat /
+> RunErrorAggregate / RunAnalysis，然后删 errors.xml；显示 / 查历史走 DB，原始文件
+> 限量保留(默认 5 个 run)。详见 §19。
 
 ### `Environment`（Step 2 新增）
 - `name`（unique）/ `description` / `is_default`
@@ -725,3 +732,53 @@ volumes:
 - 默认 `Task.objects.all()` 过滤掉软删除
 - Admin 用 `Task.all_objects` 看全量（包括已删）；管理界面 Task 详情内嵌 `TaskCsvBinding` inline
 - 真要删行用 `instance.hard_delete()`（API 没暴露）
+
+## 19. 资源治理 / 终态数据入库（2026-05 落地，重要架构）
+
+**为什么**：大压测 JTL 可达十几个 G、长期运行文件 / InfluxDB 日积月累会把平台拖垮。
+核心思路改为 **终态把分析数据抽进 DB，原始重文件抽完即删 / 限量保留，查历史全走 DB**。
+
+### 19.1 数据生命周期（务必理解）
+```
+跑压测  → 实时走 InfluxDB(不变);写 results.jtl;**不带 -e -o**(不自动出报告)
+终态    → executor._on_finish 调 _extract_and_persist_analysis(run):
+          一次扫 results.jtl(+ errors.xml 抽代表 body)→ 写 3 张分析表 → **删 errors.xml**
+          results.jtl 暂留(供按需生成原生报告)
+显示    → 接口统计/错误明细/并发/延迟/错误时序 端点 **优先读 DB**,无 DB 行才回退扫文件
+          实时 RPS/延迟 Trends 仍读 InfluxDB(近 30d)
+查看报告 → 默认不生成;用户 POST generate-report → jmeter -g → **删 results.jtl** → report/ 静态可看
+保留    → cleanup_old_runs 只留最近 RUN_KEEP_COUNT(默认 5)个 run 目录,超出整删 +
+          同步 influxdb.delete_run_data;**DB 分析行长期保留,查历史不依赖文件**
+```
+
+### 19.2 三张分析表（migration 0020，字段对齐前端 TS 类型 → 前端零改动）
+- `RunSamplerStat`(FK run，一接口一行)：对齐 `SamplerStat`
+- `RunErrorAggregate`(FK run，一 (code,label) 一行)：对齐 `ErrorAggregateRow`，`sample_response_body` 是从 errors.xml 抽的代表 body(≤500 字，每组一条)
+- `RunAnalysis`(OneToOne run)：`concurrency` / `latency_breakdown` / `error_breakdown_ts` 三个 JSON 时序块
+
+### 19.3 `services/jtl_analysis.py` —— JTL 派生计算单一真相
+纯函数(无 ORM)，**终态入库 + 端点文件兜底共用同一套**，避免两份逻辑漂移：
+- `LatencyHistogram`：定长 1ms 桶(0~60s)算分位/极值/均值，**内存 O(1)**，替代收集全部 elapsed 的 list(大 JTL 会 OOM)。`executor._summarize_jtl` 也用它
+- `compute_sampler_stats` / `compute_error_aggregates` / `compute_concurrency` / `compute_latency_breakdown` / `compute_error_breakdown_ts` / `scan_errors_xml_bodies` / `tg_from_thread_name` / `err_bucket`
+- **并发 `compute_concurrency`**：`allThreads`(总)/`grpThreads`(per-TG)是**每台 agent 本地值**，分布式分别扫 `<pod>.jtl` 每秒取峰值再**跨 agent 求和**(直接 max 合并文件只会拿单台峰值，如 5 用户拆 2 台 = 3+2，max=3 而非 5)
+
+### 19.4 端点变化（`RunViewSet`）
+- `sampler-stats` / `error-samples`(aggregate+detail) / `concurrency` / `latency-breakdown` / `error-breakdown-timeseries` / `response-body`：**优先读 DB，无则 jtl_analysis 扫文件兜底**。原来的 `cached_*.json` 文件缓存 + `_cache_is_fresh` 已废弃（DB 即缓存）
+- 错误明细 detail：原始逐条样本不入库，每聚合组合成**一条代表样本**(用户确认够用)
+- **新增** `POST /runs/:id/generate-report/`：jmeter -g 生成 report/ → 成功删 results.jtl；失败 400 不删可重试
+- **新增** `GET /runs/:id/report-status/`：`{state: 'none'|'ready', has_jtl}`，前端 ReportTab 状态机用
+- `GET /runs/:id/report/`：报告改按需生成，未生成时 404 提示去点生成
+
+### 19.5 InfluxDB 生命周期
+- `influxdb.ensure_retention_policy()`：pre_check 时幂等确保 `falcon_default` 30d 策略 + 设默认。**杜绝忘跑 setup_influxdb → autogen 无限期累积爆盘**
+- `cleanup_old_runs` 淘汰 run 时调 `delete_run_data(run_id)` 同步清该 run 的 InfluxDB 数据（不等 30d retention）
+
+### 19.6 磁盘 / temp 清理（`services/jmeter.py::cleanup_old_runs`）
+- `keep` 默认 `settings.RUN_KEEP_COUNT`(5)；超出**整删** run 目录 + 遗留 `.tar.gz` + InfluxDB 数据
+- 顺手清理 mtime > 60min 的孤儿 `.tmp`(SIGKILL/网络异常残留) + 用完的 `_validate_*` 校验目录
+- `services/validator.py` 校验完 finally 删 `_validate_<task_id>/`
+- `_spawn_jmeter` 加 `-Djava.io.tmpdir=<run_dir>/jtmp` —— JMeter temp 收进 run 目录，随 run 清理，不漏系统 /tmp
+- `archive_run_dir`(tar.gz 归档)已不再被 cleanup 调用（改整删），保留函数备用
+
+### 19.7 老 run 兼容
+本次改动前的 run 没有 DB 分析行 → 显示端点自动回退扫文件(results.jtl/errors.xml 还在就正常)。`results.jtl` 仍在的老 run 点"生成报告"也能用。

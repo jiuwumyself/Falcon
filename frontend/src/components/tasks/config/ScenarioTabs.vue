@@ -49,11 +49,6 @@ const current = computed(() => scenarioById(props.modelValue))
             :size="11"
             :class="modelValue === s.id ? 'opacity-80' : 'opacity-50'"
           />
-          <span
-            v-if="modelValue === s.id"
-            class="absolute -top-1 -right-1 w-2 h-2 rounded-full"
-            :style="{ background: '#fff', boxShadow: `0 0 0 2px ${s.color}` }"
-          />
         </button>
         <!-- Hover tooltip with detailed scenario guidance -->
         <div

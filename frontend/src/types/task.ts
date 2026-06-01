@@ -243,6 +243,9 @@ export interface TaskRun {
   last_heartbeat_at: string | null
   cancel_requested_at: string | null
   archived_at: string | null
+  // 历史列表：keep=保留(不被自动清理)；is_baseline=历史基准(每 task 单选，版本对比基线)
+  keep: boolean
+  is_baseline: boolean
   // 启动时拷贝的 Step 2 配置 + jmx 指纹快照（migration 0017 起；旧 run 为空）。
   // 前端用这些字段在切历史 run 时按"当时配置"显示 RunPlanSummary，并跟当前 task
   // 对比给「脚本或线程组配置已变化」提示。
@@ -364,8 +367,6 @@ export interface SamplerStat {
   top_errors: { reason: string; count: number }[]
 }
 
-export type SamplerSortKey = 'error_rate_desc' | 'total_desc' | 'p99_desc'
-
 export interface ErrorSample {
   timestamp: number       // ms epoch
   label: string
@@ -416,6 +417,13 @@ export interface LatencyBreakdownResponse {
   connect_ms: SeriesPoint[]   // TCP 握手时间
   server_ms: SeriesPoint[]    // 服务端处理时间（latency - connect）
   receive_ms: SeriesPoint[]   // 客户端接收时间（elapsed - latency）
+}
+
+// 真实并发：扫 JTL 的 allThreads(总) / grpThreads(per-TG) 每秒取峰值。
+// ConcurrencyChart 用它画实测实线，跟前端 plannedCurve 计划虚线叠加对比。
+export interface ConcurrencyResponse {
+  overall: SeriesPoint[]                      // 全局真实并发(allThreads 每秒峰值)
+  by_tg: Record<string, SeriesPoint[]>        // key = TG testname(跟 RunMetrics.by_tg 对齐)
 }
 
 export interface JmxComponent {

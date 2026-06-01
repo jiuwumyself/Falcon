@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type {
-  RunMetricsSeries, ScenarioId, SeriesPoint, Task, TGKind,
+  RunMetricsSeries, SamplerStat, ScenarioId, SeriesPoint, Task, TGKind,
 } from '@/types/task'
 import {
   scenarioById, inferScenarioFromKind, type ScenarioDef,
 } from './scenarioCtx'
 import ConcurrencyRpsChart from './ConcurrencyRpsChart.vue'
-import ErrorBreakdownStackedChart from './ErrorBreakdownStackedChart.vue'
-import VuRpsDualAxisChart from './VuRpsDualAxisChart.vue'
-import TargetRpsVsActualChart from './TargetRpsVsActualChart.vue'
+import ScenarioPair from './ScenarioPair.vue'
+import type { ScenarioMockSpec } from './trendsMockData'
+
+interface VerStat { avg: number; p90: number; p99: number }
 
 // 末位「场景上下文图」容器：按当前选中 TG 的场景分发渲染。
 //
@@ -26,8 +27,8 @@ import TargetRpsVsActualChart from './TargetRpsVsActualChart.vue'
 // 场景 → 图映射：
 //   baseline   → ConcurrencyRpsChart (isFlatVu 分支自动触发 RPS 抖动)
 //   load       → ConcurrencyRpsChart (非 flat 散点：看拐点)
-//   stress     → ErrorBreakdownStackedChart (5 桶堆叠：错误类型转移)
-//   soak       → ConcurrencyRpsChart (showTrendLine：抖动 + 线性回归漂移)
+//   stress     → ConcurrencyRpsChart (压过拐点：看吞吐见顶 + 回落的容量悬崖)
+//   soak       → SoakLatencyTrendChart (p95 RT 随时间 + 回归线：抓延迟爬升泄漏)
 //   spike      → VuRpsDualAxisChart (双轴时序：VU/RPS 跟随)
 //   throughput → TargetRpsVsActualChart (目标 vs 实际)
 const props = defineProps<{
@@ -36,6 +37,10 @@ const props = defineProps<{
   // 全部模式 (selectedTg=null) 的合计 rps/vu
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  // soak 场景 RT 趋势用的 p95 延迟时序（合计）
+  lat: SeriesPoint[]
+  // vu 是否实测(JTL)。true → 不标"计划";父组件按 realActiveUsers 是否非空传
+  vuIsReal?: boolean
   // 单 TG 选中时切片来源（key = TG testname）
   byTg: Record<string, RunMetricsSeries>
   // 后端按 testname 给的 {kind, params, scenario}
@@ -43,16 +48,26 @@ const props = defineProps<{
   // sampler→[TG name 列表] 映射；throughput 场景下要 × samplers_per_TG 把
   // arrivals/sec 换算成可跟 actual rps 对比的 samples/sec
   samplerThreadGroup?: Record<string, string[]>
-  runId: string | null
-  isTerminal: boolean
   xRange?: [number, number] | null
   isDark: boolean
+  // 真实模式图②取数（TrendsLayout 拉好传入）：
+  runId?: string | null                 // stress 错误堆叠自取
+  isTerminal?: boolean
+  samplerStats?: SamplerStat[]          // throughput 气泡
+  // baseline 版本对比：baseline=null 表示只展示本次自己（没基准 / 自己是基准）
+  baselineCompare?: { current: VerStat; baseline: VerStat | null; selfIsBaseline?: boolean } | null
+  // mock 预览：开了走 ScenarioPair 分发；selectedTg 命中某场景 label → 单卡(2 图)，
+  // 否则全 6 场景画廊（每段 2 图）。
+  mockMode?: boolean
+  mockScenarios?: ScenarioMockSpec[]
+  mockXRange?: [number, number] | null
 }>()
 
 interface ResolvedCtx {
   scenario: ScenarioDef
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  lat: SeriesPoint[]
   targetRpsPerSec: number | null
   mixed: boolean    // 多场景混合提示
   vuIsPlanned: boolean   // 单 TG 时 active_users 实测不可拆（InfluxDB maxAT 全局），
@@ -114,9 +129,11 @@ const ctx = computed<ResolvedCtx | null>(() => {
         scenario: scenarioById(id),
         rps: slice?.rps ?? props.rps,
         vu: useFallbackVu ? props.vu : actualVu,
+        lat: slice?.p95_ms?.length ? slice.p95_ms : props.lat,
         targetRpsPerSec: targetRpsFromParams(id, meta.params, countSamplersInTg(props.selectedTg, props.samplerThreadGroup)),
         mixed: false,
-        vuIsPlanned: useFallbackVu,
+        // props.vu 现在是"实测优先"(real||planned)；real 时不标计划
+        vuIsPlanned: useFallbackVu && !props.vuIsReal,
       }
     }
     // meta 缺失：fall through 走 cfgs[0] 兜底
@@ -139,6 +156,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
         scenario: scenarioById(id),
         rps: props.rps,
         vu: props.vu,
+        lat: props.lat,
         targetRpsPerSec: targetRpsFromParams(id, firstMeta.params, countSamplersInTg(firstTgName, props.samplerThreadGroup)),
         mixed: false,
         vuIsPlanned: false,
@@ -149,6 +167,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
       scenario: scenarioById('load'),  // load 的散点解读最通用
       rps: props.rps,
       vu: props.vu,
+      lat: props.lat,
       targetRpsPerSec: null,
       mixed: true,
       vuIsPlanned: false,
@@ -164,6 +183,7 @@ const ctx = computed<ResolvedCtx | null>(() => {
     scenario: scenarioById(id),
     rps: props.rps,
     vu: props.vu,
+    lat: props.lat,
     targetRpsPerSec: targetRpsFromParams(id, cfg.params || {}, 0),  // 老 run 无 metrics 时不放大，至少不偏
     mixed: cfgs.length > 1 && new Set(
       cfgs.map((c) => resolveScenarioId(c.kind, c.scenario)),
@@ -172,14 +192,69 @@ const ctx = computed<ResolvedCtx | null>(() => {
   }
 })
 
-const usesConcurrencyChart = computed(() =>
-  ctx.value && ['baseline', 'load', 'soak'].includes(ctx.value.scenario.id),
-)
-const showTrendLine = computed(() => ctx.value?.scenario.id === 'soak')
+// load 图②：实测 并发(VU) × 延迟(p95) 按时间戳最近匹配 → (VU, RT) 散点。
+// 参考 ConcurrencyRpsChart 的 vu×rps 对齐：rps/vu 来自不同源，时间戳常差 < 2s。
+function computeRtScatter(vu: SeriesPoint[], lat: SeriesPoint[]): { x: number; y: number }[] {
+  if (!vu.length || !lat.length) return []
+  const NEAR_MS = 2000
+  const out: { x: number; y: number }[] = []
+  let j = 0
+  for (const [t, rt] of lat) {
+    while (j + 1 < vu.length && Math.abs(vu[j + 1][0] - t) <= Math.abs(vu[j][0] - t)) j++
+    const [vt, v] = vu[j]
+    if (v <= 0 || Math.abs(vt - t) > NEAR_MS) continue
+    out.push({ x: v, y: rt })
+  }
+  return out
+}
+
+// 真实模式：把当前场景的 ctx + 取数结果组装成 ScenarioPair 吃的 spec 形状。
+// 混合场景 (mixed) 返回 null → 模板退到单张兜底散点图。
+const realSpec = computed<ScenarioMockSpec | null>(() => {
+  const c = ctx.value
+  if (!c || c.mixed) return null
+  const sc = c.scenario
+  return {
+    id: sc.id, label: sc.label, color: sc.color, kind: sc.kind,
+    rps: c.rps, vu: c.vu, lat: c.lat,
+    targetRpsPerSec: c.targetRpsPerSec,
+    rtScatter: sc.id === 'load' ? computeRtScatter(c.vu, c.lat) : undefined,
+    samplerStats: sc.id === 'throughput' ? (props.samplerStats ?? []) : undefined,
+    baselineVersions: sc.id === 'baseline' ? (props.baselineCompare ?? undefined) : undefined,
+    // errorBuckets/memoryLeak/queueDepth 不填 → stress 真实自取 / soak·spike 空态占位
+  }
+})
+
+// mock 模式下选中具体场景（selectedTg = 场景 label）→ 取对应 spec 渲染单卡
+const mockSelectedSpec = computed<ScenarioMockSpec | null>(() => {
+  if (!props.mockMode || !props.selectedTg) return null
+  return (props.mockScenarios || []).find((s) => s.label === props.selectedTg) ?? null
+})
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
+  <!-- mock 预览分发：选中场景 → 单卡 2 图；全部 → 6 场景画廊 -->
+  <template v-if="mockMode">
+    <ScenarioPair
+      v-if="mockSelectedSpec"
+      :spec="mockSelectedSpec"
+      :x-range="mockXRange ?? null"
+      :is-dark="isDark"
+      :show-header="false"
+    />
+    <div v-else class="space-y-5">
+      <ScenarioPair
+        v-for="s in (mockScenarios || [])"
+        :key="s.id"
+        :spec="s"
+        :x-range="mockXRange ?? null"
+        :is-dark="isDark"
+      />
+    </div>
+  </template>
+
+  <!-- 真实分发：同质场景 → 图① + 图② 两栏（ScenarioPair）；混合/无信息 → 单张兜底 -->
+  <div v-else class="flex flex-col h-full">
     <div
       v-if="ctx?.mixed"
       class="text-[10.5px] px-2 py-1 mb-1 rounded"
@@ -190,43 +265,19 @@ const showTrendLine = computed(() => ctx.value?.scenario.id === 'soak')
     >
       多 TG 场景混合，末位图退到通用散点；切到具体 TG 查看对应场景图。
     </div>
-    <div class="flex-1 min-h-0">
-      <ConcurrencyRpsChart
-        v-if="ctx && usesConcurrencyChart"
-        :rps="ctx.rps"
-        :vu="ctx.vu"
-        :show-trend-line="showTrendLine"
-        :is-dark="isDark"
-      />
-      <ErrorBreakdownStackedChart
-        v-else-if="ctx?.scenario.id === 'stress'"
-        :run-id="runId"
-        :is-terminal="isTerminal"
-        :x-range="xRange ?? null"
-        :is-dark="isDark"
-      />
-      <VuRpsDualAxisChart
-        v-else-if="ctx?.scenario.id === 'spike'"
-        :rps="ctx.rps"
-        :vu="ctx.vu"
-        :vu-is-planned="ctx.vuIsPlanned"
-        :x-range="xRange ?? null"
-        :is-dark="isDark"
-      />
-      <TargetRpsVsActualChart
-        v-else-if="ctx?.scenario.id === 'throughput'"
-        :rps="ctx.rps"
-        :target-rps-per-sec="ctx.targetRpsPerSec"
-        :x-range="xRange ?? null"
-        :is-dark="isDark"
-      />
-      <!-- 兜底：没有任何 ctx 信息时退到散点图（不传 vu/rps 时图自处理空态）-->
-      <ConcurrencyRpsChart
-        v-else
-        :rps="rps"
-        :vu="vu"
-        :is-dark="isDark"
-      />
+    <!-- 同质场景：2 图 -->
+    <ScenarioPair
+      v-if="realSpec"
+      :spec="realSpec"
+      :run-id="runId ?? null"
+      :is-terminal="isTerminal ?? false"
+      :x-range="xRange ?? null"
+      :is-dark="isDark"
+      :show-header="false"
+    />
+    <!-- 混合 / 无 ctx：退到单张散点图 -->
+    <div v-else class="flex-1 min-h-0">
+      <ConcurrencyRpsChart :rps="rps" :vu="vu" :is-dark="isDark" />
     </div>
   </div>
 </template>

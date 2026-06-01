@@ -159,6 +159,13 @@ INFLUXDB_USER = os.getenv('INFLUXDB_USER', '')
 INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', '')
 INFLUXDB_RETENTION = os.getenv('INFLUXDB_RETENTION', '30d')
 
+# 磁盘治理：run 目录(results.jtl/report 等重文件)按天数 TTL 淘汰 —— 勾选「保留」
+# (TaskRun.keep=True)的永不删,未勾选的 mtime 超 RUN_RETENTION_DAYS 天才整删 + 同步清
+# InfluxDB(分析数据已入 DB,查历史走库不依赖文件)。详见 cleanup_old_runs。
+# RUN_KEEP_COUNT 旧的"最近 N 个"计数淘汰已弃用(保留变量兼容),改走 RUN_RETENTION_DAYS。
+RUN_KEEP_COUNT = int(os.getenv('RUN_KEEP_COUNT', '5'))
+RUN_RETENTION_DAYS = int(os.getenv('RUN_RETENTION_DAYS', '30'))
+
 # v1.2 多机调度：JMX 烤进 BackendListener 的 InfluxDB URL 是 agent 容器从内访问宿主
 # InfluxDB 用的，跟主控读 InfluxDB 用的 INFLUXDB_URL 不同。Mac/Win Docker Desktop 自带
 # host.docker.internal；Linux 靠 docker-compose 的 extra_hosts: host-gateway 兜底。

@@ -25,7 +25,7 @@ const lgs = ref<LoadGenerator[]>([])
 const selectedIds = ref<Set<number>>(new Set())
 const loading = ref(false)
 const scaling = ref(false)
-const scaleCount = ref(1)
+const scaleCount = ref(3)
 const error = ref('')
 
 // 心跳 ≤ 90s 算"刚活"。release_idle_agents 30 min 才会标 lost，开发态 idle 状态可能

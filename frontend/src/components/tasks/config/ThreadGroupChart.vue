@@ -80,8 +80,11 @@ const rawPoints = computed<Point[]>(() => {
     if (steps > 0 && ramp > 0) {
       const dt = ramp / steps
       const dy = target / steps
+      // JMeter Concurrency/Arrivals TG 第 1 阶在 t=0 就抬升（实测 ramp=30/steps=5 时
+      // t=1s 即到 20、撑满 dt=6s 才升 40），不是先 0 撑一个 dt 再升。台阶在区间**开头**
+      // 抬升，与执行页 plannedCurve.ts 保持同一画法，避免配置预览误导。
       for (let i = 1; i <= steps; i++) {
-        pts.push({ t: i * dt, y: (i - 1) * dy })
+        pts.push({ t: (i - 1) * dt, y: i * dy })
         pts.push({ t: i * dt, y: i * dy })
       }
     } else {

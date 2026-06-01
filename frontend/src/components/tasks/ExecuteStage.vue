@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { AlertTriangle } from 'lucide-vue-next'
+import { AlertTriangle, X } from 'lucide-vue-next'
 import { ApiError, runsApi, tasksApi } from '@/lib/api'
 import type { Environment, RunEvent, RunMetrics, Task, TaskRun } from '@/types/task'
 import RunControlBar from './execute/RunControlBar.vue'
@@ -46,6 +46,31 @@ const selectedRun = computed<TaskRun | null>(() => {
 const isPolling = computed(() =>
   !!selectedRun.value && activeStatuses.includes(selectedRun.value.status),
 )
+
+// 所选历史 run 的快照（jmx 指纹 / 线程组配置）跟当前 task 不一致 → 顶部 banner 提醒。
+// 原来挤在 RunDashboard 标签行 chip 里会撑满整行，挪出来做独立提醒。
+const selectedRunConfigChanged = computed(() => {
+  const r = selectedRun.value
+  if (!r) return false
+  if (r.jmx_hash_snapshot && r.jmx_hash_snapshot !== (props.task.jmx_hash || '')) return true
+  const snap = r.thread_groups_config_snapshot || []
+  const curr = props.task.thread_groups_config || []
+  return JSON.stringify(snap) !== JSON.stringify(curr)
+})
+
+// 切到某个「配置已变化」的历史 run 时弹一个 alert 式 popup（不是常驻 banner），6s 自动消。
+const showConfigToast = ref(false)
+let configToastTimer: ReturnType<typeof setTimeout> | null = null
+watch(selectedRunId, () => {
+  if (configToastTimer) clearTimeout(configToastTimer)
+  if (selectedRunConfigChanged.value) {
+    showConfigToast.value = true
+    configToastTimer = setTimeout(() => { showConfigToast.value = false }, 6000)
+  } else {
+    showConfigToast.value = false
+  }
+})
+onUnmounted(() => { if (configToastTimer) clearTimeout(configToastTimer) })
 
 async function fetchRuns(autoSelect = false) {
   try {
@@ -249,18 +274,14 @@ onUnmounted(stopPolling)
     <!-- 顶部控制条（两行：上=控制条 / 下=任务简介）+ 事件锚点叠在进度条上 -->
     <RunControlBar
       :selected-run="selectedRun"
-      :runs="runs"
       :events="events"
       :task="task"
-      :environment="taskEnvironment"
       :duration-seconds="task.duration_seconds || 0"
       :busy="busy"
       :start-disabled="task.config_stale"
       :is-dark="isDark"
       @start="onStartClick"
       @stop="onStop"
-      @select="onSelectRun"
-      @run-deleted="onRunDeleted"
     />
 
     <!-- 终态失败原因（run.error_message 在终态非空时显示，比 jmeter.log 更直白） -->
@@ -281,8 +302,12 @@ onUnmounted(stopPolling)
       <RunDashboard
         :task="task"
         :run="selectedRun"
+        :runs="runs"
         :metrics="metrics"
+        :environment="taskEnvironment"
         :is-dark="isDark"
+        @select="onSelectRun"
+        @run-deleted="onRunDeleted"
       />
     </div>
 
@@ -295,5 +320,28 @@ onUnmounted(stopPolling)
       @close="startModalOpen = false"
       @confirm="onConfirmStart"
     />
+
+    <!-- 配置变化提醒：alert 式 popup（切到配置已变化的历史 run 时弹出，可手动关 / 6s 自动消）-->
+    <Teleport to="body">
+      <div
+        v-if="showConfigToast"
+        class="fixed left-1/2 top-4 -translate-x-1/2 z-[1100] flex items-start gap-2 px-3.5 py-2.5 rounded-xl text-[12px] max-w-[540px] backdrop-blur-xl"
+        :style="{
+          background: isDark ? 'rgba(42,32,12,0.95)' : 'rgba(255,247,237,0.98)',
+          border: '1px solid rgba(245,158,11,0.45)',
+          color: isDark ? '#fcd34d' : '#92400e',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+        }"
+      >
+        <AlertTriangle :size="15" color="#f59e0b" class="flex-shrink-0 mt-px" />
+        <span class="leading-relaxed">所选历史 run 的脚本或线程组配置与当前任务不一致 —— 下方显示的是该 run 跑时的快照。</span>
+        <button
+          class="flex-shrink-0 ml-1 opacity-60 hover:opacity-100 cursor-pointer"
+          @click="showConfigToast = false"
+        >
+          <X :size="14" />
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>

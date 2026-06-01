@@ -676,17 +676,46 @@ def _build_stepping_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree.
 
     # SteppingTG 必须写入 ThreadGroup.num_threads (= 总目标用户数)，否则 JMeter
     # 默认 0，整个组空跑。total = 初始 + 每步 × 步数。
-    total = int(p['initial_threads']) + int(p['step_users']) * int(p['step_count'])
+    initial_threads = int(p['initial_threads'])
+    step_users = int(p['step_users'])
+    step_delay = int(p['step_delay'])
+    total = initial_threads + step_users * int(p['step_count'])
+
+    # 修复 casutg SteppingThreadGroup 在 burst=0 时第一步会在 t=0 抢跑的怪异行为：
+    # 当用户配置 initial_threads=0 (期望「前 step_delay 秒为 0、之后才加第一批」),
+    # 把 JMX 改写成 initial_delay=step_delay + burst=step_users —— JMeter 真正等 step_delay
+    # 再起第一批(=step_users)，后续每 step_delay 加一次，刚好匹配前端 plannedCurve 的语义。
+    # 总线程数不变(初始 0 时 total = step_users*step_count，burst 吃掉一步，循环还剩 step_count-1 步)。
+    if initial_threads == 0 and step_users > 0:
+        initial_delay_val = step_delay
+        burst_val = step_users
+    else:
+        initial_delay_val = 0
+        burst_val = initial_threads
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.num_threads'}).text = str(total)
-    etree.SubElement(el, 'stringProp', {'name': 'Threads initial delay'}).text = '0'
-    etree.SubElement(el, 'stringProp', {'name': 'Start users count'}).text = str(p['step_users'])
-    etree.SubElement(el, 'stringProp', {'name': 'Start users count burst'}).text = str(p['initial_threads'])
-    etree.SubElement(el, 'stringProp', {'name': 'Start users period'}).text = str(p['step_delay'])
-    etree.SubElement(el, 'stringProp', {'name': 'Stop users count'}).text = str(p['step_users'])
-    etree.SubElement(el, 'stringProp', {'name': 'Stop users period'}).text = str(p['shutdown'])
+    etree.SubElement(el, 'stringProp', {'name': 'Threads initial delay'}).text = str(initial_delay_val)
+    etree.SubElement(el, 'stringProp', {'name': 'Start users count'}).text = str(step_users)
+    etree.SubElement(el, 'stringProp', {'name': 'Start users count burst'}).text = str(burst_val)
+    etree.SubElement(el, 'stringProp', {'name': 'Start users period'}).text = str(step_delay)
+    # 用户配置的 `shutdown` 字段 = **退出总时长**（从峰值降到 0 的总秒数）。
+    # casutg "Stop users period" 是每两档之间的等待，要按 总时长 / (台阶数-1) 反算。
+    # 台阶数 = ceil(peak / step_users)，peak = num_threads(total)。
+    shutdown_total = int(p['shutdown'])
+    num_drops = max(1, -(-total // max(1, step_users)))   # ceil(total / step_users)
+    if num_drops > 1:
+        stop_period = max(1, round(shutdown_total / (num_drops - 1)))
+    else:
+        stop_period = max(1, shutdown_total)              # 仅 1 档时 period 没意义
+    etree.SubElement(el, 'stringProp', {'name': 'Stop users count'}).text = str(step_users)
+    etree.SubElement(el, 'stringProp', {'name': 'Stop users period'}).text = str(stop_period)
     etree.SubElement(el, 'stringProp', {'name': 'flighttime'}).text = str(p['hold'])
-    # rampUp = 每步内部的 ramp 秒；v1 固定每步 ramp = step_delay / 2（圆整）
-    etree.SubElement(el, 'stringProp', {'name': 'rampUp'}).text = str(max(1, p['step_delay'] // 2))
+    # rampUp = 每步内部的 ramp 秒。固定 1s（近似瞬时加满）。
+    # 为什么不是 step_delay/2：jp@gc 插件把每步算成 Start_users_period + rampUp，
+    # 即 step_delay/2 会让每步间隔 = step_delay×1.5，悄悄把总时长拉长 50%，
+    # 且看门狗预估没算这段 → 合法 run 在爬坡途中被当 timeout 误杀（见 b15ba6a4 复盘）。
+    # 设 1s 后每步间隔 ≈ step_delay，实际时长对上 Step 2 预览/预估。每步内部 ramp
+    # 要可配是 TODO（CLAUDE.md §Step2 待改进）。
+    etree.SubElement(el, 'stringProp', {'name': 'rampUp'}).text = '1'
     # UI 衍生字段：step_count。存在 JMX 里方便下次读出来回显（JMeter 不解析它）
     etree.SubElement(el, 'stringProp', {'name': '_step_count'}).text = str(p['step_count'])
     return el
