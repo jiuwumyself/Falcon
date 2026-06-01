@@ -122,6 +122,13 @@ class Task(models.Model):
     # 多选语义：一个压测任务可能同时关联上下游多个服务（链路一起测）。
     service_names = models.JSONField(default=list, blank=True)
 
+    # prometheus_source: Step 2 选的 Prometheus 数据源，Step 3 查服务监控指标用。
+    # 与 service_names 一起在 Step 2 保存时写入；null = 未选数据源（降级为空面板）。
+    prometheus_source = models.ForeignKey(
+        'PrometheusDataSource', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='tasks',
+    )
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='tasks',
@@ -706,3 +713,40 @@ class RunAnalysis(models.Model):
     # {p50_ms,p95_ms,p99_ms, p50_ok_ms,p95_ok_ms,p99_ok_ms: [[ts,ms]]}
     latency_overall = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PrometheusDataSource(models.Model):
+    """Prometheus 数据源配置（多条记录，每条对应一个集群 / 命名空间）。
+
+    Step 2 从选定的数据源拉服务列表（job names），
+    Step 3 根据 task.service_names 查这些服务的监控指标。
+
+    创建/编辑走 Django admin（/admin/performance/prometheusdatasource/）。
+    """
+    name = models.CharField(
+        max_length=100, unique=True,
+        help_text='数据源名称，如 ali-k8s-new、ali-k8s-online。',
+    )
+    url = models.CharField(
+        max_length=500,
+        help_text='Prometheus 兼容 API 根地址（到 /api/v1 之前的部分）。'
+                  '阿里云 ARMS 示例：https://cn-hangzhou.arms.aliyuncs.com:9443/api/v1/prometheus/xxx/cn-hangzhou',
+    )
+    auth_token = models.CharField(
+        max_length=500, blank=True,
+        help_text='Bearer token（内网免认证时留空）。',
+    )
+    enabled = models.BooleanField(
+        default=True,
+        help_text='禁用后前端不展示该数据源。',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Prometheus 数据源'
+        verbose_name_plural = 'Prometheus 数据源'
+        ordering = ['name']
+
+    def __str__(self) -> str:
+        return f'{self.name}（{"启用" if self.enabled else "禁用"}）'

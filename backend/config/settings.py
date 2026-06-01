@@ -195,4 +195,27 @@ LOCAL_FALLBACK = os.getenv('LOCAL_FALLBACK', '1') == '1'
 # 各 agent 只拿自己那部分（账号池等"每条数据只能用一次"场景）。
 # 开发态 .env 设 CSV_SLICE_ENABLED=true 开启。粒度暂时全 task 全 binding；
 # per-binding 控制留到将来给 TaskCsvBinding 加字段。
+# ── Prometheus 监控缓存配置 ─────────────────────────────
+# 缓存 Prometheus 查询结果，避免重复查询（15-30 秒 TTL）
+# 使用 Django 内存缓存（无需 Redis），适合单机部署
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'prometheus-cache',
+        'OPTIONS': {
+            'MAX_ENTRIES': 1000,
+            'CULL_FREQUENCY': 3,
+        }
+    },
+    # 标签探测缓存：5 分钟（数据源配置极少变动）
+    'prometheus_labels': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'prometheus-labels-cache',
+        'TIMEOUT': 300,  # 5 分钟
+    },
+}
+
+# 指标查询结果缓存时间（秒）
+PROMETHEUS_QUERY_CACHE_TTL = int(os.getenv('PROMETHEUS_QUERY_CACHE_TTL', '15'))
+
 CSV_SLICE_ENABLED = os.getenv('CSV_SLICE_ENABLED', '').lower() == 'true'

@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from .models import (
     BackendListenerConfig, Environment, LoadGenerator, MetricSample,
-    PinpointConfig, RunEventAnchor, RunPinpointTrace, Service,
+    PinpointConfig, PrometheusDataSource, RunEventAnchor, RunPinpointTrace, Service,
     Task, TaskCsvBinding, TaskRun,
 )
 
@@ -144,3 +144,12 @@ class RunPinpointTraceAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False  # 只能由 pinpoint_collector 写入
+
+
+@admin.register(PrometheusDataSource)
+class PrometheusDataSourceAdmin(admin.ModelAdmin):
+    """Prometheus 数据源配置。运维提供地址后在这里录入。"""
+    list_display = ('id', 'name', 'url', 'enabled', 'updated_at')
+    list_filter = ('enabled',)
+    search_fields = ('name', 'url')
+    readonly_fields = ('created_at', 'updated_at')

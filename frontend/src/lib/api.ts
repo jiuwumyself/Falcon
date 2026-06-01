@@ -1,7 +1,8 @@
 import type {
   ConcurrencyResponse, Environment, ErrorAggregatesResponse, ErrorSamplesQuery,
-  ErrorSamplesResponse, LatencyBreakdownResponse, LoadGenerator, Paginated,
-  PinpointTrace, RunEvent, RunMetrics, SamplerStat, Service, Task, TaskRun,
+  ErrorSamplesResponse, FluentBitMetricsResponse, LatencyBreakdownResponse, LoadGenerator,
+  Paginated, PinpointTrace, PrometheusDataSource, PrometheusMetricsResponse,
+  PrometheusServiceList, RunEvent, RunMetrics, SamplerStat, Service, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -248,5 +249,37 @@ export const loadGeneratorsApi = {
     }),
   systemMetrics: (id: number) =>
     api<SystemMetrics>(`/load-generators/${id}/system-metrics/`),
+}
+
+// ─── Prometheus 数据源 API ──────────────────────────────────────────
+export const prometheusSourcesApi = {
+  /** 数据源列表（Step 2 下拉框用） */
+  list: () => api<PrometheusDataSource[]>('/prometheus-sources/'),
+  /** 从指定数据源拉 job 列表（Step 2 服务多选） */
+  services: (sourceId: number, search?: string) => {
+    const qs = search ? `?search=${encodeURIComponent(search)}` : ''
+    return api<PrometheusServiceList>(`/prometheus-sources/${sourceId}/services/${qs}`)
+  },
+  /** 查询指定服务的监控指标时序（Step 3 面板） */
+  metrics: (sourceId: number, opts: {
+    service: string
+    start: string | number
+    end: string | number
+    step?: string
+    metrics?: string
+  }) => {
+    const params = new URLSearchParams()
+    params.set('service', opts.service)
+    params.set('start', String(opts.start))
+    params.set('end', String(opts.end))
+    if (opts.step) params.set('step', opts.step)
+    if (opts.metrics) params.set('metrics', opts.metrics)
+    return api<PrometheusMetricsResponse>(`/prometheus-sources/${sourceId}/metrics/?${params}`)
+  },
+  /** 查询 fluent-bit 实时监控数据（所有 enabled 数据源汇总）
+   * @param time 可选，Unix 时间戳，用于查询历史时刻的数据
+   */
+  fluentBit: (time?: number) =>
+    api<FluentBitMetricsResponse>('/prometheus-sources/fluent-bit/' + (time ? `?time=${time}` : '')),
 }
 

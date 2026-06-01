@@ -1,8 +1,8 @@
 from rest_framework import serializers
 
 from .models import (
-    Environment, LoadGenerator, MetricSample, RunEventAnchor, RunPinpointTrace,
-    Service, Task, TaskCsvBinding, TaskRun,
+    Environment, LoadGenerator, MetricSample, PrometheusDataSource,
+    RunEventAnchor, RunPinpointTrace, Service, Task, TaskCsvBinding, TaskRun,
 )
 
 
@@ -50,7 +50,7 @@ class TaskSerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'biz_category',
             'jmx_filename', 'jmx_hash',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds',
-            'thread_groups_config', 'environment', 'service_names',
+            'thread_groups_config', 'environment', 'service_names', 'prometheus_source',
             'csv_bindings', 'status', 'active_run_id', 'config_stale',
             'owner', 'created_at', 'updated_at',
         ]
@@ -165,3 +165,11 @@ class LoadGeneratorSerializer(serializers.ModelSerializer):
             # token 不暴露给前端
         ]
         read_only_fields = fields
+
+
+class PrometheusDataSourceSerializer(serializers.ModelSerializer):
+    """Prometheus 数据源列表（前端 Step 2 下拉选择数据源用）。"""
+    class Meta:
+        model = PrometheusDataSource
+        fields = ['id', 'name', 'url', 'enabled', 'created_at', 'updated_at']
+        read_only_fields = fields  # 前端只读，编辑走 admin

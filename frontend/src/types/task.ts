@@ -34,6 +34,7 @@ export interface Task {
   thread_groups_config: ThreadGroupConfig[]
   environment: number | null    // Environment id or null
   service_names: string[]       // Step 2 选的"被压测服务"名列表（v1.2，前端 mock；多选）
+  prometheus_source: number | null  // Step 2 选的 Prometheus 数据源 ID（Step 3 查指标用）
   csv_bindings: TaskCsvBinding[]
   status: TaskStatus
   active_run_id: string | null  // 后端 Step 3 加：有活跃 run 时直接给前端 run_id
@@ -528,3 +529,50 @@ export type ComponentDetail =
   | RegexExtractorDetail
   | JSONExtractorDetail
   | CsvDataSetDetail
+
+// ─── Prometheus 数据源 ─────────────────────────────────────────────
+
+export interface PrometheusDataSource {
+  id: number
+  name: string           // 如 ali-k8s-new、ali-k8s-online
+  url: string            // Prometheus API 根地址
+  enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PrometheusServiceList {
+  services: string[]     // job name 列表
+}
+
+export interface PrometheusMetricSeries {
+  display_name: string  // 如 "CPU 使用率 %"
+  data: { ts: number; value: number }[]  // 聚合数据（per-pod 指标为空数组）
+  pods?: Record<string, { ts: number; value: number }[]>  // per-pod 数据：{pod_name: [{ts, value}]}
+}
+
+export type PrometheusMetricsResponse = Record<string, PrometheusMetricSeries>
+
+// Fluent-bit 监控表格
+export interface FluentBitPodMetric {
+  pod: string
+  namespace: string
+  cpu_pct: number | null
+  cpu_request_m: number | null
+  cpu_limit_m: number | null
+  mem_wss_pct: number | null
+  mem_wss_mb: number | null
+  mem_rss_pct: number | null
+  mem_rss_mb: number | null
+  mem_request_mb: number | null
+  mem_limit_mb: number | null
+  disk_usage_bytes: number | null
+  net_rx_kbs: number | null
+  net_tx_kbs: number | null
+  restarts: number | null
+}
+
+export interface FluentBitMetricsResponse {
+  pods: FluentBitPodMetric[]
+  columns: { key: string; label: string }[]
+}
