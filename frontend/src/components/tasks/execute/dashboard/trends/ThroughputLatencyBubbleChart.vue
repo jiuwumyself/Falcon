@@ -26,11 +26,15 @@ function bubbleSize(s: SamplerStat): number {
   return Math.min(40, Math.max(10, Math.sqrt(variance) * 1.8))
 }
 
+// 「按接口」图：剔除 'all' 聚合行——它的 TPS 是各接口之和，会把 x 轴撑歪、把真实
+// 接口挤成一坨；聚合值另有 KPI 条 / RPS 图表达，这里只比接口。
+const rows = computed(() => props.stats.filter((s) => s.label !== 'all'))
+
 const series = computed(() =>
-  props.stats.map((s) => {
+  rows.value.map((s) => {
     const hue = colorFor(s.label)
     return {
-      name: s.label === 'all' ? '全部' : s.label,
+      name: s.label,
       type: 'scatter' as const,
       symbolSize: bubbleSize(s),
       itemStyle: { color: withAlpha(hue, 0.45), borderColor: hue, borderWidth: 1.4 },
@@ -39,7 +43,7 @@ const series = computed(() =>
   }),
 )
 
-const hasData = computed(() => props.stats.length > 0)
+const hasData = computed(() => rows.value.length > 0)
 
 const option = computed(() => ({
   grid: { left: 50, right: 18, top: 30, bottom: 32 },

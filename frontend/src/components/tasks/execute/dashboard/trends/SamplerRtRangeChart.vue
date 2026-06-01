@@ -11,7 +11,7 @@ import { colorFor, withAlpha } from './chartColors'
 
 use([BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
-// 各接口响应时间分布：每接口 min / 均值 / max 三组横条对比。
+// 各接口响应时间分布：每接口 min / 均值 / p99 三组横条对比。
 // 数据来自 SamplerStat（含 'all' 行）。排序：'all' 置顶，其余按均值(avg_ms)升序。
 // 配色：每个接口用自己的稳定色(colorFor，'all' 为绿)，min/均值/max 用该色的不同
 // 透明度区分（均值最实 78%、min 22%、max 最淡 14%）。
@@ -36,11 +36,12 @@ const chartHeight = computed(() => Math.max(150, rows.value.length * 34 + 44))
 const ALPHA = {
   min: { fill: 0.22, border: 0.5, bw: 1 },
   avg: { fill: 0.78, border: 1.0, bw: 1.5 },
-  max: { fill: 0.14, border: 0.42, bw: 1 },
+  p99: { fill: 0.14, border: 0.42, bw: 1 },
 }
 
-function seriesData(metric: 'min' | 'avg' | 'max') {
-  const key = metric === 'min' ? 'min_ms' : metric === 'avg' ? 'avg_ms' : 'max_ms'
+// 第三根用 p99 而非 max：max 是单个离群点、噪声大；p99 才是有意义的尾延迟。
+function seriesData(metric: 'min' | 'avg' | 'p99') {
+  const key = metric === 'min' ? 'min_ms' : metric === 'avg' ? 'avg_ms' : 'p99_ms'
   const a = ALPHA[metric]
   // category 默认从下往上 → 数据倒序让 'all' 落在最顶
   return [...rows.value].reverse().map((s) => {
@@ -58,7 +59,7 @@ function seriesData(metric: 'min' | 'avg' | 'max') {
 }
 
 // 图例 swatch：中性绿的三档透明度（传达"实=均值"的编码，bar 实际用各接口 hue）
-function legendColor(metric: 'min' | 'avg' | 'max') {
+function legendColor(metric: 'min' | 'avg' | 'p99') {
   return withAlpha('#10b981', ALPHA[metric].fill)
 }
 
@@ -70,7 +71,7 @@ const option = computed(() => {
       data: [
         { name: 'min', itemStyle: { color: legendColor('min') } },
         { name: '均值', itemStyle: { color: legendColor('avg') } },
-        { name: 'max', itemStyle: { color: legendColor('max') } },
+        { name: 'p99', itemStyle: { color: legendColor('p99') } },
       ],
       top: 0,
       right: 0,
@@ -103,7 +104,7 @@ const option = computed(() => {
     series: [
       { name: 'min', type: 'bar' as const, barGap: '20%', barCategoryGap: '42%', data: seriesData('min') },
       { name: '均值', type: 'bar' as const, data: seriesData('avg') },
-      { name: 'max', type: 'bar' as const, data: seriesData('max') },
+      { name: 'p99', type: 'bar' as const, data: seriesData('p99') },
     ],
   }
 })
@@ -117,7 +118,7 @@ const option = computed(() => {
     >
       各接口响应时间分布
       <span class="text-[11px] font-normal" :style="{ color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }">
-        · min / 均值 / max（ms）
+        · min / 均值 / p99（ms）
       </span>
     </div>
     <VChart v-if="rows.length" :option="option" autoresize :style="{ height: chartHeight + 'px' }" />

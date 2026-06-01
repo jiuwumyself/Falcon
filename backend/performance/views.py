@@ -701,18 +701,22 @@ class TaskViewSet(viewsets.ModelViewSet):
         except JmxParseError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 配置入库（不写盘）+ 同步 virtual_users/ramp_up/duration（用第一个标准 TG 的参数）
+        # 配置入库（不写盘）+ 同步 virtual_users/ramp_up/duration —— 从 thread_groups_config
+        # 统一计算（plugin TG: Stepping/Concurrency/Ultimate/Arrivals 也准），与 run 快照
+        # 同源（scheduler.compute_planned_run_params）。原来只认"第一个标准 TG"，切到
+        # plugin TG 后这三个字段会停在旧值失真。
         instance.thread_groups_config = tg_configs
         instance.environment = env_obj
-        first_std = next(
-            (c for c in tg_configs if c.get('kind') == 'ThreadGroup'),
-            None,
+        from .services.scheduler import compute_planned_run_params  # noqa: PLC0415
+        vu, ramp, dur = compute_planned_run_params(
+            tg_configs,
+            fallback_vusers=instance.virtual_users,
+            fallback_ramp=instance.ramp_up_seconds,
+            fallback_duration=instance.duration_seconds,
         )
-        if first_std and isinstance(first_std.get('params'), dict):
-            p = first_std['params']
-            instance.virtual_users = int(p.get('users', instance.virtual_users) or 0)
-            instance.ramp_up_seconds = int(p.get('ramp_up', instance.ramp_up_seconds) or 0)
-            instance.duration_seconds = int(p.get('duration', instance.duration_seconds) or 0)
+        instance.virtual_users = vu
+        instance.ramp_up_seconds = ramp
+        instance.duration_seconds = dur
         instance.save(update_fields=[
             'thread_groups_config', 'environment',
             'virtual_users', 'ramp_up_seconds', 'duration_seconds', 'updated_at',
