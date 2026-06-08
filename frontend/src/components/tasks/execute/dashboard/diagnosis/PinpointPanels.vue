@@ -168,13 +168,15 @@ const heapPath = computed(() => {
         <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">类加载</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ loadedClass ? fmtNum(loadedClass.last) : '—' }}</p></div>
         <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">Old GC</p><p class="text-[18px] font-medium m-0" :style="{ color: gc && gc.old_count > 0 ? '#f59e0b' : d('#1a1a2e', '#fff') }">{{ gc ? gc.old_count : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ gc ? '次 · ' + gc.old_time_ms + 'ms' : '' }}</span></p></div>
       </div>
-      <div v-if="heapPath" class="relative">
-        <span class="absolute left-0 top-0 text-[9px]" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[1]) }}</span>
-        <span class="absolute left-0 bottom-0 text-[9px]" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[0]) }}</span>
-        <svg :viewBox="`0 0 ${HEAP_W} ${HEAP_H}`" preserveAspectRatio="none" class="w-full h-[52px]">
-          <path :d="heapPath" fill="none" stroke="#f59e0b" stroke-width="1.6" vector-effect="non-scaling-stroke" />
-        </svg>
-        <p class="text-[10px] mt-0.5" :style="{ color: d('rgba(0,0,0,0.45)', 'rgba(255,255,255,0.45)') }">堆内存使用趋势（纵轴自适应区间，看 GC 涨落）</p>
+      <div v-if="heapPath">
+        <div class="relative">
+          <span class="absolute left-0 top-0 text-[9px] pointer-events-none" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[1]) }}</span>
+          <span class="absolute left-0 bottom-0 text-[9px] pointer-events-none" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[0]) }}</span>
+          <svg :viewBox="`0 0 ${HEAP_W} ${HEAP_H}`" preserveAspectRatio="none" class="w-full h-[52px] block">
+            <path :d="heapPath" fill="none" stroke="#f59e0b" stroke-width="1.6" vector-effect="non-scaling-stroke" />
+          </svg>
+        </div>
+        <p class="text-[10px] mt-1" :style="{ color: d('rgba(0,0,0,0.45)', 'rgba(255,255,255,0.45)') }">堆内存使用趋势（纵轴自适应区间，看 GC 涨落）</p>
       </div>
     </div>
 

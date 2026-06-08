@@ -12,6 +12,7 @@ const props = defineProps<{
   durationSeconds: number      // task.duration_seconds，回退兜底
   busy: boolean
   startDisabled?: boolean      // config_stale 时上层 disable 开始按钮；兜底默认 false
+  hideControls?: boolean       // 分享视图：只读，藏开始/停止按钮，仅留状态徽章 + 进度条 + 时间
   isDark: boolean
 }>()
 
@@ -400,8 +401,8 @@ const eventMarkers = computed(() => {
       </span>
     </span>
 
-    <!-- 按钮组：开始/停止 + 历史 dropdown -->
-    <div class="flex items-center gap-1.5 flex-shrink-0">
+    <!-- 按钮组：开始/停止（分享视图隐藏）-->
+    <div v-if="!hideControls" class="flex items-center gap-1.5 flex-shrink-0">
       <button
         v-if="!isActive"
         class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"

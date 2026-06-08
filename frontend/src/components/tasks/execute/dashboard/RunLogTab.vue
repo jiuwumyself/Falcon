@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { ChevronDown, ChevronRight } from 'lucide-vue-next'
 import type { TaskRun } from '@/types/task'
 import { runsApi } from '@/lib/api'
 
@@ -9,10 +8,6 @@ const props = defineProps<{
   isTerminal: boolean
   isDark: boolean
 }>()
-
-// 两段折叠态：默认两段都展开
-const showPrecheck = ref(true)
-const showRuntime = ref(true)
 
 // 预检 + falcon 层运行事件直接从 run 对象拿（外层 ExecuteStage 已 3s 轮询）。
 const preCheckLines = computed(() =>
@@ -98,95 +93,40 @@ const dimColor = computed(() =>
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-3 flex flex-col gap-3">
-    <!-- 段 1：预检 -->
-    <div
-      class="rounded-xl"
-      :style="{ background: sectionBg, border: `1px solid ${sectionBorder}` }"
-    >
-      <button
-        class="w-full flex items-center gap-2 px-4 py-2.5 text-[12.5px] cursor-pointer"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)' }"
-        @click="showPrecheck = !showPrecheck"
-      >
-        <component :is="showPrecheck ? ChevronDown : ChevronRight" :size="14" />
+  <div class="h-full overflow-y-auto p-3">
+    <!-- 单窗口：预检 + 执行 顺序排在一张卡里，内部分节，不再各自折叠 -->
+    <div class="rounded-xl overflow-hidden"
+         :style="{ background: sectionBg, border: `1px solid ${sectionBorder}` }">
+      <!-- 预检 -->
+      <div class="flex items-center gap-2 px-4 py-2.5 text-[12.5px]"
+           :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)' }">
         <span class="font-medium">预检</span>
-        <span class="text-[11px]" :style="{ color: dimColor }">
-          {{ preCheckLines.length }} 行
-        </span>
-      </button>
-      <div
-        v-if="showPrecheck"
-        class="px-4 pb-3 text-[12.5px] leading-[1.7] font-mono"
-        :style="{ borderTop: `1px solid ${sectionBorder}` }"
-      >
-        <div v-if="!preCheckLines.length" class="py-2" :style="{ color: dimColor }">
-          还没有预检输出
-        </div>
-        <div
-          v-for="(line, i) in preCheckLines"
-          :key="i"
-          :style="{ color: preCheckColor(line) }"
-        >{{ line }}</div>
+        <span class="text-[11px]" :style="{ color: dimColor }">{{ preCheckLines.length }} 行</span>
       </div>
-    </div>
+      <div class="px-4 pb-3 text-[12.5px] leading-[1.7] font-mono">
+        <div v-if="!preCheckLines.length" class="py-1" :style="{ color: dimColor }">还没有预检输出</div>
+        <div v-for="(line, i) in preCheckLines" :key="`p-${i}`" :style="{ color: preCheckColor(line) }">{{ line }}</div>
+      </div>
 
-    <!-- 段 2：执行 = falcon 层运行事件 + JMeter 子进程日志 -->
-    <div
-      class="rounded-xl"
-      :style="{ background: sectionBg, border: `1px solid ${sectionBorder}` }"
-    >
-      <button
-        class="w-full flex items-center gap-2 px-4 py-2.5 text-[12.5px] cursor-pointer"
-        :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)' }"
-        @click="showRuntime = !showRuntime"
-      >
-        <component :is="showRuntime ? ChevronDown : ChevronRight" :size="14" />
+      <!-- 执行 = Falcon 调度事件 + JMeter 子进程日志 -->
+      <div class="flex items-center gap-2 px-4 py-2.5 text-[12.5px]"
+           :style="{ color: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)', borderTop: `1px solid ${sectionBorder}` }">
         <span class="font-medium">执行</span>
         <span class="text-[11px]" :style="{ color: dimColor }">
           {{ runtimeFalconLines.length }} 条事件 · {{ jmeterLines.length }} 行 JMeter log
         </span>
-        <span
-          v-if="!isTerminal && run"
-          class="text-[10px] px-1.5 py-0.5 rounded ml-auto"
-          :style="{
-            background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.12)',
-            color: '#22c55e',
-          }"
-        >LIVE 3s</span>
-      </button>
-      <div
-        v-if="showRuntime"
-        class="px-4 pb-3 text-[12.5px] leading-[1.7] font-mono"
-        :style="{ borderTop: `1px solid ${sectionBorder}` }"
-      >
-        <!-- 子段 2a：falcon 层事件 -->
-        <div
-          class="text-[10.5px] uppercase tracking-wider pt-2 pb-1"
-          :style="{ color: dimColor }"
-        >Falcon 调度事件</div>
-        <div v-if="!runtimeFalconLines.length" :style="{ color: dimColor }">
-          还没有运行事件
-        </div>
-        <div
-          v-for="(line, i) in runtimeFalconLines"
-          :key="`f-${i}`"
-          :style="{ color: runtimeColor(line) }"
-        >{{ line }}</div>
+        <span v-if="!isTerminal && run" class="text-[10px] px-1.5 py-0.5 rounded ml-auto"
+              :style="{ background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.12)', color: '#22c55e' }">LIVE 3s</span>
+      </div>
+      <div class="px-4 pb-3 text-[12.5px] leading-[1.7] font-mono">
+        <div class="text-[10.5px] uppercase tracking-wider pt-1 pb-1" :style="{ color: dimColor }">Falcon 调度事件</div>
+        <div v-if="!runtimeFalconLines.length" :style="{ color: dimColor }">还没有运行事件</div>
+        <div v-for="(line, i) in runtimeFalconLines" :key="`f-${i}`" :style="{ color: runtimeColor(line) }">{{ line }}</div>
 
-        <!-- 子段 2b：JMeter 子进程 log（末 500 行） -->
-        <div
-          class="text-[10.5px] uppercase tracking-wider pt-3 pb-1"
-          :style="{ color: dimColor }"
-        >JMeter 子进程日志（末 500 行）</div>
-        <div v-if="!jmeterLines.length" :style="{ color: dimColor }">
-          {{ run ? 'JMeter 还没输出日志' : '尚未启动 run' }}
-        </div>
-        <div
-          v-for="(line, i) in jmeterLines"
-          :key="`j-${i}`"
-          :style="{ color: isDark ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.65)' }"
-        >{{ line }}</div>
+        <div class="text-[10.5px] uppercase tracking-wider pt-3 pb-1" :style="{ color: dimColor }">JMeter 子进程日志（末 500 行）</div>
+        <div v-if="!jmeterLines.length" :style="{ color: dimColor }">{{ run ? 'JMeter 还没输出日志' : '尚未启动 run' }}</div>
+        <div v-for="(line, i) in jmeterLines" :key="`j-${i}`"
+             :style="{ color: isDark ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.65)' }">{{ line }}</div>
       </div>
     </div>
   </div>

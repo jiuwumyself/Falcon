@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  Activity, BarChart3, Stethoscope, FileText, FileSearch,
+  Activity, BarChart3, Stethoscope, FileText, FileSearch, Share2,
 } from 'lucide-vue-next'
 import type { Environment, RunMetrics, Task, TaskRun } from '@/types/task'
 import RunPlanSummary from './RunPlanSummary.vue'
@@ -19,6 +19,7 @@ const props = defineProps<{
   metrics: RunMetrics | null
   environment: Environment | null
   isDark: boolean
+  shareMode?: boolean   // 分享视图：只留 指标趋势/服务诊断/查看报告，藏历史/分享/任务简介
 }>()
 
 defineEmits<{
@@ -39,6 +40,19 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
 ]
 
 const active = ref<TabId>('trends')
+
+// 分享视图只露这三个 tab
+const SHARE_TABS: TabId[] = ['trends', 'diagnosis', 'report']
+const visibleTabs = computed(() =>
+  props.shareMode ? TABS.filter((t) => SHARE_TABS.includes(t.id)) : TABS)
+
+// 分享链接：当前选中的 run（含从历史选的）→ 带 run；没有就只带 task（分享页取最新）
+function onShare() {
+  const url = `${window.location.origin}/share?task=${props.task.id}`
+    + (props.run?.run_id ? `&run=${props.run.run_id}` : '')
+  try { navigator.clipboard?.writeText(url) } catch { /* 忽略剪贴板失败 */ }
+  window.open(url, '_blank', 'noopener')
+}
 
 // SamplersTab 用：终态时定格不再轮询
 const TERMINAL: TaskRun['status'][] = [
@@ -61,7 +75,7 @@ const isTerminal = computed(() =>
            borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
          }">
       <button
-        v-for="t in TABS"
+        v-for="t in visibleTabs"
         :key="t.id"
         class="flex items-center gap-1.5 px-3 py-2 text-[12px] cursor-pointer flex-shrink-0"
         :style="{
@@ -76,28 +90,39 @@ const isTerminal = computed(() =>
         {{ t.label }}
       </button>
 
-      <!-- 历史下拉：紧跟「查看报告」之后 -->
-      <RunHistoryDropdown
-        :runs="runs"
-        :selected-run="run"
-        :is-dark="isDark"
-        @select="$emit('select', $event)"
-        @run-deleted="$emit('run-deleted', $event)"
-      />
-
-      <!-- 标签行末尾：任务简介 chips（｜分隔；场景徽章已去掉，看 Trends 切换器）-->
-      <div
-        class="ml-auto flex items-center pl-3 flex-shrink-0"
-        :style="{ borderLeft: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }"
-      >
-        <RunPlanSummary
-          :task="task"
+      <template v-if="!shareMode">
+        <!-- 历史下拉：紧跟「查看报告」之后 -->
+        <RunHistoryDropdown
+          :runs="runs"
           :selected-run="run"
-          :environment="environment"
           :is-dark="isDark"
-          embedded
+          @select="$emit('select', $event)"
+          @run-deleted="$emit('run-deleted', $event)"
         />
-      </div>
+        <!-- 分享：开只读视图（指标趋势/服务诊断/查看报告 + 进度条，无控制按钮）+ 复制链接 -->
+        <button
+          class="flex items-center gap-1 px-2.5 py-1 text-[12px] cursor-pointer flex-shrink-0 rounded-md ml-1"
+          :style="{ color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)' }"
+          title="分享只读视图（复制链接 + 新窗口打开）"
+          @click="onShare"
+        >
+          <Share2 :size="13" />分享
+        </button>
+
+        <!-- 标签行末尾：任务简介 chips（｜分隔；场景徽章已去掉，看 Trends 切换器）-->
+        <div
+          class="ml-auto flex items-center pl-3 flex-shrink-0"
+          :style="{ borderLeft: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }"
+        >
+          <RunPlanSummary
+            :task="task"
+            :selected-run="run"
+            :environment="environment"
+            :is-dark="isDark"
+            embedded
+          />
+        </div>
+      </template>
     </div>
 
     <!-- 当前 tab 内容（占满剩余高度）-->

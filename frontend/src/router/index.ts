@@ -6,6 +6,8 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/layouts/AppLayout.vue'),
     children: [
       { path: '', name: 'login', component: () => import('@/pages/LoginPage.vue') },
+      // 只读分享视图：有主题、无主导航，适合发链接给别人看
+      { path: 'share', name: 'share', component: () => import('@/pages/SharePage.vue') },
       {
         path: '',
         component: () => import('@/layouts/MainLayout.vue'),

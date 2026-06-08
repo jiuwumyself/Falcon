@@ -7,6 +7,7 @@ from pathlib import Path
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.http import FileResponse, Http404, HttpResponse
+from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -158,6 +159,32 @@ def _win_or_recent(request) -> tuple[int, int]:
         return fr, to
     now_ms = int(timezone.now().timestamp() * 1000)
     return now_ms - 5 * 60 * 1000, now_ms
+
+
+@xframe_options_exempt
+def serve_run_report(request, run_id, sub=None):
+    """JMeter -e -o 生成的 HTML 报告静态服务（含嵌套 CSS/JS/字体子资源）。
+
+    用显式 URL（<path:sub> 能匹配斜杠）服务，绕开 DRF DefaultRouter 给 @action 自动加
+    `/$` 结尾导致「带文件名、无尾斜杠的子资源」匹配不上 → 全 404 → 报告样式/脚本全挂的坑。
+    @xframe_options_exempt：豁免全局 X-Frame-Options=DENY，否则前端 iframe 嵌报告会被浏览器
+    挡成「localhost 拒绝了连接」（仅此视图豁免，其余接口仍保留防点击劫持）。
+    """
+    import mimetypes  # noqa: PLC0415
+    report_dir = get_runs_dir() / run_id / 'report'
+    if not report_dir.is_dir():
+        raise Http404('报告未生成，请先在“查看报告”点击生成')
+    rel = sub or 'index.html'
+    target = (report_dir / rel).resolve()
+    # 防路径穿越
+    if not str(target).startswith(str(report_dir.resolve())):
+        raise Http404('非法路径')
+    if not target.exists() or not target.is_file():
+        raise Http404(f'文件不存在: {rel}')
+    ctype = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
+    if target.suffix.lower() in ('.html', '.css', '.js', '.json', '.svg'):
+        ctype += '; charset=utf-8'
+    return HttpResponse(target.read_bytes(), content_type=ctype)
 
 
 def _purge_run_artifacts(run, *, soft_delete: bool) -> None:
@@ -1184,38 +1211,7 @@ class RunViewSet(viewsets.GenericViewSet):
         response['Content-Type'] = 'text/csv; charset=utf-8'
         return response
 
-    @action(detail=True, methods=['get'], url_path=r'report(?:/(?P<sub>.+))?')
-    def report(self, request, run_id=None, sub=None):
-        """JMeter -e -o 生成的 HTML 报告。GET /report/ → index.html；
-        子路径（CSS/JS/sbadmin2 资源）通过 sub 透传。"""
-        run = self.get_object()
-        report_dir = get_runs_dir() / run.run_id / 'report'
-        if not report_dir.is_dir():
-            raise Http404('报告未生成,请先在"查看报告"点击生成(POST generate-report)')
-
-        rel = sub or 'index.html'
-        # 防路径穿越
-        target = (report_dir / rel).resolve()
-        if not str(target).startswith(str(report_dir.resolve())):
-            raise Http404('非法路径')
-        if not target.exists() or not target.is_file():
-            raise Http404(f'文件不存在: {rel}')
-
-        # 简单 content-type 判定
-        ext = target.suffix.lower()
-        content_types = {
-            '.html': 'text/html; charset=utf-8',
-            '.css': 'text/css; charset=utf-8',
-            '.js': 'application/javascript; charset=utf-8',
-            '.json': 'application/json; charset=utf-8',
-            '.png': 'image/png',
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-            '.svg': 'image/svg+xml',
-        }
-        return HttpResponse(
-            target.read_bytes(),
-            content_type=content_types.get(ext, 'application/octet-stream'),
-        )
+    # 报告静态服务移到 performance/urls.py 的显式路由 serve_run_report（绕开 DRF /$ 坑）
 
     @action(detail=True, methods=['get'], url_path='report-status')
     def report_status(self, request, run_id=None):

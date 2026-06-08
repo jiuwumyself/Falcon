@@ -39,6 +39,7 @@ ALLOWED_HOSTS = os.getenv(
 
 
 INSTALLED_APPS = [
+    'jazzmin',  # 现代化 admin 主题（必须排在 django.contrib.admin 之前）
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -219,3 +220,74 @@ CACHES = {
 PROMETHEUS_QUERY_CACHE_TTL = int(os.getenv('PROMETHEUS_QUERY_CACHE_TTL', '15'))
 
 CSV_SLICE_ENABLED = os.getenv('CSV_SLICE_ENABLED', '').lower() == 'true'
+
+
+# ── Jazzmin（现代化 admin 主题）────────────────────────────────────────────
+# Falcon 暗色玻璃质感的延伸：左侧导航 + 暗色主题 + 图标 + 顶部搜索
+JAZZMIN_SETTINGS = {
+    'site_title': 'Falcon 后台',
+    'site_header': 'Falcon',
+    'site_brand': 'Falcon 猎鹰',
+    'welcome_sign': 'Falcon · 性能压测调度平台 · 后台管理',
+    'copyright': 'Falcon',
+    'site_logo_classes': 'img-circle',
+    # 顶部搜索框搜这些模型
+    'search_model': ['performance.Task', 'performance.Service'],
+    # 顶栏链接
+    'topmenu_links': [
+        {'name': '回前端', 'url': 'http://localhost:5173', 'new_window': True},
+        {'name': '任务', 'model': 'performance.task'},
+        {'model': 'auth.user'},
+    ],
+    'show_sidebar': True,
+    'navigation_expanded': True,
+    'hide_apps': [],
+    'hide_models': [],
+    # app / model 排序：performance 在前
+    'order_with_respect_to': ['performance', 'auth'],
+    # FontAwesome 图标
+    'icons': {
+        'auth': 'fas fa-users-cog',
+        'auth.user': 'fas fa-user',
+        'auth.Group': 'fas fa-users',
+        'performance.Task': 'fas fa-bolt',
+        'performance.TaskRun': 'fas fa-play-circle',
+        'performance.Environment': 'fas fa-server',
+        'performance.Service': 'fas fa-cubes',
+        'performance.PrometheusDataSource': 'fas fa-chart-line',
+        'performance.PinpointConfig': 'fas fa-project-diagram',
+        'performance.BackendListenerConfig': 'fas fa-broadcast-tower',
+        'performance.LoadGenerator': 'fas fa-microchip',
+        'performance.MetricSample': 'fas fa-wave-square',
+        'performance.RunEventAnchor': 'fas fa-map-pin',
+        'performance.RunPinpointTrace': 'fas fa-route',
+    },
+    'default_icon_parents': 'fas fa-chevron-circle-right',
+    'default_icon_children': 'fas fa-circle',
+    'related_modal_active': True,
+    'changeform_format': 'horizontal_tabs',
+    'show_ui_builder': False,
+}
+
+JAZZMIN_UI_TWEAKS = {
+    'theme': 'darkly',           # Bootswatch 暗色主题，贴合 Falcon 暗色风
+    'default_theme_mode': 'dark',  # 强制暗色（jazzmin 3.0 起 dark_mode_theme 废弃）
+    'navbar': 'navbar-dark',
+    'navbar_fixed': True,
+    'sidebar_fixed': True,
+    'sidebar': 'sidebar-dark-primary',
+    'sidebar_nav_compact_style': True,
+    'accent': 'accent-info',
+    'brand_colour': 'navbar-dark',
+    'body_small_text': False,
+    'sidebar_nav_flat_style': False,
+    'actions_sticky_top': True,
+    'button_classes': {
+        'primary': 'btn-primary',
+        'secondary': 'btn-secondary',
+        'info': 'btn-info',
+        'warning': 'btn-warning',
+        'danger': 'btn-danger',
+        'success': 'btn-success',
+    },
+}
