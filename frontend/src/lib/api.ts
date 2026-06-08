@@ -2,7 +2,9 @@ import type {
   ConcurrencyResponse, Environment, ErrorAggregatesResponse, ErrorSamplesQuery,
   ErrorSamplesResponse, FluentBitMetricsResponse, LatencyBreakdownResponse, LoadGenerator,
   Paginated, PinpointTrace, PrometheusDataSource, PrometheusMetricsResponse,
-  PrometheusServiceList, RunEvent, RunMetrics, SamplerStat, Service, Task, TaskRun,
+  DiagnosisResponse,
+  PrometheusServiceList, RunEvent, RunMetrics, SamplerStat, ServerMapResponse,
+  Service, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -123,6 +125,20 @@ export const tasksApi = {
   listRuns: (id: number) => api<Paginated<TaskRun>>(`/tasks/${id}/runs/`),
   // 只读 Environment 列表（编辑走 admin），给 RunPlanSummary 显示环境名 + hosts 数用
   environments: () => api<Environment[]>('/environments/'),
+
+  // ── 服务诊断（task 级，脱离 run）：不压测时按时间窗看实时 Pinpoint/Prometheus ──
+  serviceDiagnosis: (taskId: number, service: string, brief = false, win?: { from: number; to: number }): Promise<DiagnosisResponse> => {
+    const w = win ? `&from=${win.from}&to=${win.to}` : ''
+    return api<DiagnosisResponse>(`/tasks/${taskId}/service-diagnosis/?service=${encodeURIComponent(service)}${brief ? '&brief=1' : ''}${w}`)
+  },
+  serviceServermap: (taskId: number, service: string, win?: { from: number; to: number }): Promise<ServerMapResponse> => {
+    const w = win ? `&from=${win.from}&to=${win.to}` : ''
+    return api<ServerMapResponse>(`/tasks/${taskId}/service-servermap/?service=${encodeURIComponent(service)}&inbound=2&outbound=2${w}`)
+  },
+  serviceMetrics: (taskId: number, service: string, win?: { from: number; to: number }): Promise<PrometheusMetricsResponse> => {
+    const w = win ? `&from=${win.from}&to=${win.to}` : ''
+    return api<PrometheusMetricsResponse>(`/tasks/${taskId}/service-metrics/?service=${encodeURIComponent(service)}${w}`)
+  },
 }
 
 // ─── Runs API ──────────────────────────────────────────────────────────
@@ -204,6 +220,29 @@ export const runsApi = {
   // 未启用 / 无数据时返回空数组
   pinpointTraces: (runId: string): Promise<PinpointTrace[]> =>
     api<PinpointTrace[]>(`/runs/${runId}/pinpoint-traces/`),
+  // serverMap 服务拓扑（按 run 时段从 Pinpoint 拉）；opts.service 单服务、inbound/outbound
+  // 上下游展开跳数（服务诊断页用深度2）。Pinpoint 未启用/不可达 → enabled=false 或空。
+  pinpointServerMap: (
+    runId: string,
+    opts?: { service?: string; inbound?: number; outbound?: number; from?: number; to?: number },
+  ): Promise<ServerMapResponse> => {
+    const qs = new URLSearchParams()
+    if (opts?.service) qs.set('service', opts.service)
+    if (opts?.inbound != null) qs.set('inbound', String(opts.inbound))
+    if (opts?.outbound != null) qs.set('outbound', String(opts.outbound))
+    if (opts?.from != null && opts?.to != null) { qs.set('from', String(opts.from)); qs.set('to', String(opts.to)) }
+    const q = qs.toString()
+    return api<ServerMapResponse>(`/runs/${runId}/pinpoint-servermap/${q ? `?${q}` : ''}`)
+  },
+  // 单服务诊断聚合（事务/异常/慢URL/活跃线程/连接池/agent）；brief=只查事务概览(汇总行用)
+  // win 非空 → 用指定时间窗（前端「近 N 分/时」预设），否则用 run 窗口
+  pinpointDiagnosis: (runId: string, service: string, brief = false, win?: { from: number; to: number }): Promise<DiagnosisResponse> => {
+    const w = win ? `&from=${win.from}&to=${win.to}` : ''
+    return api<DiagnosisResponse>(`/runs/${runId}/pinpoint-diagnosis/?service=${encodeURIComponent(service)}${brief ? '&brief=1' : ''}${w}`)
+  },
+  // 某服务 run 窗口的 Pod 时序（Prometheus）。终态读 DB 快照秒开；前端「本次压测」用它
+  serviceMetrics: (runId: string, service: string): Promise<PrometheusMetricsResponse> =>
+    api<PrometheusMetricsResponse>(`/runs/${runId}/service-metrics/?service=${encodeURIComponent(service)}`),
   // § 12 S1：run 期间关键事件锚点（ramp_done / hold_start / shutdown_start /
   // first_error / error_rate_breached / p99_sla_breached）；前端时间轴 markLine 用
   events: (runId: string): Promise<RunEvent[]> =>

@@ -715,6 +715,28 @@ class RunAnalysis(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class RunServiceDiagnosis(models.Model):
+    """run 终态时,每个被压测服务的「服务诊断」数据快照(JSON):服务拓扑 / Pinpoint 详情 /
+    Pod 时序。历史 run 直接读这里(秒开,不再慢吞吞实时拉 Pinpoint),读不到/出错再回退实时
+    连接。与 run 一起 cascade —— 用户删 run 即物理删这些快照(数据全在 DB,无文件)。
+    """
+    run = models.ForeignKey(TaskRun, on_delete=models.CASCADE, related_name='service_diagnoses')
+    service = models.CharField(max_length=200)
+    servermap = models.JSONField(default=dict, blank=True)    # ServerMapResponse(单服务,深度2)
+    diagnosis = models.JSONField(default=dict, blank=True)    # DiagnosisResponse(全量)
+    prometheus = models.JSONField(default=dict, blank=True)   # PrometheusMetricsResponse(Pod 时序)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['run', 'service'],
+                                    name='unique_run_service_diagnosis'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.run.run_id}/{self.service}'
+
+
 class PrometheusDataSource(models.Model):
     """Prometheus 数据源配置（多条记录，每条对应一个集群 / 命名空间）。
 

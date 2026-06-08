@@ -117,6 +117,38 @@ def _empty_totals() -> dict:
     }
 
 
+# 历史 run 一次拉全程逐秒点(× 多 sampler/TG 多序列)能到上百 MB → 前端加载巨慢。
+# 折线图几百点足够，故全量(无 since)返回前把每条 series 降采样到上限。
+_MAX_SERIES_POINTS = 600
+
+
+def _downsample(points: list, max_n: int = _MAX_SERIES_POINTS) -> list:
+    """[[ts,val],...] 超过 max_n → 等步抽样，始终保留最后一个点。"""
+    n = len(points)
+    if n <= max_n:
+        return points
+    k = (n + max_n - 1) // max_n  # 步长，向上取整
+    out = points[::k]
+    if out and out[-1] is not points[-1]:
+        out.append(points[-1])
+    return out
+
+
+def _downsample_result(data: dict, max_n: int = _MAX_SERIES_POINTS) -> None:
+    """对 overall / by_tg / by_sampler / by_host / by_sampler_by_tg 里每条时序降采样（原地）。"""
+    def _dict_of_series(sd: dict) -> None:
+        for key, val in sd.items():
+            if isinstance(val, list):
+                sd[key] = _downsample(val, max_n)
+    _dict_of_series(data.get('overall') or {})
+    for grp in ('by_tg', 'by_sampler', 'by_host'):
+        for sd in (data.get(grp) or {}).values():
+            _dict_of_series(sd)
+    for per_label in (data.get('by_sampler_by_tg') or {}).values():
+        for sd in per_label.values():
+            _dict_of_series(sd)
+
+
 def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
     """
     返回结构（全空时各 series 为空 list，表示 InfluxDB 无该 run 数据）：
@@ -752,7 +784,7 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         for s in by_host.values():
             _normalize_rates(s, flush_sec)
 
-    return {
+    result = {
         'overall': overall,
         'by_tg': by_tg,
         'by_sampler': by_sampler,
@@ -763,6 +795,10 @@ def query_run_realtime(run_id: str, since: datetime | None = None) -> dict:
         'totals_by_tg': totals_by_tg,
         'last_ts': last_ts,
     }
+    # 全量拉(历史 run / 首次轮询)→ 降采样防上百 MB；增量 since 轮询是小 delta，不动
+    if since is None:
+        _downsample_result(result)
+    return result
 
 
 # —— 把每个 series 的"per-flush 累计"字段除以 flush_sec 改成 per-second 速率 ——

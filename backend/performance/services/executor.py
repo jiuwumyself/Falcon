@@ -1317,6 +1317,31 @@ class RunExecutor:
                 print(f'[executor] WARN: pinpoint collect dispatch failed: {e}',
                       file=sys.stderr)
 
+        # 服务诊断快照：把每个被压测服务的 拓扑/Pinpoint/Pod时序 抽进 DB，历史 run 秒开
+        # （不再慢吞吞实时拉）。daemon thread + 失败静默，不阻塞 _on_finish。
+        if run.task.service_names:
+            try:
+                run_for_diag = TaskRun.objects.get(pk=run.pk)
+                threading.Thread(
+                    target=self._snapshot_diagnosis_safely,
+                    args=(run_for_diag,),
+                    name=f'diag-snapshot-{run.run_id}',
+                    daemon=True,
+                ).start()
+            except Exception as e:  # noqa: BLE001
+                print(f'[executor] WARN: diagnosis snapshot dispatch failed: {e}',
+                      file=sys.stderr)
+
+    def _snapshot_diagnosis_safely(self, run) -> None:
+        """终态服务诊断快照（daemon thread 内调，失败静默）。"""
+        try:
+            from .diagnosis import snapshot_run  # noqa: PLC0415
+            n = snapshot_run(run)
+            print(f'[executor] diagnosis snapshot done: {n} services (run={run.run_id})',
+                  file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: diagnosis snapshot failed: {e}', file=sys.stderr)
+
     def _pre_record_phase_anchors(self) -> None:
         """§ 12 S1：run 进入 RUNNING 后立即把 phase 边界事件预写入（基于 task config
         + started_at 推算）。这样进度条第一时间就有精确边界，不靠 phaseSegments 的

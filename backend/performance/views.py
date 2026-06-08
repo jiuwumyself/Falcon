@@ -140,6 +140,26 @@ def _safe_path_token(path: str) -> str:
     return _SAFE_PATH_RE.sub('_', path).strip('_') or 'root'
 
 
+def _parse_win(request) -> tuple[int | None, int | None]:
+    """从 query params 读 from/to（ms）。两者都合法才返回，否则 (None, None) → 用 run 窗口。
+    前端「近 N 分/时」预设把窗口传给 Pinpoint 端点，让拓扑/事务/JVM 也随时间窗变。"""
+    try:
+        fr = int(request.query_params.get('from'))
+        to = int(request.query_params.get('to'))
+    except (TypeError, ValueError):
+        return None, None
+    return (fr, to) if (fr and to and to > fr) else (None, None)
+
+
+def _win_or_recent(request) -> tuple[int, int]:
+    """task 级诊断：有 from/to 用之，否则默认近 5 分钟（ms）。"""
+    fr, to = _parse_win(request)
+    if fr and to:
+        return fr, to
+    now_ms = int(timezone.now().timestamp() * 1000)
+    return now_ms - 5 * 60 * 1000, now_ms
+
+
 def _purge_run_artifacts(run, *, soft_delete: bool) -> None:
     """清掉单个 TaskRun 的所有物理痕迹：run_dir / archive.tar.gz / InfluxDB 时序数据。
 
@@ -160,6 +180,12 @@ def _purge_run_artifacts(run, *, soft_delete: bool) -> None:
         influxdb_svc.delete_run_data(run.run_id)
     except Exception:  # noqa: BLE001
         # InfluxDB DELETE 失败不阻断：retention policy 自然 GC
+        pass
+    # 服务诊断快照(拓扑/Pinpoint/Pod时序)也属重数据，随删除物理清掉(run 行软删保留作统计)
+    try:
+        from .models import RunServiceDiagnosis  # noqa: PLC0415
+        RunServiceDiagnosis.objects.filter(run=run).delete()
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -902,6 +928,38 @@ class TaskViewSet(viewsets.ModelViewSet):
             return self.get_paginated_response(TaskRunSerializer(page, many=True).data)
         return Response(TaskRunSerializer(qs, many=True).data)
 
+    # ── 服务诊断（task 级，脱离 run）：没在压测时也能按时间窗看实时 Pinpoint/Prometheus ──
+    # 前端「近 N 分/时」预设 + 无 run 场景走这几个；缺 from/to → 默认近 5 分钟
+    @action(detail=True, methods=['get'], url_path='service-diagnosis')
+    def service_diagnosis(self, request, pk=None):
+        from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+        self.get_object()
+        service = (request.query_params.get('service') or '').strip()
+        brief = request.query_params.get('brief') in ('1', 'true')
+        fr, to = _win_or_recent(request)
+        return Response(diagnosis_svc.build_diagnosis(None, service, brief, fr, to))
+
+    @action(detail=True, methods=['get'], url_path='service-servermap')
+    def service_servermap(self, request, pk=None):
+        from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+        self.get_object()
+        service = (request.query_params.get('service') or '').strip()
+        try:
+            inbound = max(1, min(4, int(request.query_params.get('inbound', 2))))
+            outbound = max(1, min(4, int(request.query_params.get('outbound', 2))))
+        except (TypeError, ValueError):
+            inbound = outbound = 2
+        fr, to = _win_or_recent(request)
+        return Response(diagnosis_svc.build_servermap(None, service, inbound, outbound, fr, to))
+
+    @action(detail=True, methods=['get'], url_path='service-metrics')
+    def service_metrics(self, request, pk=None):
+        from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+        task = self.get_object()
+        service = (request.query_params.get('service') or '').strip()
+        fr, to = _win_or_recent(request)
+        return Response(diagnosis_svc.build_prometheus(None, service, task.prometheus_source, fr, to))
+
 
 # ── Step 3：RunViewSet（按 run_id 操作单个 run） ──────────────────────────
 
@@ -1409,6 +1467,154 @@ class RunViewSet(viewsets.GenericViewSet):
         run = self.get_object()
         traces = RunPinpointTrace.objects.filter(run=run).order_by('service_name', '-elapsed_ms')
         return Response(RunPinpointTraceSerializer(traces, many=True).data)
+
+    @action(detail=True, methods=['get'], url_path='pinpoint-servermap')
+    def pinpoint_servermap(self, request, run_id=None):
+        """run 时间窗内的 Pinpoint 服务拓扑（链路面板拓扑图 + 依赖表）。
+
+        遍历 task.service_names → 解析 pinpoint 应用（Service.pinpoint_app 优先，否则
+        服务名本身）+ serviceType（查 /api/applications）→ 并行查 getServerMapDataV2 →
+        合并 nodes(按 key 去重) / links(按 from,to 去重)。Pinpoint 未启用 / 服务非
+        pinpoint 应用 / 不可达 → 相应空 + skipped 标注，不报错。
+        """
+        from .services import pinpoint as pp  # noqa: PLC0415
+        run = self.get_object()
+
+        # 单服务（服务诊断页 ?service=X，深度2）：终态优先读快照秒开，无则实时
+        only = (request.query_params.get('service') or '').strip()
+        try:
+            inbound = max(1, min(4, int(request.query_params.get('inbound', 2))))
+            outbound = max(1, min(4, int(request.query_params.get('outbound', 2))))
+        except (TypeError, ValueError):
+            inbound = outbound = 2
+        if only:
+            from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+            fr, to = _parse_win(request)   # 前端预设时间窗（ms）；空=用 run 窗口
+            if run.is_terminal and not (fr and to):
+                snap = diagnosis_svc.get_snapshot(run, only)
+                if snap and snap.servermap:
+                    return Response(snap.servermap)
+            return Response(diagnosis_svc.build_servermap(run, only, inbound, outbound, fr, to))
+
+        if not pp.is_enabled():
+            return Response({
+                'enabled': False, 'nodes': [], 'links': [], 'skipped': [],
+                'window': None, 'pinpoint_base_url': '',
+            })
+        if not run.started_at:
+            return Response({
+                'enabled': True, 'nodes': [], 'links': [], 'skipped': [],
+                'window': None, 'pinpoint_base_url': pp.base_url(),
+            })
+        from_ms = int(run.started_at.timestamp() * 1000)
+        end = run.finished_at or timezone.now()
+        to_ms = int(end.timestamp() * 1000)
+
+        service_names = list(run.task.service_names or [])
+        # ?service=X → 只查这一个（服务诊断页用，深度2）；缺省遍历全部
+        only = (request.query_params.get('service') or '').strip()
+        if only:
+            service_names = [only] if only in service_names else [only]
+        try:
+            inbound = max(1, min(4, int(request.query_params.get('inbound', 2))))
+            outbound = max(1, min(4, int(request.query_params.get('outbound', 2))))
+        except (TypeError, ValueError):
+            inbound = outbound = 2
+
+        app_types = pp.list_applications()  # {app: serviceType}
+        svc_map = {
+            s.name: (s.pinpoint_app or s.name)
+            for s in Service.objects.filter(name__in=service_names)
+        }
+
+        # 解析每个服务 → (service, app, serviceType)；查不到 type 的记 skipped
+        targets, skipped = [], []
+        for sname in service_names:
+            app = svc_map.get(sname, sname)
+            st = app_types.get(app)
+            if not st:
+                skipped.append({'service': sname, 'reason': '不是 Pinpoint 应用（需在 admin 配 pinpoint_app）'})
+                continue
+            targets.append((sname, app, st))
+
+        # 并行查 serverMap（每个 ≤40s，并行后总耗时 ≈ 最慢一个）
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        def _query(f_ms: int, t_ms: int):
+            nd: dict[str, dict] = {}
+            lk: dict[tuple, dict] = {}
+            if not targets:
+                return nd, lk
+            with ThreadPoolExecutor(max_workers=min(6, len(targets))) as ex:
+                for m in ex.map(lambda t: pp.query_server_map(
+                        t[1], t[2], f_ms, t_ms, inbound=inbound, outbound=outbound), targets):
+                    for n in m['nodes']:
+                        nd.setdefault(n['key'], n)
+                    for e in m['links']:
+                        lk.setdefault((e['from'], e['to']), e)
+            return nd, lk
+
+        nodes, links = _query(from_ms, to_ms)
+        win = {'from': from_ms, 'to': to_ms}
+        fallback = False
+        # run 窗口拿不到拓扑（≤1 节点、0 链路）→ 退到「近 30 分钟」给一张参考拓扑。
+        # 适用：压测打的是 mock 目标 / 历史窗口 Pinpoint 无数据。
+        if len(nodes) <= 1 and not links:
+            now_ms = int(timezone.now().timestamp() * 1000)
+            rf, rt = now_ms - 30 * 60 * 1000, now_ms
+            n2, l2 = _query(rf, rt)
+            if len(n2) > 1 or l2:
+                nodes, links, win, fallback = n2, l2, {'from': rf, 'to': rt}, True
+
+        return Response({
+            'enabled': True,
+            'nodes': list(nodes.values()),
+            'links': list(links.values()),
+            'skipped': skipped,
+            'window': win,
+            'fallback_recent': fallback,
+            'pinpoint_base_url': pp.base_url(),
+        })
+
+    @action(detail=True, methods=['get'], url_path='pinpoint-diagnosis')
+    def pinpoint_diagnosis(self, request, run_id=None):
+        """单服务诊断聚合：run 时段内某服务的 Pinpoint 事务/异常/慢URL/活跃线程/连接池/
+        agent 列表，并行拉一次返回。Prometheus Pod 时序由前端单独走 prometheus-sources。
+
+        GET /runs/:id/pinpoint-diagnosis/?service=zhihuishu-course
+        非 Pinpoint 应用 / 未启用 → available/enabled=False，前端显占位（Pod 时序仍可看）。
+        """
+        from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+        run = self.get_object()
+        service = (request.query_params.get('service') or '').strip()
+        brief = request.query_params.get('brief') in ('1', 'true')
+        fr, to = _parse_win(request)   # 前端预设时间窗（ms）；空=用 run 窗口
+
+        # 终态 + 无自定义窗口：优先读快照（DB 秒开）；brief 从全量快照里抽事务概览
+        if run.is_terminal and not (fr and to):
+            snap = diagnosis_svc.get_snapshot(run, service)
+            if snap and snap.diagnosis:
+                full = snap.diagnosis
+                return Response(diagnosis_svc.brief_from_full(full, service) if brief else full)
+
+        # 进行中 / 无快照 / 指定了时间窗 → 实时拉
+        return Response(diagnosis_svc.build_diagnosis(run, service, brief, fr, to))
+
+    @action(detail=True, methods=['get'], url_path='service-metrics')
+    def service_metrics(self, request, run_id=None):
+        """某服务 run 窗口的 Pod 时序（Prometheus）。终态优先读快照秒开，无则实时拉。
+        GET /runs/:id/service-metrics/?service=X。前端「本次压测」用这个，「近 N 分」预设走实时。
+        """
+        from .services import diagnosis as diagnosis_svc  # noqa: PLC0415
+        run = self.get_object()
+        service = (request.query_params.get('service') or '').strip()
+        if not service:
+            return Response({'detail': '缺少 service 参数'}, status=status.HTTP_400_BAD_REQUEST)
+        if run.is_terminal:
+            snap = diagnosis_svc.get_snapshot(run, service)
+            if snap and snap.prometheus:
+                return Response(snap.prometheus)
+        return Response(diagnosis_svc.build_prometheus(run, service))
 
 
 # ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────

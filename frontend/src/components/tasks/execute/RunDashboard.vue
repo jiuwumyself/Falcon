@@ -1,16 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  Activity, BarChart3, Server, GitBranch, Cpu, FileText, FileSearch,
+  Activity, BarChart3, Stethoscope, FileText, FileSearch,
 } from 'lucide-vue-next'
 import type { Environment, RunMetrics, Task, TaskRun } from '@/types/task'
 import RunPlanSummary from './RunPlanSummary.vue'
 import RunHistoryDropdown from './RunHistoryDropdown.vue'
 import TrendsTab from './dashboard/TrendsTab.vue'
 import SamplersTab from './dashboard/SamplersTab.vue'
-import ServicePanelsTab from './dashboard/ServicePanelsTab.vue'
-import TracePanelsTab from './dashboard/TracePanelsTab.vue'
-import JvmTab from './dashboard/JvmTab.vue'
+import DiagnosisTab from './dashboard/DiagnosisTab.vue'
 import RunLogTab from './dashboard/RunLogTab.vue'
 import ReportTab from './dashboard/ReportTab.vue'
 
@@ -28,17 +26,14 @@ defineEmits<{
   (e: 'run-deleted', runId: string): void
 }>()
 
-type TabId = 'trends' | 'samplers' | 'service' | 'trace' | 'jvm' | 'runlog' | 'report'
+type TabId = 'trends' | 'samplers' | 'diagnosis' | 'runlog' | 'report'
 
 const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'trends', label: '指标趋势', icon: Activity },
+  // 服务面板 + 链路面板 + JVM 合并为「服务诊断」单页（拓扑+Pod时序+Pinpoint事务/异常/慢URL/线程/连接池）
+  { id: 'diagnosis', label: '服务诊断', icon: Stethoscope },
   // 「错误明细」已并入「接口统计」（donut 错误构成 + 展开行 code+message+count）
   { id: 'samplers', label: '接口统计', icon: BarChart3 },
-  // 「运行时间轴」并入 RunControlBar 进度条（phase 染色 + 事件锚点），tab 删除
-  { id: 'service', label: '服务面板', icon: Server },
-  { id: 'trace', label: '链路面板', icon: GitBranch },
-  // G4：JVM tab v1（plan §4.5），位于"链路面板"之后；dump 按钮 disabled 等 Arthas
-  { id: 'jvm', label: 'JVM', icon: Cpu },
   { id: 'runlog', label: '运行日志', icon: FileText },
   { id: 'report', label: '查看报告', icon: FileSearch },
 ]
@@ -117,12 +112,8 @@ const isTerminal = computed(() =>
                    :run-id="run?.run_id || null"
                    :is-terminal="isTerminal"
                    :is-dark="isDark" />
-      <ServicePanelsTab v-else-if="active === 'service'"
-                        :task="task" :run="run" :is-dark="isDark" />
-      <TracePanelsTab v-else-if="active === 'trace'"
-                      :task="task" :run="run" :is-dark="isDark" />
-      <JvmTab v-else-if="active === 'jvm'"
-              :task="task" :run="run" :is-dark="isDark" />
+      <DiagnosisTab v-else-if="active === 'diagnosis'"
+                    :task="task" :run="run" :is-dark="isDark" />
       <RunLogTab v-else-if="active === 'runlog'"
                  :run="run"
                  :is-terminal="isTerminal"

@@ -288,6 +288,80 @@ export interface PinpointTrace {
   created_at: string
 }
 
+// § serverMap 服务拓扑（链路面板拓扑图 + 依赖表，按 run 时段从 Pinpoint 拉）
+export interface ServerMapNode {
+  key: string            // "appName^serviceType"，links 的 from/to 引用此值
+  name: string           // applicationName
+  service_type: string   // SPRING_BOOT / TOMCAT / MYSQL / REDIS / UNKNOWN ...
+  total_count: number
+  error_count: number
+  slow_count: number
+  error_rate: number     // %
+}
+export interface ServerMapLink {
+  from: string           // 主调节点 key
+  to: string             // 被调节点 key
+  total_count: number
+  error_count: number
+  slow_count: number
+  error_rate: number     // %
+  avg_ms: number
+  max_ms: number
+}
+export interface ServerMapResponse {
+  enabled: boolean
+  nodes: ServerMapNode[]
+  links: ServerMapLink[]
+  skipped: { service: string; reason: string }[]
+  window: { from: number; to: number } | null
+  pinpoint_base_url: string
+  fallback_recent?: boolean    // run 窗口无拓扑 → 退到近30min参考拓扑
+}
+
+// § 服务诊断单页（合并 服务面板+链路面板+JVM）：Pinpoint 聚合数据
+export interface InspectorSeries {
+  title: string
+  avg: number
+  max: number
+  last: number
+  series: [number, number][]   // [[ts_ms, value], ...]
+}
+export interface DiagnosisResponse {
+  enabled: boolean
+  available: boolean            // false = 该服务非 Pinpoint 应用
+  service: string
+  pinpoint_app?: string
+  reason?: string
+  window: { from: number; to: number } | null
+  pinpoint_base_url: string
+  transactions?: {
+    tps: number
+    total: number
+    ok_count: number
+    error_count: number
+    error_rate: number
+    avg_ms: number
+    max_ms: number
+    histogram: { label: string; count: number }[]
+    pods: string[]
+    agents: { agent_id: string; agent_name: string; pod: string }[]
+  }
+  active_threads?: InspectorSeries
+  datasource?: InspectorSeries
+  tps_series?: InspectorSeries
+  jvm?: {                          // Pinpoint inspector JVM（应用级；字节单位）
+    heap?: InspectorSeries
+    non_heap?: InspectorSeries
+    threads?: InspectorSeries
+    loaded_class?: InspectorSeries
+    gc?: { old_count: number; old_time_ms: number; series: [number, number][] }  // Old GC（agent 级聚合）
+  }
+  uri_stat?: { uri: string; avg_ms: number; max_ms: number; count: number; failure_count: number }[]
+  exceptions?: { exception_class: string; count: number }[]
+  agents?: { agent_id: string; agent_name: string; pod?: string; hostname?: string }[]
+  pods?: string[]
+}
+
 // Step 3 实时指标 / 归档查询返回结构（GET /runs/:run_id/metrics?since=...）
 export type SeriesPoint = [number, number]   // [ms_epoch, value]
 
