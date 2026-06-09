@@ -128,6 +128,7 @@ def build_diagnosis(run, service: str, brief: bool = False,
         'tps_series': lambda: pp.query_inspector_chart(app, 'transaction', from_ms, to_ms),
         'uri_stat': lambda: pp.query_slow_uris(app, from_ms, to_ms),
         'exceptions': lambda: pp.query_error_groups(app, from_ms, to_ms),
+        'error_uris': lambda: pp.query_error_uris(app, from_ms, to_ms),
         'agents': lambda: pp.query_agent_list(app, from_ms, to_ms),
         # JVM（应用级 inspector；CPU 走 Pod 时序、GC 这版应用级拿不到）
         'jvm_heap': lambda: pp.query_inspector_chart(app, 'heap', from_ms, to_ms),
@@ -154,6 +155,7 @@ def build_diagnosis(run, service: str, brief: bool = False,
         'tps_series': out.get('tps_series') or {},
         'uri_stat': out.get('uri_stat') or [],
         'exceptions': out.get('exceptions') or [],
+        'error_uris': out.get('error_uris') or [],
         'agents': (tx.get('agents') if tx.get('agents') else (out.get('agents') or [])),
         'pods': tx.get('pods') or [],
         'jvm': {
@@ -164,23 +166,36 @@ def build_diagnosis(run, service: str, brief: bool = False,
         },
     })
 
-    # Old GC：应用级拿不到，从 agent 级 heap 的 gcOldCount/gcOldTime 跨 agent 聚合
-    agents_for_gc = [a for a in (tx.get('agents') or []) if a.get('agent_id')][:12]
+    # 单 pod JVM（堆 + Old GC）：agent 级 heap 一次查到，既给 by_pod（点单个 pod 看），
+    # 又跨 agent 聚合出应用级 Old GC（应用级 inspector 没 GC 字段）。
+    agents_for_jvm = [a for a in (tx.get('agents') or []) if a.get('agent_id')][:12]
     gc_total_c = gc_total_t = 0
     gc_series_map: dict[int, float] = {}
-    if agents_for_gc:
-        with ThreadPoolExecutor(max_workers=min(8, len(agents_for_gc))) as ex:
-            for g in ex.map(lambda a: pp.query_agent_gc(app, a['agent_id'], from_ms, to_ms),
-                            agents_for_gc):
-                gc_total_c += g.get('old_count', 0)
-                gc_total_t += g.get('old_time_ms', 0)
-                for ts_v, c in (g.get('series') or []):
-                    gc_series_map[ts_v] = gc_series_map.get(ts_v, 0) + c
+    by_pod: list[dict[str, Any]] = []
+    if agents_for_jvm:
+        with ThreadPoolExecutor(max_workers=min(8, len(agents_for_jvm))) as ex:
+            pairs = list(ex.map(
+                lambda a: (a, pp.query_agent_jvm(app, a['agent_id'], from_ms, to_ms)),
+                agents_for_jvm))
+        for a, j in pairs:
+            g = j.get('gc') or {}
+            gc_total_c += g.get('old_count', 0)
+            gc_total_t += g.get('old_time_ms', 0)
+            for ts_v, c in (g.get('series') or []):
+                gc_series_map[ts_v] = gc_series_map.get(ts_v, 0) + c
+            by_pod.append({
+                'pod': a.get('pod') or a.get('agent_name') or a['agent_id'],
+                'agent_id': a['agent_id'],
+                'agent_name': a.get('agent_name') or a['agent_id'],
+                'heap': j.get('heap') or {},
+                'gc': g,
+            })
     base['jvm']['gc'] = {
         'old_count': gc_total_c,
         'old_time_ms': gc_total_t,
         'series': sorted([k, v] for k, v in gc_series_map.items()),
     }
+    base['jvm']['by_pod'] = by_pod
     return base
 
 

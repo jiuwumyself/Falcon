@@ -18,6 +18,7 @@ const histColor = (label: string) =>
     : label === '1~3s' ? '#97c459' : '#1d9e75'
 
 const exceptions = computed(() => props.data?.exceptions || [])
+const errorUris = computed(() => props.data?.error_uris || [])
 const uris = computed(() => props.data?.uri_stat || [])
 const at = computed(() => props.data?.active_threads)
 const ds = computed(() => props.data?.datasource)
@@ -28,14 +29,14 @@ const serverMapUrl = computed(() => props.data?.pinpoint_base_url || '')
 const stripPkg = (s: string) => s.split('.').pop() || s
 const fmtMs = (v: number) => (v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(0) + 'ms')
 
-// ── JVM（Pinpoint inspector，应用级）──
+// ── JVM（Pinpoint inspector）：默认应用级；可在右上角切到单个 pod 看它的堆 / Old GC ──
 const jvm = computed(() => props.data?.jvm)
-const heap = computed(() => jvm.value?.heap)
 const nonHeap = computed(() => jvm.value?.non_heap)
 const threads = computed(() => jvm.value?.threads)
 const loadedClass = computed(() => jvm.value?.loaded_class)
-const gc = computed(() => jvm.value?.gc)
-const hasJvm = computed(() => !!(heap.value?.series?.length || threads.value?.last || loadedClass.value?.last))
+const byPod = computed(() => jvm.value?.by_pod || [])
+const hasJvm = computed(() =>
+  !!(jvm.value?.heap?.series?.length || threads.value?.last || loadedClass.value?.last || byPod.value.length))
 const fmtBytes = (v: number) => {
   if (v >= 1073741824) return (v / 1073741824).toFixed(2) + 'G'
   if (v >= 1048576) return (v / 1048576).toFixed(0) + 'M'
@@ -43,10 +44,20 @@ const fmtBytes = (v: number) => {
   return v.toFixed(0) + 'B'
 }
 const fmtNum = (v: number) => (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0))
+
+const selPod = ref('')   // '' = 全部（应用级）；否则 agent_id
+const podOpt = computed(() => byPod.value.find((p) => p.agent_id === selPod.value))
+// 堆 / Old GC 数据源：全部=应用级聚合，否则=选中 pod（agent 级）
+const actHeap = computed(() => (selPod.value ? podOpt.value?.heap : jvm.value?.heap))
+const actGc = computed(() => (selPod.value ? podOpt.value?.gc : jvm.value?.gc))
+const podShort = (p: { pod: string; agent_name: string }) => {
+  const parts = (p.pod || '').split('-')
+  return parts.length > 2 ? parts[parts.length - 1] : (p.pod || p.agent_name)
+}
+
 const HEAP_W = 320, HEAP_H = 46
-// y 轴自适应到 heap 自己的 [min,max]（带 10% padding）→ 锯齿/涨落看得清，而非贴顶平直
 const heapRange = computed<[number, number]>(() => {
-  const s = heap.value?.series
+  const s = actHeap.value?.series
   if (!s || s.length < 2) return [0, 1]
   const ys = s.map((p) => p[1])
   let lo = Math.min(...ys), hi = Math.max(...ys)
@@ -55,7 +66,7 @@ const heapRange = computed<[number, number]>(() => {
   return [lo - pad, hi + pad]
 })
 const heapPath = computed(() => {
-  const s = heap.value?.series
+  const s = actHeap.value?.series
   if (!s || s.length < 2) return ''
   const xs = s.map((p) => p[0])
   const xmin = Math.min(...xs), xr = (Math.max(...xs) - xmin) || 1
@@ -95,12 +106,14 @@ const heapPath = computed(() => {
         <p v-else class="text-[11px] py-3 text-center" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">无事务数据</p>
       </div>
 
-      <!-- Top Exceptions -->
+      <!-- 错误：优先失败接口(uriStat.failureCount，普遍有数据)；异常堆栈(errors 模块)作补充 -->
       <div class="rounded-xl p-3" :style="card">
         <div class="flex items-center gap-2 mb-2">
           <AlertTriangle :size="13" :color="'#a32d2d'" />
-          <span class="text-[13px] font-medium" :style="{ color: d('rgba(0,0,0,0.7)', 'rgba(255,255,255,0.75)') }">Top Exceptions</span>
+          <span class="text-[13px] font-medium" :style="{ color: d('rgba(0,0,0,0.7)', 'rgba(255,255,255,0.75)') }">{{ exceptions.length ? 'Top Exceptions' : '失败接口 · top ' + errorUris.length }}</span>
+          <span v-if="!exceptions.length" class="text-[10px] px-1.5 py-0.5 rounded-md" :style="{ color: '#0c447c', background: d('#e6f1fb', 'rgba(59,130,246,0.14)') }">UriStat</span>
         </div>
+        <!-- 1) 有异常堆栈（errors 模块）→ 显示异常类 -->
         <div v-if="exceptions.length" class="flex flex-col gap-2">
           <div v-for="(e, i) in exceptions" :key="i" class="flex items-center gap-2">
             <AlertTriangle :size="13" :color="i === 0 ? '#ef4444' : '#f59e0b'" />
@@ -108,7 +121,16 @@ const heapPath = computed(() => {
             <span class="text-[12px] font-medium tabular-nums" :style="{ color: '#ef4444' }">×{{ e.count }}</span>
           </div>
         </div>
-        <p v-else class="text-[11px] py-5 text-center" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">本时段无异常 🎉</p>
+        <!-- 2) 否则用失败接口（HTTP 5xx/超时，uriStat.failureCount）-->
+        <div v-else-if="errorUris.length" class="flex flex-col gap-1.5">
+          <div v-for="(u, i) in errorUris" :key="i" class="flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background:#ef4444" />
+            <span class="flex-1 text-[12px] truncate" :title="u.uri" :style="{ color: d('rgba(0,0,0,0.8)', 'rgba(255,255,255,0.85)') }">{{ u.uri }}</span>
+            <span class="text-[12px] font-medium w-12 text-right tabular-nums" style="color:#ef4444">×{{ u.fail_count.toLocaleString() }}</span>
+            <span class="text-[11px] w-12 text-right tabular-nums" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ u.fail_rate }}%</span>
+          </div>
+        </div>
+        <p v-else class="text-[11px] py-5 text-center" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">本时段无失败请求 🎉</p>
       </div>
     </div>
 
@@ -154,30 +176,39 @@ const heapPath = computed(() => {
       </div>
     </div>
 
-    <!-- JVM（Pinpoint inspector：堆内存 + 线程 + 类加载；CPU 见 Pod 时序，GC 这版应用级无） -->
+    <!-- JVM（Pinpoint inspector）：默认应用级；右上角下拉可切到单个 pod 看它的堆 / Old GC -->
     <div v-if="hasJvm" class="rounded-xl p-3" :style="card">
-      <div class="flex items-center gap-2 mb-2">
+      <div class="flex items-center gap-2 mb-2 flex-wrap">
         <MemoryStick :size="13" :color="'#b45309'" />
         <span class="text-[13px] font-medium" :style="{ color: d('rgba(0,0,0,0.7)', 'rgba(255,255,255,0.75)') }">JVM</span>
         <span class="text-[10px] px-1.5 py-0.5 rounded-md" :style="{ color: '#0c447c', background: d('#e6f1fb', 'rgba(59,130,246,0.14)') }">Pinpoint</span>
+        <span class="flex-1" />
+        <!-- pod 选择器：全部（应用级）/ 点单个 pod -->
+        <select v-if="byPod.length" v-model="selPod"
+                class="text-[11px] px-2 py-1 rounded-md outline-none cursor-pointer max-w-[180px]"
+                :style="{ background: d('rgba(0,0,0,0.04)', 'rgba(255,255,255,0.06)'), color: d('#1a1a2e', '#fff'), border: `1px solid ${d('rgba(0,0,0,0.08)', 'rgba(255,255,255,0.1)')}` }">
+          <option value="" :style="{ background: d('#fff', '#1a2330') }">全部 · 应用级（{{ byPod.length }} pod）</option>
+          <option v-for="p in byPod" :key="p.agent_id" :value="p.agent_id" :style="{ background: d('#fff', '#1a2330') }">{{ podShort(p) }}</option>
+        </select>
       </div>
       <div class="flex gap-6 mb-2 flex-wrap">
-        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">堆内存峰值</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ heap ? fmtBytes(heap.max) : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">均 {{ heap ? fmtBytes(heap.avg) : '—' }}</span></p></div>
-        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">Non-Heap</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ nonHeap ? fmtBytes(nonHeap.max) : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">峰</span></p></div>
-        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">线程数</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ threads ? threads.max : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">峰 · 均 {{ threads ? threads.avg : '—' }}</span></p></div>
-        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">类加载</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ loadedClass ? fmtNum(loadedClass.last) : '—' }}</p></div>
-        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">Old GC</p><p class="text-[18px] font-medium m-0" :style="{ color: gc && gc.old_count > 0 ? '#f59e0b' : d('#1a1a2e', '#fff') }">{{ gc ? gc.old_count : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ gc ? '次 · ' + gc.old_time_ms + 'ms' : '' }}</span></p></div>
+        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">{{ selPod ? 'Pod 堆峰值' : '堆内存峰值' }}</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ actHeap ? fmtBytes(actHeap.max) : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">均 {{ actHeap ? fmtBytes(actHeap.avg) : '—' }}</span></p></div>
+        <div v-if="!selPod"><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">Non-Heap</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ nonHeap ? fmtBytes(nonHeap.max) : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">峰</span></p></div>
+        <div v-if="!selPod"><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">线程数</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ threads ? threads.max : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">峰 · 均 {{ threads ? threads.avg : '—' }}</span></p></div>
+        <div v-if="!selPod"><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">类加载</p><p class="text-[18px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">{{ loadedClass ? fmtNum(loadedClass.last) : '—' }}</p></div>
+        <div><p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">Old GC{{ selPod ? '（本 pod）' : '' }}</p><p class="text-[18px] font-medium m-0" :style="{ color: actGc && actGc.old_count > 0 ? '#f59e0b' : d('#1a1a2e', '#fff') }">{{ actGc ? actGc.old_count : '—' }} <span class="text-[11px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ actGc ? '次 · ' + actGc.old_time_ms + 'ms' : '' }}</span></p></div>
       </div>
       <div v-if="heapPath">
         <div class="relative">
           <span class="absolute left-0 top-0 text-[9px] pointer-events-none" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[1]) }}</span>
           <span class="absolute left-0 bottom-0 text-[9px] pointer-events-none" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">{{ fmtBytes(heapRange[0]) }}</span>
-          <svg :viewBox="`0 0 ${HEAP_W} ${HEAP_H}`" preserveAspectRatio="none" class="w-full h-[52px] block">
+          <svg viewBox="0 0 320 46" preserveAspectRatio="none" class="w-full h-[52px] block">
             <path :d="heapPath" fill="none" stroke="#f59e0b" stroke-width="1.6" vector-effect="non-scaling-stroke" />
           </svg>
         </div>
-        <p class="text-[10px] mt-1" :style="{ color: d('rgba(0,0,0,0.45)', 'rgba(255,255,255,0.45)') }">堆内存使用趋势（纵轴自适应区间，看 GC 涨落）</p>
+        <p class="text-[10px] mt-1" :style="{ color: d('rgba(0,0,0,0.45)', 'rgba(255,255,255,0.45)') }">{{ selPod && podOpt ? podShort(podOpt) + ' · ' : '' }}堆内存使用趋势（纵轴自适应区间，看 GC 涨落）</p>
       </div>
+      <p v-else class="text-[11px] py-2" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">该{{ selPod ? ' pod ' : '' }}此时段无堆时序点</p>
     </div>
 
     <!-- Arthas 入口（占位） -->

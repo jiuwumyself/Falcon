@@ -41,8 +41,8 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
 
 const active = ref<TabId>('trends')
 
-// 分享视图只露这三个 tab
-const SHARE_TABS: TabId[] = ['trends', 'diagnosis', 'report']
+// 分享视图露：指标趋势 / 服务诊断 / 接口统计 / 查看报告（顺序随 TABS，报告在最后）
+const SHARE_TABS: TabId[] = ['trends', 'diagnosis', 'samplers', 'report']
 const visibleTabs = computed(() =>
   props.shareMode ? TABS.filter((t) => SHARE_TABS.includes(t.id)) : TABS)
 

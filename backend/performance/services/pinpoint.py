@@ -417,36 +417,52 @@ def query_inspector_chart(application: str, metric_id: str,
     }
 
 
-def query_agent_gc(application: str, agent_id: str,
-                   from_ts: int, to_ts: int) -> dict[str, Any]:
-    """agent 级 heap 指标里带 gcOldCount / gcOldTime（应用级 inspector 没有这俩字段，
-    所以 GC 只能在 agent 级拿）→ 区间内 Old GC 次数 / 耗时 + 稀疏时序（只在发生 GC 的点有值）。
+def query_agent_jvm(application: str, agent_id: str,
+                    from_ts: int, to_ts: int) -> dict[str, Any]:
+    """agent 级 heap 指标 → 单个 agent/pod 的 JVM：堆使用时序(heapUsed) + Old GC
+    (gcOldCount/gcOldTime；应用级 inspector 没这俩字段，GC/单 pod 只能 agent 级拿)。
     gcOldCount 按桶 delta 累加（Pinpoint agent stat 每采样间隔上报本区间内的 GC 增量）。
     """
+    empty = {'heap': {'series': [], 'max': 0, 'avg': 0, 'last': 0},
+             'gc': {'old_count': 0, 'old_time_ms': 0, 'series': []}}
     d = _get_json(
         f'inspector/agentStat/chart?applicationName={application}&agentId={agent_id}'
         f'&metricDefinitionId=heap&from={from_ts}&to={to_ts}',
         timeout=20,
     )
-    empty = {'old_count': 0, 'old_time_ms': 0, 'series': []}
     if not isinstance(d, dict):
         return empty
     ts = d.get('timestamp') or []
     by_field = {mv.get('fieldName'): (mv.get('valueList') or [])
                 for mv in (d.get('metricValues') or []) if isinstance(mv, dict)}
+    # 堆使用时序
+    used = by_field.get('heapUsed') or []
+    hseries: list[list] = []
+    hvals: list[float] = []
+    for i in range(min(len(ts), len(used))):
+        v = used[i]
+        if isinstance(v, (int, float)) and v >= 0:
+            hseries.append([ts[i], v])
+            hvals.append(v)
+    heap = {'series': hseries,
+            'max': int(max(hvals)) if hvals else 0,
+            'avg': int(sum(hvals) / len(hvals)) if hvals else 0,
+            'last': int(hvals[-1]) if hvals else 0}
+    # Old GC
     counts = by_field.get('gcOldCount') or []
     times = by_field.get('gcOldTime') or []
     total_c = total_t = 0.0
-    series: list[list] = []
+    gseries: list[list] = []
     for i in range(min(len(ts), len(counts))):
         c = counts[i]
         if isinstance(c, (int, float)) and c > 0:
             total_c += c
-            series.append([ts[i], c])
+            gseries.append([ts[i], c])
         t = times[i] if i < len(times) else None
         if isinstance(t, (int, float)) and t > 0:
             total_t += t
-    return {'old_count': int(total_c), 'old_time_ms': int(total_t), 'series': series}
+    gc = {'old_count': int(total_c), 'old_time_ms': int(total_t), 'series': gseries}
+    return {'heap': heap, 'gc': gc}
 
 
 def query_slow_uris(application: str, from_ts: int, to_ts: int,
@@ -472,6 +488,42 @@ def query_slow_uris(application: str, from_ts: int, to_ts: int,
             continue
     # API 的 count 参数有时不生效，本地按 orderby（默认 avgTimeMs desc）取前 N
     out.sort(key=lambda x: x['avg_ms'], reverse=True)
+    return out[:count]
+
+
+def query_error_uris(application: str, from_ts: int, to_ts: int,
+                     count: int = 8) -> list[dict[str, Any]]:
+    """失败接口 top-N（uriStat 按 failureCount 排）→
+    [{uri, fail_count, count, fail_rate, avg_ms, max_ms}]，只留 failureCount>0。
+
+    Pinpoint「异常分析」模块（errors/errorList/groupBy）很多服务没上报异常堆栈 →
+    Top Exceptions 常年空；但失败事务（HTTP 5xx/超时）的真实落点在 uriStat.failureCount，
+    这个普遍有数据，更能反映「哪些接口在报错」。
+    """
+    d = _get_json(
+        f'uriStat/summary?applicationName={application}&from={from_ts}&to={to_ts}'
+        f'&orderby=failureCount&isDesc=true&count={count * 3}',
+    )
+    if not isinstance(d, list):
+        return []
+    out = []
+    for u in d:
+        try:
+            fc = int(float(u.get('failureCount') or 0))
+            if fc <= 0:
+                continue
+            tot = int(float(u.get('totalCount') or 0))
+            out.append({
+                'uri': u.get('uri') or '',
+                'fail_count': fc,
+                'count': tot,
+                'fail_rate': round(fc / tot * 100, 2) if tot else 0.0,
+                'avg_ms': round(float(u.get('avgTimeMs') or 0), 1),
+                'max_ms': round(float(u.get('maxTimeMs') or 0), 1),
+            })
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda x: x['fail_count'], reverse=True)
     return out[:count]
 
 

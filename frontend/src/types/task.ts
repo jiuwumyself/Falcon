@@ -355,9 +355,17 @@ export interface DiagnosisResponse {
     threads?: InspectorSeries
     loaded_class?: InspectorSeries
     gc?: { old_count: number; old_time_ms: number; series: [number, number][] }  // Old GC（agent 级聚合）
+    by_pod?: {                     // 单 pod/agent 的 JVM（堆 + GC），点单个 pod 查看
+      pod: string
+      agent_id: string
+      agent_name: string
+      heap: { series: [number, number][]; max: number; avg: number; last: number }
+      gc: { old_count: number; old_time_ms: number; series: [number, number][] }
+    }[]
   }
   uri_stat?: { uri: string; avg_ms: number; max_ms: number; count: number; failure_count: number }[]
   exceptions?: { exception_class: string; count: number }[]
+  error_uris?: { uri: string; fail_count: number; count: number; fail_rate: number; avg_ms: number; max_ms: number }[]
   agents?: { agent_id: string; agent_name: string; pod?: string; hostname?: string }[]
   pods?: string[]
 }
