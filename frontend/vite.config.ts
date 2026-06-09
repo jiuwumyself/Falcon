@@ -21,6 +21,12 @@ export default defineConfig({
         proxyTimeout: 120_000,
         timeout: 120_000,
       },
+      // Arthas Pod 终端：WS 转发到本地代理（scripts/arthas_ws_proxy.py，:8011）
+      '/arthas-term': {
+        target: 'ws://localhost:8011',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

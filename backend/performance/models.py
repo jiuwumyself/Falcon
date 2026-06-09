@@ -737,6 +737,28 @@ class RunServiceDiagnosis(models.Model):
         return f'{self.run.run_id}/{self.service}'
 
 
+class RunArthasCapture(models.Model):
+    """Step 3 Arthas 诊断输出留存：用户在 Arthas 里跑某命令（dashboard/thread/jvm/trace…）
+    拿到的关键问题数据，按 run + service 存下来，供 Step 4 分析进一步确诊。
+
+    网页终端接入前的过渡用法：用户在脚本终端里跑 arthas，把关键输出粘贴进来保存；
+    接入后由前端自动抓取命令输出落库。与 run cascade（run 删则连带删）。
+    """
+    run = models.ForeignKey(TaskRun, on_delete=models.CASCADE, related_name='arthas_captures')
+    service = models.CharField(max_length=200, blank=True)
+    pod = models.CharField(max_length=200, blank=True)       # 哪个 pod/agent 抓的
+    command = models.CharField(max_length=300)               # 如 dashboard / thread -n 3 / jvm
+    output = models.TextField()                              # arthas 输出文本
+    note = models.CharField(max_length=300, blank=True)      # 备注 / 自动标的问题（如「Full GC 频繁」）
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+
+    def __str__(self) -> str:
+        return f'{self.run.run_id}/{self.service}/{self.command}'
+
+
 class PrometheusDataSource(models.Model):
     """Prometheus 数据源配置（多条记录，每条对应一个集群 / 命名空间）。
 

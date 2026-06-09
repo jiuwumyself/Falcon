@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // Pinpoint 诊断区块：Transactions / Top Exceptions / 慢URL / Active Threads / DataSource / Arthas。
 import { computed, ref } from 'vue'
-import { Activity, AlertTriangle, Timer, Cpu, Database, Terminal, ExternalLink, MemoryStick } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Timer, Cpu, Database, MemoryStick } from 'lucide-vue-next'
+import ArthasPanel from './ArthasPanel.vue'
 import type { DiagnosisResponse } from '@/types/task'
 
-const props = defineProps<{ data: DiagnosisResponse | null; isDark: boolean }>()
+const props = defineProps<{ data: DiagnosisResponse | null; runId?: string | null; isDark: boolean }>()
 const d = (l: string, dk: string) => (props.isDark ? dk : l)
 const card = computed(() => ({
   background: props.isDark ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.6)',
@@ -22,10 +23,6 @@ const errorUris = computed(() => props.data?.error_uris || [])
 const uris = computed(() => props.data?.uri_stat || [])
 const at = computed(() => props.data?.active_threads)
 const ds = computed(() => props.data?.datasource)
-const agents = computed(() => props.data?.agents || [])
-const selectedAgent = ref('')
-
-const serverMapUrl = computed(() => props.data?.pinpoint_base_url || '')
 const stripPkg = (s: string) => s.split('.').pop() || s
 const fmtMs = (v: number) => (v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(0) + 'ms')
 
@@ -211,27 +208,7 @@ const heapPath = computed(() => {
       <p v-else class="text-[11px] py-2" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">该{{ selPod ? ' pod ' : '' }}此时段无堆时序点</p>
     </div>
 
-    <!-- Arthas 入口（占位） -->
-    <div class="flex items-center gap-3 flex-wrap p-3 rounded-xl" :style="{ background: d('rgba(0,0,0,0.03)', 'rgba(255,255,255,0.03)') }">
-      <span class="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0" style="background:#0f6e56">
-        <Terminal :size="15" color="#fff" />
-      </span>
-      <div class="flex-1 min-w-[120px]">
-        <p class="text-[13px] font-medium m-0" :style="{ color: d('#1a1a2e', '#fff') }">Arthas · 未连接</p>
-        <p class="text-[11px] m-0" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">attach 会暂停目标 JVM 数百毫秒，按需开启（tunnel 待接入）</p>
-      </div>
-      <select v-model="selectedAgent" class="text-[12px] max-w-[200px] rounded-md px-2 py-1"
-              :style="{ background: d('rgba(255,255,255,0.7)', 'rgba(255,255,255,0.06)'), color: d('#1a1a2e', '#eee'), border: `1px solid ${d('rgba(0,0,0,0.1)', 'rgba(255,255,255,0.1)')}` }">
-        <option value="">{{ agents.length ? '选择 agent' : '无可用 agent' }}</option>
-        <option v-for="a in agents" :key="a.agent_id" :value="a.agent_id">{{ a.agent_name }}</option>
-      </select>
-      <button disabled class="text-[12px] px-3 py-1 rounded-md inline-flex items-center gap-1 opacity-50 cursor-not-allowed"
-              :style="{ border: `1px solid ${d('rgba(0,0,0,0.15)', 'rgba(255,255,255,0.15)')}`, color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }"
-              title="需接入 Arthas tunnel（后续立项）">
-        <Terminal :size="12" />连接 Arthas
-      </button>
-      <a v-if="serverMapUrl" :href="serverMapUrl" target="_blank" rel="noopener"
-         class="text-[11px] text-blue-500 hover:underline inline-flex items-center gap-0.5">Pinpoint <ExternalLink :size="11" /></a>
-    </div>
+    <!-- Arthas 智能诊断：命令速查 + 按诊断数据闪烁推荐 + 记录输出存库（供 Step 4）-->
+    <ArthasPanel :data="data" :run-id="runId || null" :service="data?.service || ''" :is-dark="isDark" />
   </div>
 </template>

@@ -188,7 +188,7 @@ const sparkPath = computed(() => {
       <!-- Pod 时序 -->
       <PodTimeseriesPanel :data="promData" :loading="promLoading" :is-dark="isDark" />
       <!-- Pinpoint -->
-      <PinpointPanels v-if="detail?.available" :data="detail" :is-dark="isDark" />
+      <PinpointPanels v-if="detail?.available" :data="detail" :run-id="run?.run_id || null" :is-dark="isDark" />
       <p v-else-if="!detailLoading && detailLoaded" class="text-[11px] py-3 text-center rounded-lg"
          :style="{ color: dd('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.45)'), background: dd('rgba(0,0,0,0.02)', 'rgba(255,255,255,0.02)') }">
         {{ detail?.reason || '该服务暂无 Pinpoint 数据' }}

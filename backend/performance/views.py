@@ -9,7 +9,7 @@ from django.db import IntegrityError, transaction
 from django.http import FileResponse, Http404, HttpResponse
 from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import status, viewsets
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -159,6 +159,43 @@ def _win_or_recent(request) -> tuple[int, int]:
         return fr, to
     now_ms = int(timezone.now().timestamp() * 1000)
     return now_ms - 5 * 60 * 1000, now_ms
+
+
+def _arthas_json(fn):
+    """zapp-server 列表端点的薄包装：未配置 / 不可达 → 友好错误，不抛 500。"""
+    from .services import zapp  # noqa: PLC0415
+    if not zapp.is_enabled():
+        return Response({'detail': '未配置 ZAPP_ACCOUNT / ZAPP_PASSWORD（backend/.env）'}, status=503)
+    try:
+        return Response(fn())
+    except Exception as e:  # noqa: BLE001
+        return Response({'detail': f'zapp 调用失败: {type(e).__name__}: {e}'}, status=502)
+
+
+@api_view(['GET'])
+def arthas_clusters(request):
+    from .services import zapp  # noqa: PLC0415
+    return _arthas_json(zapp.list_clusters)
+
+
+@api_view(['GET'])
+def arthas_namespaces(request):
+    from .services import zapp  # noqa: PLC0415
+    cluster = request.query_params.get('cluster')
+    if not cluster:
+        return Response({'detail': '缺少 cluster'}, status=400)
+    return _arthas_json(lambda: zapp.list_namespaces(cluster))
+
+
+@api_view(['GET'])
+def arthas_pods(request):
+    from .services import zapp  # noqa: PLC0415
+    cluster = request.query_params.get('cluster')
+    namespace = request.query_params.get('namespace')
+    service = request.query_params.get('service')
+    if not (cluster and namespace and service):
+        return Response({'detail': '缺少 cluster/namespace/service'}, status=400)
+    return _arthas_json(lambda: zapp.list_deployment_pods(cluster, namespace, service))
 
 
 @xframe_options_exempt
@@ -1611,6 +1648,46 @@ class RunViewSet(viewsets.GenericViewSet):
             if snap and snap.prometheus:
                 return Response(snap.prometheus)
         return Response(diagnosis_svc.build_prometheus(run, service))
+
+    # ── Arthas 诊断输出留存（Step 3 → Step 4）──
+    @action(detail=True, methods=['get', 'post'], url_path='arthas-captures')
+    def arthas_captures(self, request, run_id=None):
+        """GET ?service=X → 列出该 run(可选某服务)的 Arthas 抓取记录；
+        POST {service,pod,command,output,note} → 存一条。供 Step 4 分析读。"""
+        from .models import RunArthasCapture  # noqa: PLC0415
+        run = self.get_object()
+
+        def _dict(c):
+            return {'id': c.id, 'service': c.service, 'pod': c.pod, 'command': c.command,
+                    'output': c.output, 'note': c.note, 'created_at': c.created_at.isoformat()}
+
+        if request.method == 'POST':
+            cmd = (request.data.get('command') or '').strip()
+            if not cmd:
+                return Response({'detail': '缺少 command'}, status=status.HTTP_400_BAD_REQUEST)
+            cap = RunArthasCapture.objects.create(
+                run=run,
+                service=(request.data.get('service') or '')[:200],
+                pod=(request.data.get('pod') or '')[:200],
+                command=cmd[:300],
+                output=request.data.get('output') or '',
+                note=(request.data.get('note') or '')[:300],
+            )
+            return Response(_dict(cap), status=status.HTTP_201_CREATED)
+
+        qs = run.arthas_captures.all()
+        svc = request.query_params.get('service')
+        if svc:
+            qs = qs.filter(service=svc)
+        return Response([_dict(c) for c in qs])
+
+    @action(detail=True, methods=['post'], url_path='arthas-captures/delete')
+    def delete_arthas_capture(self, request, run_id=None):
+        """POST {id} → 删一条 Arthas 抓取记录。"""
+        from .models import RunArthasCapture  # noqa: PLC0415
+        run = self.get_object()
+        RunArthasCapture.objects.filter(run=run, id=request.data.get('id')).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────

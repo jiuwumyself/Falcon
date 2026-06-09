@@ -319,6 +319,16 @@ export interface ServerMapResponse {
 }
 
 // § 服务诊断单页（合并 服务面板+链路面板+JVM）：Pinpoint 聚合数据
+export interface ArthasCapture {
+  id: number
+  service: string
+  pod: string
+  command: string
+  output: string
+  note: string
+  created_at: string
+}
+
 export interface InspectorSeries {
   title: string
   avg: number

@@ -2,7 +2,7 @@ import type {
   ConcurrencyResponse, Environment, ErrorAggregatesResponse, ErrorSamplesQuery,
   ErrorSamplesResponse, FluentBitMetricsResponse, LatencyBreakdownResponse, LoadGenerator,
   Paginated, PinpointTrace, PrometheusDataSource, PrometheusMetricsResponse,
-  DiagnosisResponse,
+  ArthasCapture, DiagnosisResponse,
   PrometheusServiceList, RunEvent, RunMetrics, SamplerStat, ServerMapResponse,
   Service, Task, TaskRun,
 } from '@/types/task'
@@ -243,6 +243,18 @@ export const runsApi = {
   // 某服务 run 窗口的 Pod 时序（Prometheus）。终态读 DB 快照秒开；前端「本次压测」用它
   serviceMetrics: (runId: string, service: string): Promise<PrometheusMetricsResponse> =>
     api<PrometheusMetricsResponse>(`/runs/${runId}/service-metrics/?service=${encodeURIComponent(service)}`),
+  // Arthas 诊断输出留存（Step 3 → Step 4）
+  arthasCaptures: (runId: string, service?: string): Promise<ArthasCapture[]> =>
+    api<ArthasCapture[]>(`/runs/${runId}/arthas-captures/${service ? `?service=${encodeURIComponent(service)}` : ''}`),
+  saveArthasCapture: (runId: string, body: { service?: string; pod?: string; command: string; output: string; note?: string }): Promise<ArthasCapture> =>
+    api<ArthasCapture>(`/runs/${runId}/arthas-captures/`, { method: 'POST', body: JSON.stringify(body) }),
+  deleteArthasCapture: (runId: string, id: number): Promise<void> =>
+    api<void>(`/runs/${runId}/arthas-captures/delete/`, { method: 'POST', body: JSON.stringify({ id }) }),
+  // zapp-server 实时列 集群/命名空间/某服务的 pod（Arthas 终端级联选，免手填）
+  arthasClusters: (): Promise<{ id: number; name: string }[]> => api(`/arthas/clusters/`),
+  arthasNamespaces: (cluster: number | string): Promise<string[]> => api(`/arthas/namespaces/?cluster=${cluster}`),
+  arthasPods: (cluster: number | string, namespace: string, service: string): Promise<{ pod: string; namespace: string; containers: string[] }[]> =>
+    api(`/arthas/pods/?cluster=${cluster}&namespace=${encodeURIComponent(namespace)}&service=${encodeURIComponent(service)}`),
   // § 12 S1：run 期间关键事件锚点（ramp_done / hold_start / shutdown_start /
   // first_error / error_rate_breached / p99_sla_breached）；前端时间轴 markLine 用
   events: (runId: string): Promise<RunEvent[]> =>
