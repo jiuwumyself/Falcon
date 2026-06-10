@@ -161,6 +161,8 @@ class LoadGeneratorSerializer(serializers.ModelSerializer):
             'id', 'pod_name', 'hostname', 'ip', 'port', 'base_url',
             'status', 'cpu_cores', 'memory_gb', 'max_vusers',
             'jmeter_version', 'orchestrator_type',
+            # SSH 型压力机：前端按 transport 区分显示 + 永久可见（不卡心跳）
+            'transport', 'ssh_user', 'ssh_port', 'jmeter_home',
             'registered_at', 'last_heartbeat_at', 'released_at',
             # token 不暴露给前端
         ]

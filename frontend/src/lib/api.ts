@@ -4,7 +4,7 @@ import type {
   Paginated, PinpointTrace, PrometheusDataSource, PrometheusMetricsResponse,
   ArthasCapture, DiagnosisResponse,
   PrometheusServiceList, RunEvent, RunMetrics, SamplerStat, ServerMapResponse,
-  Service, Task, TaskRun,
+  Service, SshRefreshResult, Task, TaskRun,
 } from '@/types/task'
 
 // /api/performance/ is the current backend module prefix. When other modules
@@ -300,6 +300,9 @@ export const loadGeneratorsApi = {
     }),
   systemMetrics: (id: number) =>
     api<SystemMetrics>(`/load-generators/${id}/system-metrics/`),
+  // SSH 机刷新自检：连通 + 清残留 jmeter + 验版本，置 idle/lost
+  sshRefresh: () =>
+    api<SshRefreshResult[]>('/load-generators/ssh-refresh/', { method: 'POST' }),
 }
 
 // ─── Prometheus 数据源 API ──────────────────────────────────────────

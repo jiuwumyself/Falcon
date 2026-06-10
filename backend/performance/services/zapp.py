@@ -60,6 +60,11 @@ def list_clusters() -> list[dict[str, Any]]:
             for c in data if isinstance(c, dict)]
 
 
+# 只列业务命名空间（对齐 Arthas 管理平台：apps/kg/polymas），不列 kube-system 等基础设施 ns。
+# 可用 env ARTHAS_NAMESPACES 覆盖（逗号分隔）。
+BIZ_NAMESPACES = [s.strip() for s in os.getenv('ARTHAS_NAMESPACES', 'apps,kg,polymas').split(',') if s.strip()]
+
+
 def list_namespaces(cluster_id: int | str) -> list[str]:
     data = _get(f'k8s/cluster/{cluster_id}/namespaces') or []
     out = []
@@ -68,7 +73,9 @@ def list_namespaces(cluster_id: int | str) -> list[str]:
             out.append(n)
         elif isinstance(n, dict):
             out.append(n.get('name') or n.get('namespace') or '')
-    return [x for x in out if x]
+    have = {x for x in out if x}
+    # 按白名单顺序保留该集群里确实存在的业务 ns（= Arthas 平台里那几个）
+    return [ns for ns in BIZ_NAMESPACES if ns in have]
 
 
 def list_deployment_pods(cluster_id: int | str, namespace: str,

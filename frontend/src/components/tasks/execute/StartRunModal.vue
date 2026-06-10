@@ -27,6 +27,9 @@ const loading = ref(false)
 const scaling = ref(false)
 const scaleCount = ref(3)
 const error = ref('')
+// SSH 机自检（点刷新时连机器 + 清残留 jmeter + 验版本）状态
+const sshChecking = ref(false)
+const sshFails = ref('')
 
 // 心跳 ≤ 90s 算"刚活"。release_idle_agents 30 min 才会标 lost，开发态 idle 状态可能
 // 残留死容器；客户端再卡一道时间窗，只显示真活的 agent。
@@ -38,6 +41,8 @@ const visibleLgs = computed<LoadGenerator[]>(() => {
   const now = Date.now()
   return lgs.value.filter((g) => {
     if (g.status !== 'idle') return false
+    // SSH 机无心跳机制（不跑 falcon-agent），只要 idle 就显示（与后端 _select_load_generators 一致）
+    if (g.transport === 'ssh') return true
     if (!g.last_heartbeat_at) return false
     const age = now - new Date(g.last_heartbeat_at).getTime()
     return age < FRESH_HEARTBEAT_MS
@@ -56,13 +61,32 @@ const canConfirm = computed(() => !loading.value && !scaling.value)
 // 0 选 = 主控本机直跑（LOCAL_FALLBACK），用于开发态 / 没拉 agent 容器时
 const localOnly = computed(() => selected.value.size === 0)
 
-async function refresh() {
+// probe=true（点刷新按钮时）：先对 SSH 机做连通自检 + 清残留 jmeter + 验版本，
+// 再重拉列表。open 时 probe=false 只列出（快），不阻塞在 SSH 连接上。
+async function refresh(probe = false) {
   loading.value = true
   error.value = ''
   try {
-    lgs.value = await loadGeneratorsApi.list()
-    // 选中过的 agent 若已不在 visibleLgs 里（心跳过期 / 变 lost / 容器停了）
-    // → 自动反选，避免用户点"开始"时把已死 agent 传给后端
+    let data = await loadGeneratorsApi.list()
+    if (probe && data.some((g) => g.transport === 'ssh')) {
+      sshChecking.value = true
+      sshFails.value = ''
+      try {
+        const res = await loadGeneratorsApi.sshRefresh()
+        const fails = res.filter((r) => !r.ok)
+        sshFails.value = fails.length
+          ? fails.map((r) => `${r.pod_name}: ${r.message}`).join('；')
+          : ''
+        data = await loadGeneratorsApi.list() // 自检后 status 更新了，重拉
+      } catch (e) {
+        sshFails.value = e instanceof ApiError ? e.humanMessage : String(e)
+      } finally {
+        sshChecking.value = false
+      }
+    }
+    lgs.value = data
+    // 选中过的机器若已不在 visibleLgs 里（心跳过期 / 变 lost / 容器停了）
+    // → 自动反选，避免用户点"开始"时把已死机器传给后端
     const visibleIds = new Set(visibleLgs.value.map((g) => g.id))
     const cleaned = new Set<number>()
     for (const id of selectedIds.value) {
@@ -162,11 +186,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           class="ml-auto flex items-center gap-1 text-[10px] cursor-pointer disabled:opacity-50"
           :style="{ color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }"
           :disabled="loading"
-          @click="refresh"
+          title="刷新列表；含 SSH 机时会连机器自检 + 清残留 jmeter"
+          @click="refresh(true)"
         >
-          <Loader v-if="loading" :size="10" class="animate-spin" />
+          <Loader v-if="loading || sshChecking" :size="10" class="animate-spin" />
           <RefreshCw v-else :size="10" />
-          刷新
+          {{ sshChecking ? 'SSH 自检中…' : '刷新' }}
         </button>
         <button
           class="flex items-center justify-center w-6 h-6 rounded cursor-pointer hover:bg-black/10"
@@ -192,6 +217,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 
       <p v-if="error" class="text-[11px] text-red-500 flex items-center gap-1 mb-2">
         <AlertCircle :size="11" /> {{ error }}
+      </p>
+      <p v-if="sshFails" class="text-[11px] flex items-start gap-1 mb-2"
+         :style="{ color: '#f59e0b' }">
+        <AlertTriangle :size="11" class="mt-0.5 flex-shrink-0" />
+        <span>SSH 机自检失败：{{ sshFails }}</span>
       </p>
 
       <!-- agent 列表（只显示 status=idle 且心跳新鲜的，过滤 lost / 死壳）-->
@@ -225,12 +255,17 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           >
             <CheckCircle2 v-if="selected.has(g.id)" :size="11" color="#fff" />
           </span>
-          <!-- 主体：容器名 + IP:Port（一眼看清哪台机器）-->
+          <!-- 主体：容器名 + transport 徽章 + 地址（一眼看清哪台机器 / 哪种压力源）-->
           <span class="flex-1 min-w-0 flex items-baseline gap-2">
             <span class="truncate font-mono">{{ g.pod_name }}</span>
+            <span
+              v-if="g.transport === 'ssh'"
+              class="text-[9px] px-1 py-px rounded font-medium flex-shrink-0"
+              :style="{ background: 'rgba(168,85,247,0.16)', color: '#a855f7' }"
+            >SSH</span>
             <span class="text-[10px] flex-shrink-0"
                   :style="{ color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)' }">
-              {{ g.ip }}:{{ g.port }}
+              {{ g.transport === 'ssh' ? `${g.ssh_user || 'root'}@${g.ip}` : `${g.ip}:${g.port}` }}
             </span>
           </span>
           <span class="text-[10px]"

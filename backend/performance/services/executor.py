@@ -131,6 +131,11 @@ class RunExecutor:
         self._selected_lgs: list = []                          # list[LoadGenerator]
         self._agent_runs: dict[int, dict] = {}                  # lg_id → {agent_run_id, base_url, jtl_path}
         self._agent_runs_lock = threading.Lock()
+        # SSH 压力机状态（transport='ssh'：主控 SSH 进机器跑 jmeter，无实时 InfluxDB）
+        self._ssh_lg = None                                     # 选中的 SSH LoadGenerator
+        self._ssh_remote_dir: str | None = None                # 远端工作目录
+        self._ssh_pid: str | None = None                       # 远端 jmeter PID（取消用）
+        self._ssh_tunnel: subprocess.Popen | None = None       # 反向隧道进程（实时 Trends）
         # § 12 S1 实时锚点缓存：已写过的事件类型，heartbeat 跳过重复扫描
         self._anchors_recorded: set[str] = set()
         # falcon 层运行事件累积（spawn / cancel / 超时 / 终态决策等）。
@@ -166,6 +171,17 @@ class RunExecutor:
         if self._proc and self._proc.poll() is None and self.run.stop_port:
             self._append_runtime_log('INFO', f'发送 StopTestNow 到本地 JMeter @ :{self.run.stop_port}')
             self._send_stoptest()
+        # SSH：远端 kill jmeter PID（best-effort，轮询循环也会侦测 cancel）
+        if self._ssh_lg and self._ssh_pid:
+            try:
+                self._ssh_exec(self._ssh_lg, f'kill -{self._ssh_pid} 2>/dev/null; '
+                                             f'kill {self._ssh_pid} 2>/dev/null; true',
+                               timeout=15)
+                self._append_runtime_log('INFO', f'已远端 kill SSH JMeter pid={self._ssh_pid}')
+            except Exception as e:  # noqa: BLE001
+                self._append_runtime_log('WARN', f'远端 kill SSH JMeter 失败：{e}')
+        # SSH：关反向隧道
+        self._stop_reverse_tunnel()
         # 多机：广播 cancel 到所有 agent
         with self._agent_runs_lock:
             agent_runs = list(self._agent_runs.items())
@@ -217,13 +233,35 @@ class RunExecutor:
                 )
                 return
 
-            # 2) 决策走分布式 or 本地
+            # 2) 决策走 SSH / 分布式 agent / 本地
             self._selected_lgs = self._select_load_generators()
-            distributed = bool(self._selected_lgs)
+            ssh_lgs = [lg for lg in self._selected_lgs
+                       if getattr(lg, 'transport', 'agent') == 'ssh']
+            distributed = bool(self._selected_lgs) and not ssh_lgs
 
             self._update_run(status=RunStatus.PENDING)
 
-            if distributed:
+            if ssh_lgs:
+                self._ssh_lg = ssh_lgs[0]
+                if len(ssh_lgs) > 1:
+                    self._append_runtime_log(
+                        'WARN',
+                        f'选了 {len(ssh_lgs)} 台 SSH 压力机，当前 SSH 路径只用第一台'
+                        f'（{self._ssh_lg.pod_name}）跑全量计划',
+                    )
+                self._append_runtime_log(
+                    'INFO',
+                    f'SSH 模式：{self._ssh_lg.ssh_user}@{self._ssh_lg.ip} '
+                    f'（反向隧道实时 Trends + 终态 JTL 分析）',
+                )
+                self._update_run(
+                    status=RunStatus.RUNNING,
+                    started_at=dj_timezone.now(),
+                    last_heartbeat_at=dj_timezone.now(),
+                )
+                self._pre_record_phase_anchors()
+                exit_code = self._run_ssh()
+            elif distributed:
                 pods = ', '.join(lg.pod_name for lg in self._selected_lgs)
                 self._append_runtime_log(
                     'INFO', f'分布式模式：{len(self._selected_lgs)} 台 agent → {pods}',
@@ -565,10 +603,14 @@ class RunExecutor:
         from django.utils import timezone as _tz  # noqa: PLC0415
         from ..models import LoadGeneratorStatus  # noqa: PLC0415
         cutoff = _tz.now() - timedelta(minutes=3)
-        lgs = list(
-            self.run.load_generators
-                .filter(status=LoadGeneratorStatus.IDLE, last_heartbeat_at__gte=cutoff)
-        )
+        idle = list(self.run.load_generators.filter(status=LoadGeneratorStatus.IDLE))
+        lgs = []
+        for lg in idle:
+            # ssh 型没有心跳机制（不跑 falcon-agent），只要 idle 就用，不卡心跳新鲜度
+            if getattr(lg, 'transport', 'agent') == 'ssh':
+                lgs.append(lg)
+            elif lg.last_heartbeat_at and lg.last_heartbeat_at >= cutoff:
+                lgs.append(lg)
         return lgs
 
     def _agent_headers(self) -> dict:
@@ -653,6 +695,231 @@ class RunExecutor:
                 tmp_path.replace(err_path)
             except (requests.RequestException, OSError):
                 continue
+
+    # ── SSH 压力机路径 ─────────────────────────────────────
+    # SSH 连接拼接抽到 services/ssh.py（与 load-generators ssh-refresh 端点共用）。
+    # 这里用薄包装保留 self._ssh_exec / _ssh_push 调用点不变。
+
+    def _ssh_exec(self, lg, remote_cmd: str, *, timeout: int = 60,
+                  input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+        from . import ssh as ssh_svc  # noqa: PLC0415
+        return ssh_svc.ssh_run(lg, remote_cmd, timeout=timeout, input_bytes=input_bytes)
+
+    def _ssh_push(self, lg, remote_path: str, data: bytes, *, timeout: int = 120) -> None:
+        from . import ssh as ssh_svc  # noqa: PLC0415
+        ssh_svc.ssh_push(lg, remote_path, data, timeout=timeout)
+
+    def _stop_reverse_tunnel(self) -> None:
+        """关掉反向隧道进程（幂等）。cancel / 终态 / 异常都安全调用。"""
+        t = self._ssh_tunnel
+        self._ssh_tunnel = None
+        if t and t.poll() is None:
+            try:
+                t.terminate()
+                t.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                try:
+                    t.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _start_reverse_tunnel(self, lg) -> int | None:
+        """起 ssh -N -R 反向隧道：box 的 localhost:<tport> → 主控 InfluxDB。
+        成功返回 tport（box 端端口），失败/主控 InfluxDB 不可达返回 None（降级仅终态）。"""
+        from urllib.parse import urlparse  # noqa: PLC0415
+        from . import ssh as ssh_svc  # noqa: PLC0415
+        if not influxdb_svc.ping():
+            self._append_runtime_log(
+                'WARN', '主控 InfluxDB 不可达 → SSH run 无实时 Trends，仅终态 JTL 分析')
+            return None
+        influx_port = urlparse(getattr(settings, 'INFLUXDB_URL', 'http://localhost:8086')).port or 8086
+        # box 端隧道端口：18086 + run_id hash 偏移，避免同 box 并发 run 撞端口
+        tport = 18086 + int(self.run.run_id, 16) % 2000
+        try:
+            self._ssh_tunnel = subprocess.Popen(
+                ssh_svc.reverse_tunnel_cmd(lg, local_port=influx_port, remote_port=tport),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2)  # 等隧道建好（ExitOnForwardFailure → 端口占用会立刻退）
+            if self._ssh_tunnel.poll() is not None:
+                self._append_runtime_log(
+                    'WARN', '反向隧道启动失败（box 端口占用?）→ 降级仅终态分析，无实时 Trends')
+                self._ssh_tunnel = None
+                return None
+            self._append_runtime_log(
+                'INFO', f'反向隧道已建立 box:{tport} → 主控 InfluxDB:{influx_port}（实时 Trends 可用）')
+            return tport
+        except Exception as e:  # noqa: BLE001
+            self._append_runtime_log('WARN', f'反向隧道启动异常：{e} → 仅终态分析')
+            self._stop_reverse_tunnel()
+            return None
+
+    def _run_ssh(self) -> int:
+        """SSH 压力机：主控 SSH 进机器直接跑 jmeter。
+
+        流程：起 ssh -N -R 反向隧道（box→主控 InfluxDB，实时 Trends）→ build_run_xml
+        注入 BackendListener 指向隧道端口 → base64 推 JMX + CSV → 远端 nohup 起 jmeter -n
+        → 轮询 PID 存活（侦测 cancel/超时）→ 进程退出后 cat 拉回 results.jtl / jmeter.log
+        / errors.xml → 写到 run_dir → 返回远端 jmeter 退出码给 _on_finish。
+        隧道不可用（主控 InfluxDB 没开 / 端口占用）时降级为仅终态 JTL 分析（无实时 Trends）。
+        """
+        from .jmeter import get_scripts_dir, _atomic_write_bytes  # noqa: PLC0415
+        lg = self._ssh_lg
+        run_dir = get_run_dir(self.run.run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        remote_dir = f'/tmp/falcon-runs/{self.run.run_id}'
+        self._ssh_remote_dir = remote_dir
+        jhome = (lg.jmeter_home or '/usr/local/apache-jmeter-5.6.3').rstrip('/')
+
+        # 0) 起反向隧道：box 的 localhost:<tport> 反向转发到主控 InfluxDB。tport=None 表示
+        #    隧道没起来 → live=False，降级仅终态分析。
+        tport = self._start_reverse_tunnel(lg)
+        live = tport is not None
+
+        # 1) 生成可执行 XML。live 时注入 BackendListener 指向隧道端口（host tag 让 by_host
+        #    切线一致）；注入 error_response_listener 让远端写 errors.xml（拉回后抽错误 body）。
+        try:
+            xml = jmx_svc.build_run_xml(
+                self.run.task,
+                inject_environment_dns=bool(self.run.task.environment_id),
+                inject_backend_listener=live,
+                influxdb_url_override=(f'http://localhost:{tport}' if live else None),
+                extra_backend_tags={'host': lg.pod_name},
+                inject_error_response_listener=True,
+                run_id=self.run.run_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._append_runtime_log('ERROR', f'生成 run XML 失败：{e}')
+            self._update_run(error_message=f'生成 run XML 失败: {e}')
+            self._stop_reverse_tunnel()
+            return 1
+
+        # build_run_xml 把 CSVDataSet filename 改成了本机 scripts 绝对路径，远端不存在。
+        # 把本机 scripts 目录前缀替换成远端目录，再把 CSV 推到 remote_dir/<basename>。
+        scripts_prefix = (str(get_scripts_dir()) + os.sep).encode()
+        xml = xml.replace(scripts_prefix, (remote_dir + '/').encode())
+
+        # 2) 推 JMX + CSV
+        try:
+            self._ssh_exec(lg, f'mkdir -p {remote_dir}', timeout=30)
+            self._ssh_push(lg, f'{remote_dir}/run.jmx', xml)
+            scripts_dir = get_scripts_dir()
+            for binding in self.run.task.csv_bindings.all():
+                if not binding.filename:
+                    continue
+                src = scripts_dir / binding.filename
+                if not src.exists():
+                    continue
+                self._ssh_push(lg, f'{remote_dir}/{binding.filename}', src.read_bytes())
+            self._append_runtime_log('INFO', f'已推送 run.jmx + CSV 到 {lg.ip}:{remote_dir}')
+        except Exception as e:  # noqa: BLE001
+            self._append_runtime_log('ERROR', f'推送压测文件到远端失败：{e}')
+            self._update_run(error_message=f'推送压测文件到远端失败: {e}')
+            self._stop_reverse_tunnel()
+            return 1
+
+        # 3) 远端 nohup 起 jmeter，记录退出码到 rc，回显 PID
+        save_props = (
+            '-Jjmeter.save.saveservice.response_message=true '
+            '-Jjmeter.save.saveservice.assertion_results_failure_message=true '
+            '-Jjmeter.save.saveservice.url=true'
+        )
+        # setsid + 子 shell + exit：真正脱离 SSH 通道立即返回 PID（不加 setsid 的话
+        # ssh 会一直等到后台 jmeter 跑完才返回 → 轮询/实时隧道全废）。setsid 让 sh -c
+        # 成为新会话+进程组组长，PID 即组 ID → 取消时 `kill -PID` 连 java 子进程一锅端。
+        jmeter_cmd = (
+            f'cd {remote_dir} && '
+            f'(setsid sh -c "{jhome}/bin/jmeter -n -t run.jmx -l results.jtl -j jmeter.log '
+            f'{save_props}; echo \\$? > rc" > jmeter.out 2>&1 </dev/null & echo $!) ; exit'
+        )
+        try:
+            r = self._ssh_exec(lg, jmeter_cmd, timeout=30)
+            pid = r.stdout.decode('utf-8', 'ignore').strip().splitlines()[-1].strip()
+            if r.returncode != 0 or not pid.isdigit():
+                raise RuntimeError(r.stderr.decode('utf-8', 'ignore')[:300] or f'未拿到 PID（{pid!r}）')
+            self._ssh_pid = pid
+            self._update_run(pid=int(pid))
+            self._append_runtime_log('INFO', f'远端 JMeter 已启动 pid={pid}')
+        except Exception as e:  # noqa: BLE001
+            self._append_runtime_log('ERROR', f'远端启动 JMeter 失败：{e}')
+            self._update_run(error_message=f'远端启动 JMeter 失败: {e}')
+            self._stop_reverse_tunnel()
+            return 1
+
+        # 4) 轮询 PID 存活（3s 间隔），侦测 cancel / 超时
+        tg_cfg = self.run.task.thread_groups_config or []
+        fallback = self.run.duration_seconds or 0
+        max_wall = (
+            scheduler_svc.estimate_max_wall_sec(tg_cfg, fallback) + _DURATION_OVERRUN_SEC
+            if (tg_cfg or fallback) else 0
+        )
+        start_t = time.monotonic()
+        killed_for_timeout = False
+        while True:
+            time.sleep(3)
+            self._update_run(last_heartbeat_at=dj_timezone.now())
+            # 进程是否还活着：kill -0 退出 0 = 活
+            try:
+                alive = self._ssh_exec(
+                    lg, f'kill -0 {self._ssh_pid} 2>/dev/null && echo Y || echo N',
+                    timeout=20,
+                ).stdout.decode('utf-8', 'ignore').strip().endswith('Y')
+            except Exception:  # noqa: BLE001
+                # 单次探测失败不立刻判死，继续下一轮
+                continue
+            if not alive:
+                break
+            if self._cancelled.is_set():
+                self._append_runtime_log('INFO', '收到 cancel → 远端 kill JMeter')
+                try:
+                    # kill -PID = 杀整个进程组（连 java 子进程），PID 是 setsid 组长
+                    self._ssh_exec(lg, f'kill -{self._ssh_pid} 2>/dev/null; true', timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+                break
+            if max_wall and (time.monotonic() - start_t) > max_wall:
+                killed_for_timeout = True
+                self._append_runtime_log('WARN', f'超过最大时长 {max_wall}s → 远端 kill JMeter')
+                try:
+                    self._ssh_exec(lg, f'kill -{self._ssh_pid} 2>/dev/null; true', timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+                from ..models import TaskRun, RunStatus  # noqa: PLC0415
+                TaskRun.objects.filter(pk=self.run.pk).update(status=RunStatus.TIMEOUT)
+                break
+
+        # jmeter 已退出 → 关反向隧道（BackendListener 不再写，隧道使命完成）
+        self._stop_reverse_tunnel()
+
+        # 5) 拉回 results.jtl / jmeter.log / errors.xml + 远端退出码
+        rc = 0
+        for name in ('results.jtl', 'jmeter.log', 'errors.xml'):
+            try:
+                r = self._ssh_exec(lg, f'cat {remote_dir}/{name} 2>/dev/null', timeout=180)
+                if r.returncode == 0 and r.stdout:
+                    _atomic_write_bytes(run_dir / name, r.stdout)
+            except Exception as e:  # noqa: BLE001
+                self._append_runtime_log('WARN', f'拉回 {name} 失败：{e}')
+        try:
+            rc_out = self._ssh_exec(lg, f'cat {remote_dir}/rc 2>/dev/null', timeout=20)
+            rc_str = rc_out.stdout.decode('utf-8', 'ignore').strip()
+            rc = int(rc_str) if rc_str.isdigit() else (1 if killed_for_timeout else 0)
+        except Exception:  # noqa: BLE001
+            rc = 1 if killed_for_timeout else 0
+
+        # 6) 清远端
+        try:
+            self._ssh_exec(lg, f'rm -rf {remote_dir}', timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
+        jtl = run_dir / 'results.jtl'
+        if not jtl.exists() or jtl.stat().st_size == 0:
+            if not killed_for_timeout and not self._cancelled.is_set():
+                self._append_runtime_log('ERROR', '远端未产生 results.jtl（见 jmeter.log）')
+            return rc or 1
+        self._append_runtime_log('INFO', f'SSH 压测结束 远端 exit={rc}，已拉回 JTL')
+        return rc
 
     def _run_distributed(self) -> int:
         """

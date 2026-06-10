@@ -1648,6 +1648,7 @@ def build_run_xml(
     inject_error_response_listener: bool = False,
     run_id: str | None = None,
     extra_backend_tags: dict[str, str] | None = None,
+    influxdb_url_override: str | None = None,
     warnings: list[str] | None = None,
 ) -> bytes:
     """
@@ -1706,7 +1707,8 @@ def build_run_xml(
             xml,
             run_id=run_id,
             task_id=task.id,
-            influxdb_url=getattr(settings, 'INFLUXDB_URL', ''),
+            # SSH 反向隧道：override 成 box 上的隧道端口（http://localhost:<tport>）
+            influxdb_url=influxdb_url_override or getattr(settings, 'INFLUXDB_URL', ''),
             influxdb_db=getattr(settings, 'INFLUXDB_DB', 'jmeter'),
             extra_tags=extra_backend_tags,
         )

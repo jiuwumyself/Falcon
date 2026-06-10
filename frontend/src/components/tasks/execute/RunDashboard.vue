@@ -35,8 +35,8 @@ const TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'diagnosis', label: '服务诊断', icon: Stethoscope },
   // 「错误明细」已并入「接口统计」（donut 错误构成 + 展开行 code+message+count）
   { id: 'samplers', label: '接口统计', icon: BarChart3 },
-  { id: 'runlog', label: '运行日志', icon: FileText },
   { id: 'report', label: '查看报告', icon: FileSearch },
+  { id: 'runlog', label: '运行日志', icon: FileText },
 ]
 
 const active = ref<TabId>('trends')

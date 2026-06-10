@@ -94,9 +94,22 @@ export interface LoadGenerator {
   memory_gb: number
   max_vusers: number
   orchestrator_type: 'k8s' | 'docker' | string
+  // SSH 型压力机：transport='ssh' 时主控 SSH 进机器直跑 jmeter（永久可见，不卡心跳）
+  transport?: 'agent' | 'ssh'
+  ssh_user?: string
+  ssh_port?: number
+  jmeter_home?: string
   registered_at: string
   last_heartbeat_at: string | null
   released_at: string | null
+}
+
+// ssh-refresh 端点返回：每台 SSH 机的自检结果
+export interface SshRefreshResult {
+  id: number
+  pod_name: string
+  ok: boolean
+  message: string
 }
 
 // ─── Step 2 线程组配置 ────────────────────────────────────────────────

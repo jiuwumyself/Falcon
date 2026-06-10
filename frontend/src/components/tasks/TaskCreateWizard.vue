@@ -10,6 +10,7 @@ import type { Task, BizCategory } from '@/types/task'
 import ScriptTree from './ScriptTree.vue'
 import ConfigStage from './ConfigStage.vue'
 import ExecuteStage from './ExecuteStage.vue'
+import AnalyzeStage from './AnalyzeStage.vue'
 
 const props = defineProps<{
   defaultBiz?: BizCategory
@@ -592,7 +593,12 @@ const panelGlass = computed(() => ({
               />
             </template>
 
-            <!-- 04-05 · Placeholders -->
+            <!-- 04 · 分析数据 -->
+            <template v-else-if="activeStep.id === 'analyze'">
+              <AnalyzeStage v-if="uploadedTask" :task="uploadedTask" :is-dark="isDark" />
+            </template>
+
+            <!-- 05 · Placeholder -->
             <template v-else>
               <div class="h-full flex flex-col items-center justify-center">
                 <div
@@ -608,10 +614,7 @@ const panelGlass = computed(() => ({
                 <p
                   class="text-[12px] text-center max-w-[360px]"
                   :style="{ color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.4)' }"
-                >
-                  <template v-if="activeStep.id === 'analyze'">实时 RPS / P99 / 错误率图表与异常定位</template>
-                  <template v-else>AI 根据 run 自动生成分析文字、导出 Word 报告</template>
-                </p>
+                >AI 根据 run 自动生成分析文字、导出 Word 报告</p>
               </div>
             </template>
           </Motion>

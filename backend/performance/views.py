@@ -1804,6 +1804,46 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response({'removed': removed})
 
+    @action(detail=False, methods=['post'], url_path='ssh-refresh')
+    def ssh_refresh(self, request):
+        """
+        POST /api/performance/load-generators/ssh-refresh/
+        对所有 transport='ssh' 的压力机：SSH 连通自检 + 清残留 jmeter 进程 +
+        jmeter --version 验可用。成功 → status=idle + 刷新心跳；失败/超时 → status=lost。
+        前端「刷新」按钮在列表含 SSH 机时调用。返回 [{id, pod_name, ok, message}]。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from .services import ssh as ssh_svc
+
+        ssh_lgs = list(LoadGenerator.objects.filter(transport='ssh'))
+        if not ssh_lgs:
+            return Response([])
+
+        def _probe(lg):
+            jhome = (lg.jmeter_home or '/usr/local/apache-jmeter-5.6.3').rstrip('/')
+            # 清残留 jmeter 进程（确保下次 run 干净）→ 验 jmeter 可用。
+            # 注意 pkill 模式用 '[A]pacheJMeter'：避免 pkill -f 匹配到自己的 shell 命令行
+            # （命令里含 'ApacheJMeter' 字面量）把自己 SSH 会话杀掉的经典坑。
+            # 版本号从 banner 用 grep 抽（jmeter --version 最后一行是空行，tail -1 抓不到）。
+            cmd = (f"pkill -f '[A]pacheJMeter' 2>/dev/null; sleep 1; "
+                   f"{jhome}/bin/jmeter --version 2>&1 | grep -m1 -oE '[0-9]+\\.[0-9]+\\.[0-9]+'")
+            try:
+                r = ssh_svc.ssh_run(lg, cmd, timeout=30)
+                out = (r.stdout or b'').decode('utf-8', 'ignore').strip()
+                ok = bool(out)  # 抽到版本号即视为可用（pkill 的非零退出不影响）
+                msg = out or (r.stderr or b'').decode('utf-8', 'ignore').strip()[:200] or '未拿到 jmeter 版本'
+            except Exception as e:  # noqa: BLE001
+                ok, msg = False, f'{type(e).__name__}: {e}'[:200]
+            LoadGenerator.objects.filter(pk=lg.pk).update(
+                status=LoadGeneratorStatus.IDLE if ok else LoadGeneratorStatus.LOST,
+                last_heartbeat_at=timezone.now() if ok else lg.last_heartbeat_at,
+            )
+            return {'id': lg.id, 'pod_name': lg.pod_name, 'ok': ok, 'message': msg}
+
+        with ThreadPoolExecutor(max_workers=min(8, len(ssh_lgs))) as ex:
+            results = list(ex.map(_probe, ssh_lgs))
+        return Response(results)
+
     @action(detail=True, methods=['get'], url_path='system-metrics')
     def system_metrics(self, request, pk=None):
         """

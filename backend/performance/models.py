@@ -261,6 +261,15 @@ class LoadGenerator(models.Model):
         help_text='k8s / docker / 其他',
     )
 
+    # 传输方式：agent=falcon-agent HTTP（v1.2 原有，K8s 用）；ssh=主控 SSH 进机器直接跑 jmeter
+    # （单向网络/没法回连主控时用；无实时 InfluxDB，只有终态 JTL 分析）
+    transport = models.CharField(max_length=8, default='agent', db_index=True,
+                                 help_text='agent / ssh')
+    ssh_user = models.CharField(max_length=64, blank=True, default='root')
+    ssh_port = models.PositiveIntegerField(default=22)
+    jmeter_home = models.CharField(max_length=300, blank=True,
+                                   help_text='ssh 型：机器上 JMeter 目录，如 /usr/local/apache-jmeter-5.6.3')
+
     registered_at = models.DateTimeField(auto_now_add=True)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
     released_at = models.DateTimeField(null=True, blank=True)
