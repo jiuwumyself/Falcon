@@ -924,11 +924,14 @@ class TaskViewSet(viewsets.ModelViewSet):
             from datetime import timedelta as _td
             from django.utils import timezone as _tz
             cutoff = _tz.now() - _td(minutes=3)
-            selected_lgs = list(LoadGenerator.objects.filter(
-                id__in=lg_ids,
-                status=LoadGeneratorStatus.IDLE,
-                last_heartbeat_at__gte=cutoff,
-            ))
+            # idle 且：SSH 型放行（无心跳机制，到点定时触发时心跳必然过期），其余要心跳
+            # 新鲜（≤3min）。与 executor._select_load_generators 一致。
+            idle = LoadGenerator.objects.filter(id__in=lg_ids, status=LoadGeneratorStatus.IDLE)
+            selected_lgs = [
+                lg for lg in idle
+                if getattr(lg, 'transport', 'agent') == 'ssh'
+                or (lg.last_heartbeat_at and lg.last_heartbeat_at >= cutoff)
+            ]
             if len(selected_lgs) != len(lg_ids):
                 return Response(
                     {'detail': '部分压力源不存在 / 非 idle / 心跳超时（≥3min），请刷新列表'},

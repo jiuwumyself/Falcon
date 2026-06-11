@@ -65,6 +65,8 @@ class Environment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        verbose_name = '压测环境'
+        verbose_name_plural = '压测环境'
         ordering = ['-is_default', 'name']
 
     def __str__(self) -> str:
@@ -145,6 +147,8 @@ class Task(models.Model):
     all_objects = models.Manager()    # raw, for admin / audit
 
     class Meta:
+        verbose_name = '压测任务'
+        verbose_name_plural = '压测任务'
         ordering = ['-created_at']
 
     def __str__(self) -> str:
@@ -275,6 +279,8 @@ class LoadGenerator(models.Model):
     released_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        verbose_name = '压力机'
+        verbose_name_plural = '压力机'
         ordering = ['-registered_at']
 
     def __str__(self) -> str:
@@ -359,6 +365,8 @@ class TaskRun(models.Model):
     )
 
     class Meta:
+        verbose_name = '执行记录'
+        verbose_name_plural = '执行记录'
         ordering = ['-started_at']
         constraints = [
             # 同 task 同时只允许一个非终态 run；第二次 INSERT 会撞约束 → views 转 409
@@ -394,6 +402,8 @@ class MetricSample(models.Model):
     active_users = models.PositiveIntegerField()
 
     class Meta:
+        verbose_name = '指标采样'
+        verbose_name_plural = '指标采样'
         ordering = ['timestamp']
         indexes = [models.Index(fields=['run', 'timestamp'])]
 
@@ -439,8 +449,8 @@ class BackendListenerConfig(models.Model):
     )
 
     class Meta:
-        verbose_name = 'Backend Listener 全局配置'
-        verbose_name_plural = 'Backend Listener 全局配置'
+        verbose_name = '后端监听器配置'
+        verbose_name_plural = '后端监听器配置'
 
     def __str__(self) -> str:
         status = '已启用' if self.enabled else '已禁用'
@@ -507,8 +517,8 @@ class RunEventAnchor(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = 'Run 事件锚点'
-        verbose_name_plural = 'Run 事件锚点'
+        verbose_name = '运行事件锚点'
+        verbose_name_plural = '运行事件锚点'
         ordering = ['ts_ms']
         indexes = [
             models.Index(fields=['run', 'event_type']),
@@ -593,8 +603,8 @@ class RunPinpointTrace(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = 'Pinpoint 慢 trace'
-        verbose_name_plural = 'Pinpoint 慢 trace'
+        verbose_name = 'Pinpoint 慢调用'
+        verbose_name_plural = 'Pinpoint 慢调用'
         ordering = ['-elapsed_ms']
         constraints = [
             models.UniqueConstraint(
@@ -806,3 +816,81 @@ class PrometheusDataSource(models.Model):
 
     def __str__(self) -> str:
         return f'{self.name}（{"启用" if self.enabled else "禁用"}）'
+
+
+class TaskScheduleType(models.TextChoices):
+    ONCE = 'once', '一次性'
+    RECURRING = 'recurring', '周期性'
+
+
+class TaskSchedule(models.Model):
+    """定时压测任务（后台调度）。到点由 `manage.py run_due_schedules` 命令 HTTP 触发
+    web 的 run 接口起 RunExecutor —— executor 线程必须活在长驻 web 进程里，故走 HTTP
+    而非命令进程直接 start()（命令一退线程就死=孤儿）。"""
+    name = models.CharField(max_length=120, help_text='定时任务名称')
+    task = models.ForeignKey(
+        'Task', on_delete=models.CASCADE, related_name='schedules',
+        help_text='要定时跑的压测任务（须已完成 Step 2 配置）',
+    )
+    schedule_type = models.CharField(
+        max_length=12, choices=TaskScheduleType.choices,
+        default=TaskScheduleType.ONCE, help_text='一次性 / 周期性',
+    )
+    run_at = models.DateTimeField(
+        null=True, blank=True, help_text='【一次性】执行的日期时间',
+    )
+    cron = models.CharField(
+        max_length=120, blank=True,
+        help_text='【周期性】cron 表达式（5 段，按 Asia/Shanghai 时区）。'
+                  '例：0 2 * * * = 每天凌晨 2 点；*/30 * * * * = 每 30 分钟；0 9 * * 1 = 每周一 9 点',
+    )
+    load_generators = models.ManyToManyField(
+        'LoadGenerator', blank=True,
+        help_text='用哪些压力机跑（留空 = 主控本机直跑 LOCAL_FALLBACK）',
+    )
+    enabled = models.BooleanField(default=True, help_text='禁用后不再触发')
+    next_run_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text='下次触发时间（保存时自动算，调度单一真相）',
+    )
+    last_triggered_at = models.DateTimeField(null=True, blank=True)
+    last_run = models.ForeignKey(
+        'TaskRun', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', help_text='最近一次触发创建的 run',
+    )
+    last_error = models.TextField(blank=True, help_text='最近一次触发失败原因')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '定时任务'
+        verbose_name_plural = '定时任务'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.name}（{self.get_schedule_type_display()}）'
+
+    def compute_next_run(self, base=None):
+        """算下次触发时间。
+        - 一次性：只在还没触发过时返回 run_at，否则 None（不重复）。
+        - 周期性：按 Asia/Shanghai 本地时间算 cron 的下一个点（避免 UTC 错位）。
+        """
+        from django.utils import timezone as _tz  # noqa: PLC0415
+        import datetime as _dt  # noqa: PLC0415
+        base = base or _tz.now()
+        if self.schedule_type == TaskScheduleType.ONCE:
+            return self.run_at if (self.run_at and not self.last_triggered_at) else None
+        if not self.cron:
+            return None
+        from croniter import croniter  # noqa: PLC0415
+        try:
+            # 用本地时区算，cron 的 "2 点" = Asia/Shanghai 的 2 点
+            local_base = _tz.localtime(base)
+            return croniter(self.cron, local_base).get_next(_dt.datetime)
+        except (ValueError, KeyError):
+            return None
+
+    def save(self, *args, **kwargs):
+        # 创建 / 改配置时重算 next_run_at；禁用则清空（不触发）
+        self.next_run_at = self.compute_next_run() if self.enabled else None
+        super().save(*args, **kwargs)

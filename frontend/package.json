@@ -16,8 +16,10 @@
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.9",
     "echarts": "^6.0.0",
     "lucide-vue-next": "^1.0.0",
+    "marked": "^18.0.5",
     "monaco-editor": "^0.55.1",
     "motion-v": "^2.2.1",
     "reka-ui": "^2.9.6",
@@ -34,5 +36,8 @@
     "typescript": "~6.0.2",
     "vite": "^8.0.4",
     "vue-tsc": "^3.2.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["vue-demi"]
   }
 }

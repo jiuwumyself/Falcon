@@ -1,0 +1,34 @@
+# 定时任务调度：每分钟跑 run_due_schedules，扫到点的 TaskSchedule → HTTP POST
+# falcon-backend 的 run 接口触发压测（executor 线程落在长驻 web 进程，不在本 Job）。
+# ⚠ 镜像名 REGISTRY/falcon-backend:latest 部署前 sed 成真实 registry。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: falcon-scheduler
+  namespace: falcon
+spec:
+  schedule: "* * * * *"          # 每分钟
+  concurrencyPolicy: Forbid       # 上一个没跑完不叠新的（tick 很快，正常不会撞）
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120    # 错过的 tick 不补跑太久
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 50    # 单次 tick 上限 50s（小于 1 分钟，避免堆积）
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: REGISTRY/falcon-backend:latest
+              command: ["python", "manage.py", "run_due_schedules"]
+              envFrom:
+                - configMapRef: { name: falcon-config }
+                - secretRef: { name: falcon-secrets }
+              env:
+                # 触发自身 = 集群内 backend service
+                - { name: FALCON_SELF_URL, value: "http://falcon-backend:8000" }
+              resources:
+                requests: { cpu: "50m", memory: "128Mi" }
+                limits: { memory: "256Mi" }

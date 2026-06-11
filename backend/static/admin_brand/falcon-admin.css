@@ -1,0 +1,139 @@
+/* Falcon 后台主题 —— 对齐前端设计语言（暗色 + 蓝色主色 + Inter + 圆角玻璃感）。
+   覆盖 jazzmin/AdminLTE(darkly) 的颜色。前端 palette 见 frontend/src/style.css。 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --f-bg: #0a0a0a;
+  --f-panel: #141418;
+  --f-panel-2: #1a1a20;
+  --f-border: rgba(255, 255, 255, 0.08);
+  --f-text: #e8e8ed;
+  --f-muted: rgba(255, 255, 255, 0.5);
+  --f-primary: #3b82f6;
+  --f-primary-soft: rgba(59, 130, 246, 0.14);
+  --f-grad: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+  --f-radius: 12px;
+}
+
+/* ── 全局字体 / 底色 ───────────────────────────────── */
+body, .wrapper, .content-wrapper, .main-footer {
+  font-family: 'Inter', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif !important;
+  background-color: var(--f-bg) !important;
+  color: var(--f-text) !important;
+}
+* { letter-spacing: 0.1px; }
+
+/* ── 侧边栏 ───────────────────────────────────────── */
+.main-sidebar, .sidebar-dark-primary, .sidebar-dark-info {
+  background: #0d0d11 !important;
+  border-right: 1px solid var(--f-border);
+}
+.brand-link {
+  border-bottom: 1px solid var(--f-border) !important;
+  background: transparent !important;
+}
+.brand-link .brand-text {
+  font-weight: 700 !important;
+  background: var(--f-grad);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.brand-image { box-shadow: none !important; opacity: 1 !important; background: transparent !important; }
+/* 侧边栏分组标题（性能压测 / 认证和授权） */
+.nav-sidebar .nav-header {
+  color: var(--f-muted) !important;
+  text-transform: none; font-size: 11px; font-weight: 600;
+  letter-spacing: 1px; padding: 14px 16px 6px;
+}
+.nav-sidebar .nav-link {
+  color: rgba(255, 255, 255, 0.72) !important;
+  border-radius: 10px !important; margin: 2px 8px; transition: all .15s;
+}
+.nav-sidebar .nav-link p { font-size: 13.5px; }
+.nav-sidebar .nav-link:hover { background: rgba(255, 255, 255, 0.05) !important; color: #fff !important; }
+.nav-sidebar .nav-link.active {
+  background: var(--f-primary-soft) !important;
+  color: #fff !important;
+  box-shadow: inset 2px 0 0 var(--f-primary);
+}
+.nav-sidebar .nav-link.active .nav-icon { color: var(--f-primary) !important; }
+.nav-sidebar .nav-icon { color: rgba(255, 255, 255, 0.45) !important; }
+
+/* 用户面板（admin 头像那块） */
+.user-panel { border-bottom: 1px solid var(--f-border) !important; }
+
+/* ── 顶栏 ─────────────────────────────────────────── */
+.main-header.navbar {
+  background: rgba(13, 13, 17, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--f-border) !important;
+}
+.navbar-nav .nav-link, .navbar .nav-link { color: var(--f-text) !important; }
+.navbar .form-control {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid var(--f-border) !important;
+  color: var(--f-text) !important; border-radius: 8px !important;
+}
+
+/* ── 内容标题 / 面包屑 ─────────────────────────────── */
+.content-header h1 { color: var(--f-text) !important; font-weight: 600 !important; }
+.breadcrumb { background: transparent !important; }
+.breadcrumb-item, .breadcrumb-item a { color: var(--f-muted) !important; }
+.breadcrumb-item.active { color: var(--f-text) !important; }
+
+/* ── 卡片 / 表格（玻璃感） ─────────────────────────── */
+.card, .card-primary, .card-info, .card-outline {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border: 1px solid var(--f-border) !important;
+  border-radius: var(--f-radius) !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35) !important;
+}
+.card-header { background: transparent !important; border-bottom: 1px solid var(--f-border) !important; }
+.card-header .card-title { color: var(--f-text) !important; font-weight: 600; }
+
+.table { color: var(--f-text) !important; }
+.table thead th {
+  color: var(--f-muted) !important;
+  border-bottom: 1px solid var(--f-border) !important;
+  font-weight: 600; text-transform: none;
+}
+.table td, .table th { border-top: 1px solid rgba(255, 255, 255, 0.05) !important; }
+.table-hover tbody tr:hover { background: rgba(255, 255, 255, 0.04) !important; }
+table.dataTable tbody tr { background: transparent !important; }
+a, .text-primary { color: var(--f-primary) !important; }
+
+/* ── 按钮 ─────────────────────────────────────────── */
+.btn-primary, .btn-info {
+  background: var(--f-primary) !important; border-color: var(--f-primary) !important;
+  border-radius: 8px !important; font-weight: 500;
+}
+.btn-primary:hover, .btn-info:hover { filter: brightness(1.08); }
+.btn { border-radius: 8px !important; }
+.btn-secondary, .btn-default {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: var(--f-border) !important; color: var(--f-text) !important;
+}
+
+/* ── 表单 ─────────────────────────────────────────── */
+.form-control, .select2-container--default .select2-selection,
+textarea, input, select {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid var(--f-border) !important;
+  color: var(--f-text) !important; border-radius: 8px !important;
+}
+.form-control:focus { border-color: var(--f-primary) !important; box-shadow: 0 0 0 2px var(--f-primary-soft) !important; }
+label, .col-form-label { color: var(--f-text) !important; }
+.help, .form-text, small { color: var(--f-muted) !important; }
+fieldset.module, .module { background: transparent !important; }
+
+/* tab（horizontal_tabs 改表单） */
+.nav-tabs .nav-link.active { background: rgba(255,255,255,0.05) !important; color: var(--f-primary) !important; border-color: var(--f-border) var(--f-border) transparent !important; }
+.nav-tabs { border-bottom: 1px solid var(--f-border) !important; }
+
+/* 登录页 */
+.login-page, .login-box, .register-page { background: var(--f-bg) !important; }
+.login-card-body { background: rgba(255,255,255,0.03) !important; border: 1px solid var(--f-border); border-radius: var(--f-radius); }
+
+/* 选中行 / 高亮 */
+.dataTables_wrapper .dataTables_paginate .paginate_button.current { background: var(--f-primary) !important; border-color: var(--f-primary) !important; }
+::selection { background: var(--f-primary-soft); }

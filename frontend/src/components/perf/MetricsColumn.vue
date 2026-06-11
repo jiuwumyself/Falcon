@@ -389,8 +389,8 @@ function personByName(name: string) {
                   </div>
                   <div class="grid grid-cols-4 gap-2 mb-2.5">
                     <template v-for="m in [
-                      { icon: Gauge, label: 'RPS', val: t.rps, c: '#3b82f6' },
-                      { icon: Users, label: 'Vuser', val: t.vuser, c: '#8b5cf6' },
+                      { icon: Gauge, label: 'RPS', val: t.rps, sfx: '', d: 0, c: '#3b82f6' },
+                      { icon: Users, label: 'Vuser', val: t.vuser, sfx: '', d: 0, c: '#8b5cf6' },
                       { icon: Timer, label: 'P99', val: t.p99, sfx: 'ms', d: 1, c: t.p99 > P99_THRESHOLD ? '#f97316' : '#10b981' },
                       { icon: AlertTriangle, label: 'Err%', val: t.errorRate, sfx: '%', d: 2, c: t.errorRate > 1 ? '#f97316' : '#22c55e' },
                     ]" :key="m.label">

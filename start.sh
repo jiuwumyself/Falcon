@@ -43,10 +43,22 @@ echo "→ 启动 agent 周期回收 (每 5 min release_idle_agents) …"
 ) &
 RELEASE_PID=$!
 
+# 定时任务 tick：每分钟扫到点的 TaskSchedule，HTTP 触发 web 的 run 接口起压测。
+# 生产环境走 K8s CronJob（deploy/k8s/80-scheduler-cronjob.yaml）。
+echo "→ 启动定时任务调度 (每 1 min run_due_schedules) …"
+(
+  while true; do
+    sleep 60
+    ( cd backend && ./venv/bin/python manage.py run_due_schedules ) \
+      >> /tmp/falcon-schedules.log 2>&1 || true
+  done
+) &
+SCHEDULE_PID=$!
+
 cleanup() {
   echo
   echo "→ 停止 …"
-  kill "$BACKEND_PID" "$FRONTEND_PID" "$RELEASE_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$FRONTEND_PID" "$RELEASE_PID" "$SCHEDULE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   exit 0
 }

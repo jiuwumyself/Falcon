@@ -124,6 +124,8 @@ USE_TZ = True
 STATIC_URL = 'static/'
 # 生产 collectstatic 目标；WhiteNoise 从这里托管。dev 也无害（runserver 仍走 app static）。
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+# 自带静态（后台品牌 logo + 自定义主题 CSS，对齐前端设计语言）
+STATICFILES_DIRS = [BASE_DIR / 'static']
 # WhiteNoise 压缩 + 带 hash 的静态文件存储（长缓存）
 STORAGES = {
     'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
@@ -212,6 +214,11 @@ LOCAL_FALLBACK = os.getenv('LOCAL_FALLBACK', '1') == '1'
 # 共用此文件。executor 用 `sshpass -f <此文件>` 连。
 SSH_PASSWORD_FILE = os.getenv('SSH_PASSWORD_FILE', '~/.ssh/.lgpw')
 
+# 定时任务（run_due_schedules 命令）触发自身 run 接口的地址。RunExecutor 线程必须在
+# 长驻 web 进程里，故定时命令走 HTTP POST 触发，不在命令进程直接起 executor。
+# 本地 = http://localhost:8000；K8s = http://falcon-backend:8000。
+FALCON_SELF_URL = os.getenv('FALCON_SELF_URL', 'http://localhost:8000')
+
 # CSV 切片策略（v1.2 多机）：默认 False → 各 agent 拿同一份完整 CSV（字典表 / 共享
 # 参数场景）；True → executor 调 scheduler.slice_csv_by_offset 按行模分片上传，
 # 各 agent 只拿自己那部分（账号池等"每条数据只能用一次"场景）。
@@ -246,25 +253,30 @@ CSV_SLICE_ENABLED = os.getenv('CSV_SLICE_ENABLED', '').lower() == 'true'
 # ── Jazzmin（现代化 admin 主题）────────────────────────────────────────────
 # Falcon 暗色玻璃质感的延伸：左侧导航 + 暗色主题 + 图标 + 顶部搜索
 JAZZMIN_SETTINGS = {
-    'site_title': 'Falcon 后台',
-    'site_header': 'Falcon',
+    'site_title': 'Falcon 猎鹰 · 后台',
+    'site_header': 'Falcon 猎鹰',
     'site_brand': 'Falcon 猎鹰',
-    'welcome_sign': 'Falcon · 性能压测调度平台 · 后台管理',
-    'copyright': 'Falcon',
-    'site_logo_classes': 'img-circle',
+    'welcome_sign': 'Falcon 猎鹰 · 性能压测调度平台',
+    'copyright': 'Falcon 猎鹰',
+    # 前端品牌图标（FalconLogo 转静态 SVG）+ 自定义主题（对齐前端暗色设计语言）
+    'site_logo': 'admin_brand/falcon-logo.svg',
+    'login_logo': 'admin_brand/falcon-logo.svg',
+    'site_logo_classes': 'img-fluid',  # 不裁成圆形（logo 是箭羽形）
+    'custom_css': 'admin_brand/falcon-admin.css',
     # 顶部搜索框搜这些模型
     'search_model': ['performance.Task', 'performance.Service'],
-    # 顶栏链接
+    # 顶栏链接（全中文）
     'topmenu_links': [
         {'name': '回前端', 'url': 'http://localhost:5173', 'new_window': True},
-        {'name': '任务', 'model': 'performance.task'},
+        {'name': '压测任务', 'model': 'performance.task'},
+        {'name': '定时任务', 'model': 'performance.taskschedule'},
         {'model': 'auth.user'},
     ],
     'show_sidebar': True,
     'navigation_expanded': True,
     'hide_apps': [],
     'hide_models': [],
-    # app / model 排序：performance 在前
+    # app / model 排序：性能压测 在前
     'order_with_respect_to': ['performance', 'auth'],
     # FontAwesome 图标
     'icons': {
@@ -273,6 +285,7 @@ JAZZMIN_SETTINGS = {
         'auth.Group': 'fas fa-users',
         'performance.Task': 'fas fa-bolt',
         'performance.TaskRun': 'fas fa-play-circle',
+        'performance.TaskSchedule': 'fas fa-clock',
         'performance.Environment': 'fas fa-server',
         'performance.Service': 'fas fa-cubes',
         'performance.PrometheusDataSource': 'fas fa-chart-line',
@@ -291,14 +304,14 @@ JAZZMIN_SETTINGS = {
 }
 
 JAZZMIN_UI_TWEAKS = {
-    'theme': 'darkly',           # Bootswatch 暗色主题，贴合 Falcon 暗色风
+    'theme': 'darkly',           # Bootswatch 暗色底，custom_css 再覆成前端配色
     'default_theme_mode': 'dark',  # 强制暗色（jazzmin 3.0 起 dark_mode_theme 废弃）
     'navbar': 'navbar-dark',
     'navbar_fixed': True,
     'sidebar_fixed': True,
     'sidebar': 'sidebar-dark-primary',
     'sidebar_nav_compact_style': True,
-    'accent': 'accent-info',
+    'accent': 'accent-primary',  # 蓝色主色（对齐前端 #3b82f6）
     'brand_colour': 'navbar-dark',
     'body_small_text': False,
     'sidebar_nav_flat_style': False,

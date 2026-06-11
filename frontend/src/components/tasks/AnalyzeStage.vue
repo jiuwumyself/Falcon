@@ -24,6 +24,7 @@ import ErrorDonutChart from '@/components/tasks/execute/dashboard/trends/ErrorDo
 import SamplerRtRangeChart from '@/components/tasks/execute/dashboard/trends/SamplerRtRangeChart.vue'
 import BaselineVersionBar from '@/components/tasks/execute/dashboard/trends/BaselineVersionBar.vue'
 import AnalyzeTgReport from './AnalyzeTgReport.vue'
+import MarkdownView from '@/components/MarkdownView.vue'
 
 const props = defineProps<{ task: Task; isDark: boolean }>()
 const d = (l: string, dk: string) => (props.isDark ? dk : l)
@@ -504,8 +505,7 @@ const RUN_LABEL: Record<string, string> = {
                     :style="{ background: 'rgba(139,92,246,0.12)', color: '#8b5cf6' }">
                 <Sparkles :size="10" />AI 分析<template v-if="aiMeta.model"> · {{ aiMeta.model }}</template>
               </span>
-              <div class="text-[12px] leading-relaxed whitespace-pre-wrap mt-1.5"
-                   :style="{ color: d('rgba(0,0,0,0.78)', 'rgba(255,255,255,0.8)') }">{{ aiSummary }}</div>
+              <MarkdownView :source="aiSummary" :is-dark="isDark" class="mt-1.5" />
             </div>
           </div>
         </div>

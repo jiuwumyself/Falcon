@@ -4,6 +4,7 @@ from django.apps import AppConfig
 class PerformanceConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'performance'
+    verbose_name = '性能压测'  # 后台侧边栏 app 分组名（替换 'Performance'）
 
     def ready(self):
         """
@@ -32,6 +33,22 @@ class PerformanceConfig(AppConfig):
            不完整时导致整个服务启动失败。
         3. 使用 .update() 单条 SQL 完成批量更新，无需逐行实例化，性能安全。
         """
+        import sys
+        # ⚠ 孤儿 run 清理**只在 web 服务进程**（runserver / waitress / gunicorn）启动时做。
+        # 任何管理命令（migrate / shell / run_due_schedules / release_idle_agents 等）也会
+        # 触发 ready()；若在那里清理，会把 web 进程里**正在跑的 run** 误标 failed——命令是
+        # 独立进程，看不到 web 的 RUN_EXECUTORS，所有 active run 在它眼里都是"孤儿"。
+        # 尤其定时 tick 每分钟跑一次，不 gate 就每分钟杀一次在跑的压测。
+        argv = sys.argv
+        is_web_server = (
+            'runserver' in argv
+            or any('waitress' in str(a) for a in argv)
+            or any('gunicorn' in str(a) for a in argv)
+            or any('uvicorn' in str(a) for a in argv)
+        )
+        if not is_web_server:
+            return
+
         from django.db import connection
         from django.db.utils import OperationalError, ProgrammingError
         try:

@@ -1,9 +1,10 @@
+from django import forms
 from django.contrib import admin
 
 from .models import (
     BackendListenerConfig, Environment, LoadGenerator, MetricSample,
     PinpointConfig, PrometheusDataSource, RunEventAnchor, RunPinpointTrace, Service,
-    Task, TaskCsvBinding, TaskRun,
+    Task, TaskCsvBinding, TaskRun, TaskSchedule, TaskScheduleType,
 )
 
 
@@ -153,3 +154,56 @@ class PrometheusDataSourceAdmin(admin.ModelAdmin):
     list_filter = ('enabled',)
     search_fields = ('name', 'url')
     readonly_fields = ('created_at', 'updated_at')
+
+
+class TaskScheduleForm(forms.ModelForm):
+    """定时任务表单：一次性必填执行时间；周期性必填合法 cron。"""
+    class Meta:
+        model = TaskSchedule
+        fields = '__all__'
+
+    def clean(self):
+        cleaned = super().clean()
+        st = cleaned.get('schedule_type')
+        if st == TaskScheduleType.ONCE:
+            if not cleaned.get('run_at'):
+                self.add_error('run_at', '一次性任务必须填执行时间')
+        elif st == TaskScheduleType.RECURRING:
+            cron = (cleaned.get('cron') or '').strip()
+            if not cron:
+                self.add_error('cron', '周期性任务必须填 cron 表达式')
+            else:
+                from croniter import croniter  # noqa: PLC0415
+                if not croniter.is_valid(cron):
+                    self.add_error('cron', f'cron 表达式不合法：{cron}')
+        return cleaned
+
+
+@admin.register(TaskSchedule)
+class TaskScheduleAdmin(admin.ModelAdmin):
+    """定时压测任务（后台）。只能选已配置(Step 2 完成)的任务；压力机配置时选定。
+    到点由 `manage.py run_due_schedules`（start.sh bg loop / K8s CronJob 每分钟跑）触发。"""
+    form = TaskScheduleForm
+    list_display = (
+        'id', 'name', 'task', 'schedule_type', 'enabled',
+        'next_run_at', 'last_triggered_at', 'last_run', '_last_error',
+    )
+    list_display_links = ('id', 'name')   # ID + 名称都可点进编辑
+    list_filter = ('schedule_type', 'enabled', 'task')
+    search_fields = ('name', 'task__title')
+    filter_horizontal = ('load_generators',)
+    readonly_fields = (
+        'next_run_at', 'last_triggered_at', 'last_run', 'last_error',
+        'created_at', 'updated_at',
+    )
+    autocomplete_fields = ()
+
+    @admin.display(description='最近错误')
+    def _last_error(self, obj):
+        return (obj.last_error or '')[:40]
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        # task 下拉只列「已配置」(thread_groups_config 非空) + 未软删的任务
+        if db_field.name == 'task':
+            kwargs['queryset'] = Task.objects.exclude(thread_groups_config=[])
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
