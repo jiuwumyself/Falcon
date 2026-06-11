@@ -28,7 +28,7 @@ WORKDIR /app
 # psycopg-binary 自带 C 库，无需 libpq-dev。
 RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debian.sources && \
    apt-get update && \
-   apt-get install -y --no-install-recommends && \
+   apt-get install -y --no-install-recommends \
         openjdk-17-jre-headless sshpass wget unzip curl ca-certificates tini && \
     rm -rf /var/lib/apt/lists/*
 
