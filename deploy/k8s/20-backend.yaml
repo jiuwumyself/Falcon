@@ -1,0 +1,93 @@
+# 主控后端：单 pod（replicas=1 + Recreate，绝不能两副本——RunExecutor 状态在进程内）。
+# 两容器：web(waitress :8000) + arthas-proxy(:8011 sidecar，同镜像跑 ws 代理脚本)。
+# ⚠ 镜像名 REGISTRY/falcon-backend:latest 部署前 sed 成真实 registry。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: falcon-scripts, namespace: falcon }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # storageClassName: <留空用默认 SC>
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: falcon-runs, namespace: falcon }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 20Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falcon-backend
+  namespace: falcon
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # 关键：禁止滚动出第二个 pod（in-process RUN_EXECUTORS）
+  selector:
+    matchLabels: { app: falcon-backend }
+  template:
+    metadata:
+      labels: { app: falcon-backend }
+    spec:
+      # 迁移 + 建 InfluxDB 库/保留策略（migrate 必须成功；setup_influxdb 失败不阻塞）
+      initContainers:
+        - name: migrate
+          image: REGISTRY/falcon-backend:latest
+          command: ["sh", "-c", "python manage.py migrate && (python manage.py setup_influxdb || true)"]
+          envFrom:
+            - configMapRef: { name: falcon-config }
+            - secretRef: { name: falcon-secrets }
+      containers:
+        # ── web：Django + waitress（单进程多线程）──────────────
+        - name: web
+          image: REGISTRY/falcon-backend:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: falcon-config }
+            - secretRef: { name: falcon-secrets }
+          volumeMounts:
+            - { name: scripts, mountPath: /app/jmeter/apache-jmeter-5.6.3/scripts }
+            - { name: runs,    mountPath: /app/jmeter/apache-jmeter-5.6.3/runs }
+            - { name: ssh-pw,  mountPath: /etc/falcon/ssh, readOnly: true }
+          readinessProbe:
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits:   { memory: "4Gi" }
+        # ── arthas-proxy sidecar：ws 代理到 zapp-server ────────
+        - name: arthas-proxy
+          image: REGISTRY/falcon-backend:latest
+          command: ["/usr/bin/tini", "--", "python", "scripts/arthas_ws_proxy.py"]
+          ports:
+            - containerPort: 8011
+          env:
+            - { name: ARTHAS_PROXY_PORT, value: "8011" }
+          envFrom:
+            - secretRef: { name: falcon-secrets }   # ZAPP_ACCOUNT / ZAPP_PASSWORD
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { memory: "512Mi" }
+      volumes:
+        - { name: scripts, persistentVolumeClaim: { claimName: falcon-scripts } }
+        - { name: runs,    persistentVolumeClaim: { claimName: falcon-runs } }
+        - { name: ssh-pw,  secret: { secretName: falcon-ssh-pw } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcon-backend
+  namespace: falcon
+spec:
+  selector: { app: falcon-backend }
+  ports:
+    - { name: web,    port: 8000, targetPort: 8000 }
+    - { name: arthas, port: 8011, targetPort: 8011 }

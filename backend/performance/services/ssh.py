@@ -48,15 +48,21 @@ def ssh_push(lg, remote_path: str, data: bytes, *, timeout: int = 120) -> None:
         raise RuntimeError(f'推送 {remote_path} 失败: {r.stderr.decode("utf-8", "ignore")[:300]}')
 
 
-def reverse_tunnel_cmd(lg, local_port: int, remote_port: int) -> list[str]:
-    """主控起常驻反向隧道用的 argv：box 的 localhost:remote_port → 主控 localhost:local_port。
+def reverse_tunnel_cmd(lg, local_port: int, remote_port: int,
+                       forward_host: str = 'localhost') -> list[str]:
+    """主控起常驻反向隧道用的 argv：box 的 localhost:remote_port → 转发到（从 SSH 客户端
+    =主控 pod 视角的）forward_host:local_port。
     `-N` 只转发不跑命令；`-o ExitOnForwardFailure=yes` 端口占用时立刻退（不静默假活）；
-    keepalive 让长 run 期间隧道不被中间设备掐。Popen 起，用完 terminate。"""
+    keepalive 让长 run 期间隧道不被中间设备掐。Popen 起，用完 terminate。
+
+    forward_host：单机 dev 时 InfluxDB 在主控 localhost → 'localhost'；K8s 时 InfluxDB 是
+    独立 service（后端 pod 的 localhost 没有它）→ 传 InfluxDB 的 service DNS（如
+    falcon-influxdb），否则 SSH 压力机实时 Trends 在 K8s 下转发到空地址断掉。"""
     return ssh_base(lg)[:-1] + [
         '-N',
         '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=15',
         '-o', 'ServerAliveCountMax=4',
-        '-R', f'{remote_port}:localhost:{local_port}',
+        '-R', f'{remote_port}:{forward_host}:{local_port}',
         ssh_base(lg)[-1],  # user@ip 放最后
     ]

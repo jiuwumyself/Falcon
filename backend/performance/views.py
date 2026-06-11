@@ -1689,6 +1689,40 @@ class RunViewSet(viewsets.GenericViewSet):
         RunArthasCapture.objects.filter(run=run, id=request.data.get('id')).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    # ── Step 4 AI 分析（OpenAI 兼容端点，数据按场景组装）──
+    @action(detail=True, methods=['get', 'post'], url_path='ai-summary')
+    def ai_summary(self, request, run_id=None):
+        """GET → 读缓存 + 是否已配置；POST → 组装数据模板 + 调 AI + 缓存 + 返回。"""
+        from .models import RunAnalysis  # noqa: PLC0415
+        from .services import ai_analyst  # noqa: PLC0415
+        run = self.get_object()
+        analysis = getattr(run, 'analysis', None)
+
+        if request.method == 'GET':
+            return Response({
+                'summary': analysis.ai_summary if analysis else '',
+                'meta': analysis.ai_summary_meta if analysis else {},
+                'configured': ai_analyst.is_configured(),
+            })
+
+        if not ai_analyst.is_configured():
+            return Response({'detail': '未配置 AI 端点（backend/.env: AI_BASE_URL / AI_API_KEY / AI_MODEL）'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        try:
+            text = ai_analyst.generate_summary(run)
+        except Exception as e:  # noqa: BLE001
+            return Response({'detail': f'AI 调用失败: {type(e).__name__}: {e}'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        if not text:
+            return Response({'detail': 'AI 返回空结果'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        analysis, _ = RunAnalysis.objects.get_or_create(run=run)
+        meta = {'model': settings.AI_MODEL, 'generated_at': timezone.now().isoformat()}
+        analysis.ai_summary = text
+        analysis.ai_summary_meta = meta
+        analysis.save(update_fields=['ai_summary', 'ai_summary_meta'])
+        return Response({'summary': text, 'meta': meta, 'configured': True})
+
 
 # ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────
 

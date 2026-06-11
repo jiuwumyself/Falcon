@@ -1,0 +1,29 @@
+# 入口：域名 → falcon-frontend:80（nginx 再分发 /、/api、/admin、/arthas-term）。
+# ⚠ host 改成真实域名;ingressClassName 按集群填(nginx / 公司自定义)。
+# WebSocket(/arthas-term)：nginx-ingress 默认支持透传 Upgrade,只需放大读超时。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: falcon
+  namespace: falcon
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+spec:
+  ingressClassName: nginx        # ← 按集群实际 ingress class 改
+  rules:
+    - host: falcon.zhihuishu.com  # ← 改真实域名
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: falcon-frontend
+                port:
+                  number: 80
+  # TLS（有证书再开）：
+  # tls:
+  #   - hosts: ["falcon.zhihuishu.com"]
+  #     secretName: falcon-tls

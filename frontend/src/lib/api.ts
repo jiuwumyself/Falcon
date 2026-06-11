@@ -12,6 +12,12 @@ import type {
 // single constant covers every call we have.
 const BASE = '/api/performance'
 
+export interface AiSummaryResponse {
+  summary: string
+  meta: Record<string, any>
+  configured: boolean
+}
+
 export class ApiError extends Error {
   status: number
   body: string
@@ -250,6 +256,11 @@ export const runsApi = {
     api<ArthasCapture>(`/runs/${runId}/arthas-captures/`, { method: 'POST', body: JSON.stringify(body) }),
   deleteArthasCapture: (runId: string, id: number): Promise<void> =>
     api<void>(`/runs/${runId}/arthas-captures/delete/`, { method: 'POST', body: JSON.stringify({ id }) }),
+  // Step 4 AI 分析：GET 读缓存 + 是否已配置；POST 生成（按场景组装数据 → 调 OpenAI 兼容端点）
+  aiSummary: (runId: string): Promise<AiSummaryResponse> =>
+    api<AiSummaryResponse>(`/runs/${runId}/ai-summary/`),
+  generateAiSummary: (runId: string): Promise<AiSummaryResponse> =>
+    api<AiSummaryResponse>(`/runs/${runId}/ai-summary/`, { method: 'POST' }),
   // zapp-server 实时列 集群/命名空间/某服务的 pod（Arthas 终端级联选，免手填）
   arthasClusters: (): Promise<{ id: number; name: string }[]> => api(`/arthas/clusters/`),
   arthasNamespaces: (cluster: number | string): Promise<string[]> => api(`/arthas/namespaces/?cluster=${cluster}`),

@@ -1,0 +1,38 @@
+# 前端 nginx：托管 SPA 静态 + 反代 /api、/admin、/static、/arthas-term 到 falcon-backend。
+# ⚠ 镜像名 REGISTRY/falcon-frontend:latest 部署前 sed 成真实 registry。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falcon-frontend
+  namespace: falcon
+spec:
+  replicas: 2          # 纯静态 + 反代，无状态，可多副本
+  selector:
+    matchLabels: { app: falcon-frontend }
+  template:
+    metadata:
+      labels: { app: falcon-frontend }
+    spec:
+      containers:
+        - name: nginx
+          image: REGISTRY/falcon-frontend:latest
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcon-frontend
+  namespace: falcon
+spec:
+  selector: { app: falcon-frontend }
+  ports:
+    - port: 80
+      targetPort: 80

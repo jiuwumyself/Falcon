@@ -6,23 +6,41 @@ import { ChevronDown, ChevronRight, Timer, AlertOctagon, Activity } from 'lucide
 import type { SamplerStat, ErrorAggregateRow, SeriesPoint } from '@/types/task'
 import { SEMANTIC } from '@/components/tasks/execute/dashboard/trends/semanticColors'
 import ConcurrencyRpsChart from '@/components/tasks/execute/dashboard/trends/ConcurrencyRpsChart.vue'
+import SoakLatencyTrendChart from '@/components/tasks/execute/dashboard/trends/SoakLatencyTrendChart.vue'
+import VuRpsDualAxisChart from '@/components/tasks/execute/dashboard/trends/VuRpsDualAxisChart.vue'
+import TargetRpsVsActualChart from '@/components/tasks/execute/dashboard/trends/TargetRpsVsActualChart.vue'
 import SamplerRtRangeChart from '@/components/tasks/execute/dashboard/trends/SamplerRtRangeChart.vue'
 
 type Health = 'critical' | 'warn' | 'ok'
 
 const props = defineProps<{
   tgName: string
-  scenario: { label: string; color: string } | null
+  scenario: { id: string; label: string; color: string } | null
   health: Health
   summary: { errorRate: number; p99: number; peakRps: number | null; peakConcurrency: number | null; totalRequests: number }
   rps: SeriesPoint[]
   vu: SeriesPoint[]
+  lat: SeriesPoint[]
+  targetRpsPerSec: number | null
   samplers: SamplerStat[]
   errorRows: ErrorAggregateRow[]
   narrative: string[]
   expanded: boolean
   isDark: boolean
 }>()
+
+// 场景 → 主图分发（与 Step 3 ScenarioContextChart 一致）：
+//   baseline/load/stress → 并发-吞吐拐点；soak → 延迟泄漏趋势；
+//   spike → VU/RPS 双轴跟随；throughput → 目标 vs 实际 RPS。
+const usesConcurrency = computed(() =>
+  !props.scenario || ['baseline', 'load', 'stress'].includes(props.scenario.id))
+const chartTitle = computed(() => {
+  const id = props.scenario?.id
+  if (id === 'soak') return '延迟趋势（p95 + 回归线，抓泄漏）'
+  if (id === 'spike') return 'VU / RPS 双轴跟随'
+  if (id === 'throughput') return '目标 vs 实际 RPS'
+  return '并发-吞吐关系（自动标拐点）'
+})
 const emit = defineEmits<{ (e: 'toggle'): void }>()
 const d = (l: string, dk: string) => (props.isDark ? dk : l)
 
@@ -103,13 +121,16 @@ const card = computed(() => ({
         </div>
       </div>
 
-      <!-- 容量拐点 -->
+      <!-- 场景主图（按 TG 场景分发：基准/负载/压力→拐点；稳定性→泄漏；峰值→双轴；吞吐量→目标vs实际）-->
       <div>
         <p class="text-[11px] mb-1 flex items-center gap-1.5" :style="{ color: d('rgba(0,0,0,0.55)', 'rgba(255,255,255,0.55)') }">
-          <Activity :size="12" :color="SEMANTIC.saturation" />并发-吞吐关系（自动标拐点）
+          <Activity :size="12" :color="SEMANTIC.saturation" />{{ chartTitle }}
         </p>
         <div style="height:200px">
-          <ConcurrencyRpsChart :rps="rps" :vu="vu" :is-dark="isDark" />
+          <ConcurrencyRpsChart v-if="usesConcurrency" :rps="rps" :vu="vu" :is-dark="isDark" />
+          <SoakLatencyTrendChart v-else-if="scenario?.id === 'soak'" :lat="lat" :x-range="null" :is-dark="isDark" />
+          <VuRpsDualAxisChart v-else-if="scenario?.id === 'spike'" :rps="rps" :vu="vu" :x-range="null" :is-dark="isDark" />
+          <TargetRpsVsActualChart v-else-if="scenario?.id === 'throughput'" :rps="rps" :target-rps-per-sec="targetRpsPerSec" :x-range="null" :is-dark="isDark" />
         </div>
       </div>
 

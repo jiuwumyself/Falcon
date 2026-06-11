@@ -732,12 +732,17 @@ class RunExecutor:
             self._append_runtime_log(
                 'WARN', '主控 InfluxDB 不可达 → SSH run 无实时 Trends，仅终态 JTL 分析')
             return None
-        influx_port = urlparse(getattr(settings, 'INFLUXDB_URL', 'http://localhost:8086')).port or 8086
+        influx = urlparse(getattr(settings, 'INFLUXDB_URL', 'http://localhost:8086'))
+        influx_port = influx.port or 8086
+        # 转发目标 host：dev 时 InfluxDB 在主控 localhost；K8s 时是独立 service（后端 pod 的
+        # localhost 没有它）→ 用 INFLUXDB_URL 的 host（如 falcon-influxdb）让隧道转发到对处。
+        influx_host = influx.hostname or 'localhost'
         # box 端隧道端口：18086 + run_id hash 偏移，避免同 box 并发 run 撞端口
         tport = 18086 + int(self.run.run_id, 16) % 2000
         try:
             self._ssh_tunnel = subprocess.Popen(
-                ssh_svc.reverse_tunnel_cmd(lg, local_port=influx_port, remote_port=tport),
+                ssh_svc.reverse_tunnel_cmd(lg, local_port=influx_port, remote_port=tport,
+                                           forward_host=influx_host),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             time.sleep(2)  # 等隧道建好（ExitOnForwardFailure → 端口占用会立刻退）
@@ -747,7 +752,7 @@ class RunExecutor:
                 self._ssh_tunnel = None
                 return None
             self._append_runtime_log(
-                'INFO', f'反向隧道已建立 box:{tport} → 主控 InfluxDB:{influx_port}（实时 Trends 可用）')
+                'INFO', f'反向隧道已建立 box:{tport} → 主控 InfluxDB {influx_host}:{influx_port}（实时 Trends 可用）')
             return tport
         except Exception as e:  # noqa: BLE001
             self._append_runtime_log('WARN', f'反向隧道启动异常：{e} → 仅终态分析')

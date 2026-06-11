@@ -1,0 +1,43 @@
+# 容器化压力源 falcon-agent。replicas 手动 kubectl scale（K8sAdapter 本轮仍 stub，
+# 前端"+扩容"暂不可用）。agent 起来自调 register/、30s 心跳；主控按 pod IP:9100 调进来。
+#   kubectl -n falcon scale deployment falcon-agent --replicas=3
+# ⚠ 镜像名 REGISTRY/falcon-agent:latest（agent/Dockerfile 构建）部署前 sed。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falcon-agent
+  namespace: falcon
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: falcon-agent }
+  template:
+    metadata:
+      labels: { app: falcon-agent }
+    spec:
+      containers:
+        - name: agent
+          image: REGISTRY/falcon-agent:latest
+          ports:
+            - containerPort: 9100
+          env:
+            - { name: FALCON_MASTER_URL, value: "http://falcon-backend:8000" }
+            - { name: FALCON_AGENT_PORT, value: "9100" }
+            - { name: FALCON_AGENT_REPORT_PORT, value: "9100" }
+            # 上报 pod IP 给主控（主控按 ip:9100 调进来跑分片）
+            - name: FALCON_AGENT_REPORT_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
+            - name: FALCON_POD_NAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            # agent 注入 JMX 的 BackendListener 指向集群内 InfluxDB（实时 Trends）
+            - { name: AGENT_INFLUXDB_URL, value: "http://falcon-influxdb:8086" }
+            - { name: FALCON_ORCHESTRATOR_TYPE, value: "k8s" }
+            - { name: FALCON_MAX_VUSERS, value: "100" }
+            - name: FALCON_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef: { name: falcon-secrets, key: FALCON_AGENT_TOKEN }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits:   { memory: "2Gi" }

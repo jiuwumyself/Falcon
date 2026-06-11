@@ -1,0 +1,17 @@
+# 构建上下文排除：镜像里 JMeter 是 Dockerfile 重新下载的，本地这些不进上下文
+venv/
+jmeter/
+media/
+db.sqlite3
+*.sqlite3
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+staticfiles/
+*.log
+.DS_Store

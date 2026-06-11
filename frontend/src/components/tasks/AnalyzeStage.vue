@@ -6,9 +6,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import {
   CheckCircle2, AlertTriangle, XCircle, Gauge, Activity, Timer, Users,
   AlertOctagon, ListChecks, Stethoscope, Terminal, ChevronDown, ChevronRight, RefreshCw,
-  Sparkles, GitCompare, TrendingUp, Flag, Layers,
+  Sparkles, GitCompare, TrendingUp, Flag, Layers, Cpu, Loader2,
 } from 'lucide-vue-next'
-import { tasksApi, runsApi } from '@/lib/api'
+import { tasksApi, runsApi, ApiError } from '@/lib/api'
 import type {
   Task, TaskRun, SamplerStat, ErrorAggregateRow, DiagnosisResponse, ArthasCapture,
   RunEvent, RunMetrics, PrometheusMetricsResponse, SeriesPoint,
@@ -17,6 +17,9 @@ import { buildNarrative, buildTgNarrative } from '@/lib/analyzeNarrative'
 import { SEMANTIC } from '@/components/tasks/execute/dashboard/trends/semanticColors'
 import { scenarioById, inferScenarioFromKind } from '@/components/tasks/configStageCtx'
 import ConcurrencyRpsChart from '@/components/tasks/execute/dashboard/trends/ConcurrencyRpsChart.vue'
+import SoakLatencyTrendChart from '@/components/tasks/execute/dashboard/trends/SoakLatencyTrendChart.vue'
+import VuRpsDualAxisChart from '@/components/tasks/execute/dashboard/trends/VuRpsDualAxisChart.vue'
+import TargetRpsVsActualChart from '@/components/tasks/execute/dashboard/trends/TargetRpsVsActualChart.vue'
 import ErrorDonutChart from '@/components/tasks/execute/dashboard/trends/ErrorDonutChart.vue'
 import SamplerRtRangeChart from '@/components/tasks/execute/dashboard/trends/SamplerRtRangeChart.vue'
 import BaselineVersionBar from '@/components/tasks/execute/dashboard/trends/BaselineVersionBar.vue'
@@ -105,7 +108,7 @@ function peakOf(m: PrometheusMetricsResponse, key: string): number | null {
   return max > -Infinity ? max : null
 }
 
-watch(selectedRunId, (rid) => { if (rid) loadRunData(rid) })
+watch(selectedRunId, (rid) => { if (rid) { loadRunData(rid); void loadAi(rid) } })
 onMounted(fetchRuns)
 
 // ── 全局裁决（纳入 events 早停）──
@@ -209,12 +212,27 @@ function tgErrorRows(tg: string): ErrorAggregateRow[] {
   const map = metrics.value?.sampler_thread_group || {}
   return errorRows.value.filter((e) => (map[e.label] || []).includes(tg))
 }
-function tgScenario(tg: string): { label: string; color: string } | null {
+function tgScenario(tg: string): { id: string; label: string; color: string } | null {
   const meta = metrics.value?.tg_planned_meta?.[tg]
   const id = meta?.scenario ?? (meta?.kind ? inferScenarioFromKind(meta.kind) : null)
   if (!id) return null
   const s = scenarioById(id)
-  return { label: s.label, color: s.color }
+  return { id: s.id, label: s.label, color: s.color }
+}
+// throughput(Arrivals) 场景的目标 RPS：target_rps 是 arrivals/sec，实测 RPS 是 samples/sec，
+// 差「该 TG 内 sampler 数」倍，× 后才同尺度（照搬 ScenarioContextChart 的换算）。
+function tgTargetRps(tg: string): number | null {
+  const meta = metrics.value?.tg_planned_meta?.[tg]
+  if (!meta) return null
+  const id = meta.scenario ?? inferScenarioFromKind(meta.kind)
+  if (id !== 'throughput') return null
+  const t = Number(meta.params?.target_rps ?? 0)
+  if (!t || t <= 0) return null
+  const unit = (meta.params?.unit as string) === 'M' ? 60 : 1
+  const map = metrics.value?.sampler_thread_group || {}
+  let n = 0
+  for (const tgs of Object.values(map)) if (tgs.includes(tg)) n++
+  return (t / unit) * (n > 0 ? n : 1)
 }
 function median(arr: number[]): number {
   const a = arr.filter((x) => x > 0).sort((x, y) => x - y)
@@ -225,10 +243,10 @@ function median(arr: number[]): number {
 
 interface TgReport {
   tgName: string
-  scenario: { label: string; color: string } | null
+  scenario: { id: string; label: string; color: string } | null
   health: Health
   summary: { errorRate: number; p99: number; peakRps: number | null; peakConcurrency: number | null; totalRequests: number }
-  rps: SeriesPoint[]; vu: SeriesPoint[]
+  rps: SeriesPoint[]; vu: SeriesPoint[]; lat: SeriesPoint[]; targetRpsPerSec: number | null
   samplers: SamplerStat[]; errorRows: ErrorAggregateRow[]; narrative: string[]
 }
 const tgReports = computed<TgReport[]>(() => {
@@ -254,6 +272,7 @@ const tgReports = computed<TgReport[]>(() => {
       tgName: tg, scenario: scn, health,
       summary: { errorRate: er, p99, peakRps: peakTgRps, peakConcurrency: peakConc, totalRequests: total },
       rps: m.by_tg[tg].rps || [], vu: concByTg.value[tg] || [],
+      lat: m.by_tg[tg].p95_ms || [], targetRpsPerSec: tgTargetRps(tg),
       samplers: sp, errorRows: tgErrorRows(tg),
       narrative: buildTgNarrative({
         tgName: tg, scenarioLabel: scn?.label || '', errorRate: er, p99,
@@ -280,7 +299,29 @@ function toggleTg(name: string) {
 }
 const okTgCount = computed(() => tgReports.value.filter((r) => r.health === 'ok').length)
 
-// ── 整体接口榜（仅无 TG 切分的老 run 兜底用）──
+// ── 单线程 / 无切分时的「整体」场景主图分发 ──：单 TG 也要按它的场景给对的图
+const soloScenario = computed<{ id: string; label: string; color: string } | null>(() => {
+  if (tgKeys.value.length === 1) return tgScenario(tgKeys.value[0])
+  const cfg = props.task.thread_groups_config?.[0]
+  if (!cfg) return null
+  const s = scenarioById(cfg.scenario ?? inferScenarioFromKind(cfg.kind))
+  return { id: s.id, label: s.label, color: s.color }
+})
+const soloRps = computed(() => metrics.value?.overall?.rps || [])
+const soloVu = computed(() => metrics.value?.overall?.active_users || [])
+const soloLat = computed(() => metrics.value?.overall?.p95_ms || [])
+const soloTargetRps = computed(() => (tgKeys.value.length === 1 ? tgTargetRps(tgKeys.value[0]) : null))
+const soloUsesConcurrency = computed(() =>
+  !soloScenario.value || ['baseline', 'load', 'stress'].includes(soloScenario.value.id))
+const soloChartTitle = computed(() => {
+  const id = soloScenario.value?.id
+  if (id === 'soak') return '延迟趋势（p95 + 回归线，抓泄漏）'
+  if (id === 'spike') return 'VU / RPS 双轴跟随'
+  if (id === 'throughput') return '目标 vs 实际 RPS'
+  return '并发-吞吐关系（自动标拐点）'
+})
+
+// ── 整体接口榜（单线程 / 无 TG 切分时用）──
 const slowest = computed(() =>
   [...samplers.value].filter((s) => s.label !== 'all').sort((a, b) => b.p99_ms - a.p99_ms).slice(0, 5))
 const mostErrors = computed(() =>
@@ -343,6 +384,30 @@ const conclusions = computed<ServiceConclusion[]>(() =>
   }))
 
 const expandedCap = ref<number | null>(null)
+
+// ── AI 分析（算法结论之外，调真模型；密钥在后端，前端只触发）──
+const aiSummary = ref('')
+const aiMeta = ref<Record<string, any>>({})
+const aiConfigured = ref(true)
+const aiLoading = ref(false)
+const aiError = ref('')
+async function loadAi(runId: string) {
+  aiSummary.value = ''; aiMeta.value = {}; aiError.value = ''
+  try {
+    const r = await runsApi.aiSummary(runId)
+    aiSummary.value = r.summary; aiMeta.value = r.meta || {}; aiConfigured.value = r.configured
+  } catch { /* 读缓存失败忽略 */ }
+}
+async function genAi() {
+  if (!selectedRunId.value || aiLoading.value) return
+  aiLoading.value = true; aiError.value = ''
+  try {
+    const r = await runsApi.generateAiSummary(selectedRunId.value)
+    aiSummary.value = r.summary; aiMeta.value = r.meta || {}; aiConfigured.value = true
+  } catch (e) {
+    aiError.value = e instanceof ApiError ? e.humanMessage : String(e)
+  } finally { aiLoading.value = false }
+}
 
 // ── 工具 ──
 function fmtMs(v: number) { return v >= 1000 ? (v / 1000).toFixed(2) + 's' : Math.round(v) + 'ms' }
@@ -408,16 +473,40 @@ const RUN_LABEL: Record<string, string> = {
               <p class="text-[12px] mt-0.5 m-0" :style="{ color: d('rgba(0,0,0,0.65)', 'rgba(255,255,255,0.7)') }">{{ verdictSummary }}</p>
             </div>
           </div>
-          <div v-if="narrative.length" class="px-4 py-3" :style="{ background: d('rgba(255,255,255,0.5)', 'rgba(255,255,255,0.015)') }">
-            <p class="text-[10px] mb-1.5 flex items-center gap-1" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">
-              <Sparkles :size="11" />分析结论
-            </p>
-            <ul class="space-y-1 m-0 pl-0 list-none">
+          <div class="px-4 py-3" :style="{ background: d('rgba(255,255,255,0.5)', 'rgba(255,255,255,0.015)') }">
+            <div class="flex items-center justify-between gap-2 mb-1.5">
+              <span class="text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1"
+                    :style="{ background: d('rgba(0,0,0,0.05)', 'rgba(255,255,255,0.08)'), color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }">
+                <Cpu :size="10" />算法结论
+              </span>
+              <button class="text-[11px] px-2.5 py-1 rounded-md inline-flex items-center gap-1 font-medium"
+                      :style="{
+                        background: aiLoading ? d('rgba(0,0,0,0.06)', 'rgba(255,255,255,0.08)') : 'linear-gradient(90deg,#8b5cf6,#6366f1)',
+                        color: aiLoading ? d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') : '#fff',
+                        cursor: aiLoading ? 'default' : 'pointer',
+                      }"
+                      :disabled="aiLoading" @click="genAi">
+                <component :is="aiLoading ? Loader2 : Sparkles" :size="12" :class="aiLoading ? 'animate-spin' : ''" />
+                {{ aiLoading ? 'AI 分析中…' : (aiSummary ? '重新 AI 分析' : 'AI 分析') }}
+              </button>
+            </div>
+            <ul v-if="narrative.length" class="space-y-1 m-0 pl-0 list-none">
               <li v-for="(line, i) in narrative" :key="i" class="text-[12px] leading-relaxed flex gap-1.5"
                   :style="{ color: d('rgba(0,0,0,0.72)', 'rgba(255,255,255,0.75)') }">
                 <span :style="{ color: verdictMeta.color }">·</span><span>{{ line }}</span>
               </li>
             </ul>
+            <!-- AI 分析结果 -->
+            <div v-if="aiError" class="mt-2 text-[11px] px-2 py-1.5 rounded"
+                 :style="{ background: 'rgba(239,68,68,0.1)', color: SEMANTIC.errors }">{{ aiError }}</div>
+            <div v-else-if="aiSummary" class="mt-2 pt-2" :style="{ borderTop: `1px solid ${d('rgba(0,0,0,0.08)', 'rgba(255,255,255,0.08)')}` }">
+              <span class="text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1"
+                    :style="{ background: 'rgba(139,92,246,0.12)', color: '#8b5cf6' }">
+                <Sparkles :size="10" />AI 分析<template v-if="aiMeta.model"> · {{ aiMeta.model }}</template>
+              </span>
+              <div class="text-[12px] leading-relaxed whitespace-pre-wrap mt-1.5"
+                   :style="{ color: d('rgba(0,0,0,0.78)', 'rgba(255,255,255,0.8)') }">{{ aiSummary }}</div>
+            </div>
           </div>
         </div>
 
@@ -478,7 +567,8 @@ const RUN_LABEL: Record<string, string> = {
           <AnalyzeTgReport
             v-for="r in tgReports" :key="r.tgName"
             :tg-name="r.tgName" :scenario="r.scenario" :health="r.health" :summary="r.summary"
-            :rps="r.rps" :vu="r.vu" :samplers="r.samplers" :error-rows="r.errorRows" :narrative="r.narrative"
+            :rps="r.rps" :vu="r.vu" :lat="r.lat" :target-rps-per-sec="r.targetRpsPerSec"
+            :samplers="r.samplers" :error-rows="r.errorRows" :narrative="r.narrative"
             :expanded="expandedTgs.has(r.tgName)" :is-dark="isDark"
             @toggle="toggleTg(r.tgName)"
           />
@@ -488,10 +578,14 @@ const RUN_LABEL: Record<string, string> = {
         <template v-else>
           <div class="p-3 rounded-xl" :style="card">
             <p class="text-[12px] font-medium mb-1 flex items-center gap-1.5" :style="{ color: d('#1a1a2e', '#fff') }">
-              <TrendingUp :size="13" :color="SEMANTIC.saturation" />并发-吞吐关系 <span class="text-[10px] font-normal" :style="{ color: d('rgba(0,0,0,0.4)', 'rgba(255,255,255,0.4)') }">自动标拐点</span>
+              <TrendingUp :size="13" :color="SEMANTIC.saturation" />{{ soloChartTitle }}
+              <span v-if="soloScenario" class="text-[10px] px-1.5 py-0.5 rounded font-normal" :style="{ background: soloScenario.color + '1f', color: soloScenario.color }">{{ soloScenario.label }}</span>
             </p>
             <div style="height:220px">
-              <ConcurrencyRpsChart :rps="metrics?.overall?.rps || []" :vu="metrics?.overall?.active_users || []" :is-dark="isDark" />
+              <ConcurrencyRpsChart v-if="soloUsesConcurrency" :rps="soloRps" :vu="soloVu" :is-dark="isDark" />
+              <SoakLatencyTrendChart v-else-if="soloScenario?.id === 'soak'" :lat="soloLat" :x-range="null" :is-dark="isDark" />
+              <VuRpsDualAxisChart v-else-if="soloScenario?.id === 'spike'" :rps="soloRps" :vu="soloVu" :x-range="null" :is-dark="isDark" />
+              <TargetRpsVsActualChart v-else-if="soloScenario?.id === 'throughput'" :rps="soloRps" :target-rps-per-sec="soloTargetRps" :x-range="null" :is-dark="isDark" />
             </div>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">

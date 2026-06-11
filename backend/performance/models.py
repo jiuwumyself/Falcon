@@ -721,6 +721,9 @@ class RunAnalysis(models.Model):
     # 真·每秒整体延迟分位(从 JTL 重算,替代 InfluxDB 跨 agent 平均预聚合分位的虚高):
     # {p50_ms,p95_ms,p99_ms, p50_ok_ms,p95_ok_ms,p99_ok_ms: [[ts,ms]]}
     latency_overall = models.JSONField(default=dict, blank=True)
+    # Step 4「AI 分析」结果缓存：同一 run 不重复烧 token。重新生成会覆盖。
+    ai_summary = models.TextField(blank=True, default='')
+    ai_summary_meta = models.JSONField(default=dict, blank=True)  # {model, scenarios, generated_at}
     created_at = models.DateTimeField(auto_now_add=True)
 
 

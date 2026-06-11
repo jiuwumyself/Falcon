@@ -38,10 +38,14 @@ class Migration(migrations.Migration):
 
     operations = [
         # 1) 加新字段。run_id 先 nullable+空默认，数据迁移填好之后再升级唯一约束。
+        # ⚠ 这里**不要** db_index=True：下面第 4 步 AlterField 会把 run_id 升级成
+        # unique=True（自带索引）。若中间步先建普通索引，PostgreSQL 升级唯一时会重复创建
+        # varchar_pattern_ops 的 `_like` 索引 → "relation ..._like already exists" 报错
+        # （SQLite 无 `_like` 索引故不暴露）。最终态由 unique 提供索引，中间无需 db_index。
         migrations.AddField(
             model_name='taskrun',
             name='run_id',
-            field=models.CharField(blank=True, default='', db_index=True, max_length=32),
+            field=models.CharField(blank=True, default='', max_length=32),
         ),
         migrations.AddField(
             model_name='taskrun',

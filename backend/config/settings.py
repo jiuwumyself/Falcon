@@ -54,6 +54,9 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    # WhiteNoise 托管 admin/DRF/jazzmin 静态（生产 waitress 单进程下无需 nginx 转 static）。
+    # 必须紧跟 SecurityMiddleware。
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -119,6 +122,19 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+# 生产 collectstatic 目标；WhiteNoise 从这里托管。dev 也无害（runserver 仍走 app static）。
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+# WhiteNoise 压缩 + 带 hash 的静态文件存储（长缓存）
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
+
+# CSRF 信任来源（admin 在 https ingress 后面 POST 需要；逗号分隔，如
+# https://falcon.zhihuishu.com）。空 = 不额外信任（dev 同源无需）。
+CSRF_TRUSTED_ORIGINS = [
+    o.strip() for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()
+]
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -296,3 +312,12 @@ JAZZMIN_UI_TWEAKS = {
         'success': 'btn-success',
     },
 }
+
+
+# ── AI 压测分析（OpenAI 兼容端点；qoder-proxy 或任意兼容网关）──
+# qoder 无官方 HTTP API，需一个 OpenAI 兼容 /chat/completions 端点。base_url 留空 =
+# AI 分析按钮提示「未配置」，不影响算法结论。密钥只在后端，前端永远拿不到。
+AI_BASE_URL = os.getenv('AI_BASE_URL', '')      # 如 http://localhost:3000/v1
+AI_API_KEY = os.getenv('AI_API_KEY', '')        # qoder PAT(pt-...) 或网关 key
+AI_MODEL = os.getenv('AI_MODEL', 'auto')        # qoder-proxy: auto/ultimate/lite/qwen/deepseek...
+AI_TIMEOUT = int(os.getenv('AI_TIMEOUT', '90'))
