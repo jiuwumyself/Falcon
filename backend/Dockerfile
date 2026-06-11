@@ -13,7 +13,7 @@
 # bookworm(Debian 12)固定：trixie 已下掉 openjdk-17(只剩 21)。JMeter 5.6.3 标准跑
 # Java 17(与 Mac openjdk@17 / agent eclipse-temurin:17 对齐)。
 # 基础镜像走公司 Aliyun registry(Jenkins/集群从内网拉,不走 docker hub)。
-FROM zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/python:3.12-slim-bookworm
+FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/python:3.12-slim-bookworm
 
 ARG JMETER_VERSION=5.6.3
 # services/jmeter.py 读 JMETER_VERSION（默认 5.4.1）拼 jmeter 目录，必须设成 baked 的版本
@@ -26,7 +26,9 @@ WORKDIR /app
 
 # 系统依赖：Java17（跑 jmeter）+ sshpass（SSH 压力机）+ 下载工具。
 # psycopg-binary 自带 C 库，无需 libpq-dev。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debian.sources && \
+   apt-get update && \
+   apt-get install -y --no-install-recommends \
         openjdk-17-jre-headless sshpass wget unzip curl ca-certificates tini && \
     rm -rf /var/lib/apt/lists/*
 
@@ -34,17 +36,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 的 BASE_DIR/jmeter/apache-jmeter-<ver>/，BASE_DIR=/app）。runtime 检测到 bin/jmeter 已存在
 # → ensure_jmeter_installed() 直接返回，不触发下载。
 RUN mkdir -p /app/jmeter && \
-    wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.zip" -O /tmp/jmeter.zip && \
+    wget -q "https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/apache-jmeter-5.6.3.zip" -O /tmp/jmeter.zip && \
     unzip -q /tmp/jmeter.zip -d /app/jmeter && \
     rm /tmp/jmeter.zip && \
     chmod +x "/app/jmeter/apache-jmeter-${JMETER_VERSION}/bin/jmeter" && \
     cd "/app/jmeter/apache-jmeter-${JMETER_VERSION}/lib/ext" && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-casutg/2.10/jmeter-plugins-casutg-2.10.jar && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
+    wget -q https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/jmeter-plugins-casutg-2.10.jar && \
+    wget -q https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/jmeter-plugins-cmn-jmeter-0.6.jar
 
 # Python 依赖（requirements 已含 waitress；whitenoise 托管 admin/DRF 静态）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt whitenoise
+RUN pip install --no-cache-dir -r requirements.txt whitenoise -i https://mirrors.aliyun.com/pypi/simple/
 
 # 应用代码（.dockerignore 排除 venv / 本地 jmeter / db.sqlite3 / .env / media / runs）
 COPY . .
