@@ -46,7 +46,7 @@ RUN mkdir -p /app/jmeter && \
 
 # Python 依赖（requirements 已含 waitress；whitenoise 托管 admin/DRF 静态）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt whitenoise
+RUN pip install --no-cache-dir -r requirements.txt whitenoise -i https://mirrors.aliyun.com/pypi/simple/
 
 # 应用代码（.dockerignore 排除 venv / 本地 jmeter / db.sqlite3 / .env / media / runs）
 COPY . .
