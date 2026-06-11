@@ -36,13 +36,13 @@ RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debia
 # 的 BASE_DIR/jmeter/apache-jmeter-<ver>/，BASE_DIR=/app）。runtime 检测到 bin/jmeter 已存在
 # → ensure_jmeter_installed() 直接返回，不触发下载。
 RUN mkdir -p /app/jmeter && \
-    wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.zip" -O /tmp/jmeter.zip && \
+    wget -q "https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/apache-jmeter-5.6.3.zip" -O /tmp/jmeter.zip && \
     unzip -q /tmp/jmeter.zip -d /app/jmeter && \
     rm /tmp/jmeter.zip && \
     chmod +x "/app/jmeter/apache-jmeter-${JMETER_VERSION}/bin/jmeter" && \
     cd "/app/jmeter/apache-jmeter-${JMETER_VERSION}/lib/ext" && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-casutg/2.10/jmeter-plugins-casutg-2.10.jar && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
+    wget -q https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/jmeter-plugins-casutg-2.10.jar && \
+    wget -q https://pro-ci.oss-cn-hangzhou.aliyuncs.com/falcon/jmeter-plugins-cmn-jmeter-0.6.jar
 
 # Python 依赖（requirements 已含 waitress；whitenoise 托管 admin/DRF 静态）
 COPY requirements.txt .
