@@ -13,7 +13,7 @@
 # bookworm(Debian 12)固定：trixie 已下掉 openjdk-17(只剩 21)。JMeter 5.6.3 标准跑
 # Java 17(与 Mac openjdk@17 / agent eclipse-temurin:17 对齐)。
 # 基础镜像走公司 Aliyun registry(Jenkins/集群从内网拉,不走 docker hub)。
-FROM zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/python:3.12-slim-bookworm
+FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/python:3.12-slim-bookworm
 
 ARG JMETER_VERSION=5.6.3
 # services/jmeter.py 读 JMETER_VERSION（默认 5.4.1）拼 jmeter 目录，必须设成 baked 的版本
@@ -26,7 +26,9 @@ WORKDIR /app
 
 # 系统依赖：Java17（跑 jmeter）+ sshpass（SSH 压力机）+ 下载工具。
 # psycopg-binary 自带 C 库，无需 libpq-dev。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list.d/debian.sources && \
+   apt-get update && \
+   apt-get install -y --no-install-recommends && \
         openjdk-17-jre-headless sshpass wget unzip curl ca-certificates tini && \
     rm -rf /var/lib/apt/lists/*
 
