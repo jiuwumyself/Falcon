@@ -6,7 +6,7 @@
 # 启动：docker compose -f docker-compose.dev.yml up -d --scale agent=2 agent
 
 # eclipse-temurin:17-jre 多架构（amd64 + arm64），Mac Apple Silicon 也能拉
-FROM eclipse-temurin:17-jre
+FROM zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/eclipse-temurin:17-jre
 
 ARG JMETER_VERSION=5.6.3
 ENV JMETER_VERSION=${JMETER_VERSION}

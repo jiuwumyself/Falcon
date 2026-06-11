@@ -12,7 +12,8 @@
 
 # bookworm(Debian 12)固定：trixie 已下掉 openjdk-17(只剩 21)。JMeter 5.6.3 标准跑
 # Java 17(与 Mac openjdk@17 / agent eclipse-temurin:17 对齐)。
-FROM python:3.12-slim-bookworm
+# 基础镜像走公司 Aliyun registry(Jenkins/集群从内网拉,不走 docker hub)。
+FROM zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/python:3.12-slim-bookworm
 
 ARG JMETER_VERSION=5.6.3
 # services/jmeter.py 读 JMETER_VERSION（默认 5.4.1）拼 jmeter 目录，必须设成 baked 的版本

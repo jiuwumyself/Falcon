@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
         - name: influxdb
-          image: influxdb:1.8
+          image: zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8
           ports:
             - containerPort: 8086
           env:
