@@ -186,7 +186,8 @@ CORS_ALLOWED_ORIGINS = os.getenv(
 # InfluxDB v1.x — Step 3 实时指标管道。
 # JMeter Backend Listener 直接 POST /write?db=<INFLUXDB_DB>，写入由它做；
 # performance/services/influxdb.py 只读取查询结果给前端展示。
-INFLUXDB_URL = os.getenv('INFLUXDB_URL', 'http://localhost:8086')
+# K8s 里默认连集群内 influxdb Service（见 backend/k8s-influxdb.yaml）；本地仍 localhost。
+INFLUXDB_URL = os.getenv('INFLUXDB_URL', 'http://influxdb:8086' if _IN_K8S else 'http://localhost:8086')
 INFLUXDB_DB = os.getenv('INFLUXDB_DB', 'jmeter')
 INFLUXDB_USER = os.getenv('INFLUXDB_USER', '')
 INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', '')
@@ -204,7 +205,9 @@ RUN_RETENTION_DAYS = int(os.getenv('RUN_RETENTION_DAYS', '30'))
 # host.docker.internal；Linux 靠 docker-compose 的 extra_hosts: host-gateway 兜底。
 AGENT_INFLUXDB_URL = os.getenv(
     'AGENT_INFLUXDB_URL',
-    'http://host.docker.internal:8086',
+    # K8s 里 agent 与主控同集群，BackendListener 直接写集群内 influxdb Service；
+    # docker-compose 本地仍走 host.docker.internal。
+    'http://influxdb:8086' if _IN_K8S else 'http://host.docker.internal:8086',
 )
 
 # v1.2 容器化压力源（OrchestratorAdapter）

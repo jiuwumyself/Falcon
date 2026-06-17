@@ -1,0 +1,97 @@
+# InfluxDB v1.8 — Falcon 实时指标存储（Step 3 压测过程中的实时 RPS/延迟 Trends）
+# ────────────────────────────────────────────────────────────────────────
+# 用法：
+#   1. 把 ★ 的镜像地址换成公司 ACR 里的 influxdb:1.8（集群拉不到 Docker Hub，
+#      需 ops 先把 influxdb:1.8 推到公司仓库，见文件末尾）
+#   2. 确认 storageClassName（不填用集群默认 StorageClass）
+#   3. kubectl -n apps apply -f k8s-influxdb.yaml
+#   4. 后端的 INFLUXDB_URL / AGENT_INFLUXDB_URL 已在 settings.py 里 K8s 内默认指向
+#      http://influxdb:8086（本清单的 Service 名），无需额外配 env
+#
+# 数据写入：agent 上的 JMeter BackendListener 直接 POST /write?db=jmeter
+# 数据读取：主控 performance/services/influxdb.py 查询给前端展示
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: influxdb-data
+  namespace: apps
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: <集群默认就不填；要指定填这里>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: influxdb
+  namespace: apps
+spec:
+  replicas: 1                    # InfluxDB v1.8 单机，不要多副本（会各写各的）
+  strategy:
+    type: Recreate               # 单 PVC RWO，滚动更新会卡两个 pod 抢挂载；用 Recreate
+  selector:
+    matchLabels:
+      app: influxdb
+  template:
+    metadata:
+      labels:
+        app: influxdb
+    spec:
+      containers:
+        - name: influxdb
+          image: zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8   # ★ 换成公司 ACR 里的 influxdb:1.8
+          ports:
+            - containerPort: 8086
+          env:
+            - name: INFLUXDB_DB
+              value: "jmeter"                  # 跟 settings.INFLUXDB_DB 一致
+            - name: INFLUXDB_HTTP_AUTH_ENABLED
+              value: "false"                   # 不鉴权（跟 INFLUXDB_USER/PASSWORD 留空对齐）
+            - name: INFLUXDB_REPORTING_DISABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/influxdb
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8086
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: influxdb-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb                  # ← settings.py 里 K8s 默认连 http://influxdb:8086 就是这个名
+  namespace: apps
+spec:
+  selector:
+    app: influxdb
+  ports:
+    - port: 8086
+      targetPort: 8086
+# ────────────────────────────────────────────────────────────────────────
+# 集群拉不到 Docker Hub：ops 需先把 influxdb:1.8 推进公司 ACR，例如：
+#   docker pull influxdb:1.8
+#   docker tag influxdb:1.8 zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8
+#   docker push zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8
+# （在能上公网的机器上做，或用阿里云 ACR 的镜像同步功能）
+#
+# 保留策略：后端 pre_check 时 influxdb_svc.ensure_retention_policy() 会幂等建 30d 策略，
+# 不用手动跑 setup_influxdb。INFLUXDB_DB=jmeter 由上面 env 自动建库。
+# ────────────────────────────────────────────────────────────────────────
