@@ -1,0 +1,98 @@
+# falcon-agent 常驻压测容器（K8s 部署）
+# ────────────────────────────────────────────────────────────────────────
+# 用法：
+#   1. 把下面标了 ★ 的几个值改成你们实际的
+#   2. 先建 token Secret（见文件末尾注释）
+#   3. kubectl -n <命名空间> apply -f k8s-agent.yaml
+#   4. kubectl -n <命名空间> get pod -l app=falcon-agent   # 看到 10 个 Running
+#   5. 进主控 /admin/performance/loadgenerator/ 看是否冒出 10 行 status=idle
+#
+# 模型：10 台常驻，pod 起来自动注册到主控；前端 StartRunModal 直接勾选。
+# 平台「+扩容」按钮在 K8s 上不要用（K8sAdapter 还是 stub）。
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falcon-agent
+  namespace: falcon              # ★ 换成你们的命名空间
+spec:
+  serviceName: falcon-agent-headless   # 不叫 falcon-agent：K8s 会按 Service 名注入
+                                       # FALCON_AGENT_PORT=tcp://... 撞 agent 自身配置变量
+  replicas: 10                   # 常驻 10 台
+  selector:
+    matchLabels:
+      app: falcon-agent
+  template:
+    metadata:
+      labels:
+        app: falcon-agent
+    spec:
+      containers:
+        - name: agent
+          image: registry.example.com/falcon-agent:latest   # ★ agent 镜像（backend/agent/Dockerfile 构建）
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 9100
+          env:
+            # —— K8s 自动注入，不用手填（解决 pod 名唯一 + 主控可达 IP）——
+            - name: FALCON_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name        # falcon-agent-0 .. -9，天然唯一
+            - name: FALCON_AGENT_REPORT_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP         # 主控直连这个 pod IP:9100
+
+            # —— 手动配 ——
+            - name: FALCON_MASTER_URL
+              value: "http://falcon-backend:8000" # ★ 后端 Service 名:端口（同命名空间）
+            - name: FALCON_AGENT_PORT
+              value: "9100"
+            - name: FALCON_MAX_VUSERS
+              value: "100"                        # 单台容量，StartRunModal 容量校验用
+            - name: FALCON_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: falcon-agent-token        # 跟主控共享同一个 Secret
+                  key: token
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+# headless service：配合 StatefulSet。主控其实是按 pod IP 直连，
+# 这个 service 主要给 StatefulSet 稳定网络标识用，不做负载均衡。
+# 名字必须避开 falcon-agent：否则 K8s 注入 FALCON_AGENT_PORT=tcp://<ip>:<port>，
+# 撞 agent 自身的端口配置变量，启动时 int() 解析直接崩。
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcon-agent-headless
+  namespace: falcon              # ★ 同上
+spec:
+  clusterIP: None
+  selector:
+    app: falcon-agent
+  ports:
+    - name: http
+      port: 9100
+      targetPort: 9100
+# ────────────────────────────────────────────────────────────────────────
+# 共享 token Secret（apply 本文件前先建好，主控也用同一个）：
+#
+#   kubectl -n falcon create secret generic falcon-agent-token \
+#       --from-literal=token='换成一段随机串'
+#
+# 主控后端 Deployment 也要从这个 Secret 注入 FALCON_AGENT_TOKEN，两边必须一致。
+# ────────────────────────────────────────────────────────────────────────
