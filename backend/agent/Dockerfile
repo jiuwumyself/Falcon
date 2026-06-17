@@ -18,8 +18,11 @@ ENV PATH="${JMETER_HOME}/bin:${PATH}"
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 # 系统工具：基础镜像已自带 Python 3.13.5 + Java 17，只补 wget/unzip/tini 等。
+# 该基础镜像 OS = Debian Buster(EOL)，内置 apt 源(清华 buster)已 404；
+# 改指阿里云 Debian 归档源(专存 EOL 版本) + 跳过过期校验(Check-Valid-Until=false)。
 # venv 用基础镜像的 python3(3.13.5) 建，agent 真正跑在 3.13 上。
-RUN apt-get update && \
+RUN printf 'deb https://mirrors.aliyun.com/debian-archive/debian buster main\ndeb https://mirrors.aliyun.com/debian-archive/debian-security buster/updates main\n' > /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update && \
     apt-get install -y --no-install-recommends \
         wget unzip bash tini ca-certificates && \
     python3 -m venv /opt/agent-venv && \
