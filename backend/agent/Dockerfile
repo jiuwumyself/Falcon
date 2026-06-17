@@ -5,9 +5,9 @@
 # 构建：cd backend && docker compose -f docker-compose.dev.yml build agent
 # 启动：docker compose -f docker-compose.dev.yml up -d --scale agent=2 agent
 
-# 基础镜像：公司仓库里现成的 openjdk:17（debian 系，自带 Java 17 + 有 apt）。
-# 用它替代"公司仓库里没有的 eclipse-temurin:17-jre"。Java 已内置，无需再 apt 装。
-FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/openjdk:17
+# 基础镜像：公司仓库里自带 Java 17 + Python 3.13.5 + Node 22 的镜像。
+# 原 openjdk:17 自带 Python 3.7（EOL，装不了新版 fastapi），换这个带新 Python 的治本。
+FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/openjdk:17-node22.17.0-python3.13.5
 
 ARG JMETER_VERSION=5.6.3
 ENV JMETER_VERSION=${JMETER_VERSION}
@@ -17,9 +17,10 @@ ENV PATH="${JMETER_HOME}/bin:${PATH}"
 # pip 走阿里云镜像，避免默认 pypi.org（美国）慢
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
-# Python + 工具：openjdk:17 是 debian 系，apt 装。Java 已由基础镜像自带，不再重复装。
+# 系统工具：基础镜像已自带 Python 3.13.5 + Java 17，只补 wget/unzip/tini 等。
+# venv 用基础镜像的 python3(3.13.5) 建，agent 真正跑在 3.13 上。
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
+    apt-get install -y --no-install-recommends \
         wget unzip bash tini ca-certificates && \
     python3 -m venv /opt/agent-venv && \
     /opt/agent-venv/bin/pip install --no-cache-dir --upgrade pip && \
