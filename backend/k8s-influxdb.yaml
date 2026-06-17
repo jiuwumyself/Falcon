@@ -1,4 +1,6 @@
-# InfluxDB v1.8 — Falcon 实时指标存储（Step 3 压测过程中的实时 RPS/延迟 Trends）
+# InfluxDB 1.11（最新 v1.x）— Falcon 实时指标存储（Step 3 压测实时 RPS/延迟 Trends）
+# 必须是 v1.x：JMeter BackendListener 走 v1 写协议 /write?db=，主控查询走 InfluxQL；
+# v2/v3 换了 Flux + token 鉴权会整个失效。1.11 比 1.8 新且仍是 v1 协议、零代码改动。
 # ────────────────────────────────────────────────────────────────────────
 # 用法：
 #   1. 把 ★ 的镜像地址换成公司 ACR 里的 influxdb:1.8（集群拉不到 Docker Hub，
@@ -43,7 +45,7 @@ spec:
     spec:
       containers:
         - name: influxdb
-          image: zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8   # ★ 换成公司 ACR 里的 influxdb:1.8
+          image: zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.11   # ★ 换成公司 ACR 里的 influxdb:1.11（必须 v1.x）
           ports:
             - containerPort: 8086
           env:
@@ -86,10 +88,11 @@ spec:
     - port: 8086
       targetPort: 8086
 # ────────────────────────────────────────────────────────────────────────
-# 集群拉不到 Docker Hub：ops 需先把 influxdb:1.8 推进公司 ACR，例如：
-#   docker pull influxdb:1.8
-#   docker tag influxdb:1.8 zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8
-#   docker push zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.8
+# 集群拉不到 Docker Hub：ops 需先把 influxdb:1.11 推进公司 ACR，例如：
+#   docker pull influxdb:1.11
+#   docker tag influxdb:1.11 zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.11
+#   docker push zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/influxdb:1.11
+# 不要用 influxdb:2.x / 3.x —— 换了 Flux + token 鉴权，与 JMeter v1 写协议/InfluxQL 不兼容。
 # （在能上公网的机器上做，或用阿里云 ACR 的镜像同步功能）
 #
 # 保留策略：后端 pre_check 时 influxdb_svc.ensure_retention_policy() 会幂等建 30d 策略，
