@@ -92,15 +92,24 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 
 # Database
+#
+# 在 K8s 集群里（KUBERNETES_SERVICE_HOST 由 K8s 自动注入）默认连阿里云 RDS PostgreSQL，
+# 配置写死在代码里——这样后端 pod 重启/重新部署都不依赖 env、不丢配置（SQLite 在 K8s 里
+# 是每个 pod 一份临时空库，根本不能用）。本地开发（无该 env）仍走 SQLite，不会误连生产库。
+# 各项仍可被同名环境变量覆盖（DB_HOST/DB_NAME/...）。
+# ⚠️ 注意：DB_PASSWORD 默认值是生产库明文密码，已随代码进 git（用户知情接受）；
+#    换密码时记得同步改这里。
+_IN_K8S = bool(os.getenv('KUBERNETES_SERVICE_HOST'))
+_USE_POSTGRES = os.getenv('DB_ENGINE', 'postgres' if _IN_K8S else 'sqlite') == 'postgres'
 
-if os.getenv('DB_ENGINE', 'sqlite') == 'postgres':
+if _USE_POSTGRES:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.getenv('DB_NAME', 'falcon'),
-            'USER': os.getenv('DB_USER', 'postgres'),
-            'PASSWORD': os.getenv('DB_PASSWORD', ''),
-            'HOST': os.getenv('DB_HOST', 'localhost'),
+            'NAME': os.getenv('DB_NAME', 'Falcon'),
+            'USER': os.getenv('DB_USER', 'Falcon'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'V1TD#(*&fiV6'),
+            'HOST': os.getenv('DB_HOST', 'pgm-bp1nm1m734hzvi23.pg.rds.aliyuncs.com'),
             'PORT': os.getenv('DB_PORT', '5432'),
         }
     }
