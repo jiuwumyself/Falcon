@@ -31,11 +31,16 @@ SECRET_KEY = os.getenv(
 
 DEBUG = os.getenv('DJANGO_DEBUG', '1') == '1'
 
-# host.docker.internal: v1.2 falcon-agent 容器调主控时的 Host header（macOS/Win Docker
-# Desktop 内置；Linux 走 compose 的 extra_hosts）。少这条 agent 注册会被 DisallowedHost 拒掉。
-ALLOWED_HOSTS = os.getenv(
-    'DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,host.docker.internal',
-).split(',')
+# 内部固定允许的 Host（恒定，不随 DJANGO_ALLOWED_HOSTS env 覆盖而丢失）：
+# - localhost/127.0.0.1：本机
+# - host.docker.internal：docker-compose 下 falcon-agent 回调主控的 Host header
+# - falcon-backend：K8s 集群内 agent 用后端 Service 名回调主控的 Host header
+#   （少了它 agent 注册会被 DisallowedHost 拒掉；放这里保证重启/重新部署都不丢）
+# 公网域名等其它 Host 仍通过 DJANGO_ALLOWED_HOSTS env 追加（逗号分隔）。
+_ALWAYS_ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'host.docker.internal', 'falcon-backend']
+ALLOWED_HOSTS = _ALWAYS_ALLOWED_HOSTS + [
+    h.strip() for h in os.getenv('DJANGO_ALLOWED_HOSTS', '').split(',') if h.strip()
+]
 
 
 INSTALLED_APPS = [
