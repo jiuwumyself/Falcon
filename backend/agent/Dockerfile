@@ -5,23 +5,18 @@
 # 构建：cd backend && docker compose -f docker-compose.dev.yml build agent
 # 启动：docker compose -f docker-compose.dev.yml up -d --scale agent=2 agent
 
-# 基础镜像：公司仓库里现成的 debian/ubuntu 系镜像（要有 apt）。
-# JMeter 需要的 Java 17 不再靠基础镜像自带，改为下面 apt 装 openjdk-17-jre-headless，
-# 这样不依赖"公司仓库里没有的 eclipse-temurin"。
-# ★ 换成运维给的公司基础镜像完整路径 + tag，例如：
-#   zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/ubuntu:22.04
-FROM <公司 debian/ubuntu 基础镜像:tag>
+# 基础镜像：公司仓库里现成的 openjdk:17（debian 系，自带 Java 17 + 有 apt）。
+# 用它替代"公司仓库里没有的 eclipse-temurin:17-jre"。Java 已内置，无需再 apt 装。
+FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/openjdk:17
 
 ARG JMETER_VERSION=5.6.3
 ENV JMETER_VERSION=${JMETER_VERSION}
 ENV JMETER_HOME=/opt/apache-jmeter-${JMETER_VERSION}
 ENV PATH="${JMETER_HOME}/bin:${PATH}"
 
-# Java 17（JMeter 必需）+ Python + 工具：debian/ubuntu 系，apt 装。
-# openjdk-17-jre-headless：跑 JMeter 非 GUI 模式够用，体积更小；装完 java 自动进 /usr/bin。
+# Python + 工具：openjdk:17 是 debian 系，apt 装。Java 已由基础镜像自带，不再重复装。
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends openjdk-17-jre-headless \
-        python3 python3-venv python3-pip \
+    apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
         wget unzip bash tini ca-certificates && \
     python3 -m venv /opt/agent-venv && \
     /opt/agent-venv/bin/pip install --no-cache-dir --upgrade pip && \
