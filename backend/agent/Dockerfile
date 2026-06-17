@@ -5,8 +5,10 @@
 # 构建：cd backend && docker compose -f docker-compose.dev.yml build agent
 # 启动：docker compose -f docker-compose.dev.yml up -d --scale agent=2 agent
 
-# eclipse-temurin:17-jre 多架构（amd64 + arm64），Mac Apple Silicon 也能拉
-FROM zhihuishu-container-images-registry.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/eclipse-temurin:17-jre
+# eclipse-temurin:17-jre 多架构（amd64 + arm64）。
+# 用 -vpc 内网域名：Jenkins 构建节点在阿里云 VPC 内，只能走内网 ACR，
+# 公网域名（无 -vpc）会 dial tcp i/o timeout。推送目标也是 -vpc，保持一致。
+FROM zhihuishu-container-images-registry-vpc.cn-hangzhou.cr.aliyuncs.com/zhihuishu-base-image/eclipse-temurin:17-jre
 
 ARG JMETER_VERSION=5.6.3
 ENV JMETER_VERSION=${JMETER_VERSION}
