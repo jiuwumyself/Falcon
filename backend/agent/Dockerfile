@@ -34,12 +34,14 @@ RUN cd ${JMETER_HOME}/lib/ext && \
     wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
 
 # 安装 agent 依赖
-COPY agent/requirements.txt /tmp/agent-requirements.txt
+# 注意：构建上下文 = 本目录(backend/agent/)，所以 COPY 路径相对本目录，不带 agent/ 前缀。
+# Jenkins: cd backend/agent && docker build . ；compose: context ./agent。
+COPY requirements.txt /tmp/agent-requirements.txt
 RUN /opt/agent-venv/bin/pip install --no-cache-dir -r /tmp/agent-requirements.txt && \
     rm /tmp/agent-requirements.txt
 
-# 拷 agent 入口
-COPY agent /opt/agent
+# 拷 agent 入口（本目录全部内容 → /opt/agent，main.py 作 agent.main 模块）
+COPY . /opt/agent
 WORKDIR /opt
 
 # 默认环境（可被 docker-compose environment 覆盖）

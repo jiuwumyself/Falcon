@@ -31,8 +31,8 @@ services:
 
   agent1:
     build:
-      context: .
-      dockerfile: agent/Dockerfile
+      context: ./agent
+      dockerfile: Dockerfile
     image: falcon-agent:1.2
     environment:
       - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
@@ -50,8 +50,8 @@ services:
 
   agent2:
     build:
-      context: .
-      dockerfile: agent/Dockerfile
+      context: ./agent
+      dockerfile: Dockerfile
     image: falcon-agent:1.2
     environment:
       - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
@@ -69,8 +69,8 @@ services:
 
   agent3:
     build:
-      context: .
-      dockerfile: agent/Dockerfile
+      context: ./agent
+      dockerfile: Dockerfile
     image: falcon-agent:1.2
     environment:
       - FALCON_MASTER_URL=${FALCON_MASTER_URL:-http://host.docker.internal:8000}
