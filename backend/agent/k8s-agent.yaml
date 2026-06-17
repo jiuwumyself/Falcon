@@ -52,11 +52,8 @@ spec:
               value: "9100"
             - name: FALCON_MAX_VUSERS
               value: "100"                        # 单台容量，StartRunModal 容量校验用
-            - name: FALCON_AGENT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: falcon-agent-token        # 跟主控共享同一个 Secret
-                  key: token
+            # 不做鉴权：不设 FALCON_AGENT_TOKEN（主控 settings.FALCON_AGENT_TOKEN 也留空
+            # = 不强校验）。要鉴权时再建 Secret falcon-agent-token + 两边注入同一值。
           resources:
             requests:
               cpu: "1"
@@ -89,10 +86,9 @@ spec:
       port: 9100
       targetPort: 9100
 # ────────────────────────────────────────────────────────────────────────
-# 共享 token Secret（apply 本文件前先建好，主控也用同一个）：
-#
-#   kubectl -n falcon create secret generic falcon-agent-token \
+# 当前不做鉴权（agent 与主控都不设 token，主控 settings.FALCON_AGENT_TOKEN 留空）。
+# 将来要鉴权：建 Secret + agent/主控两边注入同一值：
+#   kubectl -n apps create secret generic falcon-agent-token \
 #       --from-literal=token='换成一段随机串'
-#
-# 主控后端 Deployment 也要从这个 Secret 注入 FALCON_AGENT_TOKEN，两边必须一致。
+#   然后给上面 env 加回 FALCON_AGENT_TOKEN（secretKeyRef），主控同步设同值。
 # ────────────────────────────────────────────────────────────────────────
