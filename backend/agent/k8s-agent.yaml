@@ -47,7 +47,9 @@ spec:
 
             # —— 手动配 ——
             - name: FALCON_MASTER_URL
-              value: "http://falcon-backend:8000" # ★ 后端 Service 名:端口（同命名空间）
+              value: "http://falcon-backend"      # ★ 后端 Service 名 + Service 端口
+                                                  # 用 Service 端口(常 80)，不是容器端口 8000！
+                                                  # 跨命名空间用 FQDN：http://falcon-backend.<ns>.svc
             - name: FALCON_AGENT_PORT
               value: "9100"
             - name: FALCON_MAX_VUSERS
