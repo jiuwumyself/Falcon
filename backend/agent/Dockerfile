@@ -14,6 +14,9 @@ ENV JMETER_VERSION=${JMETER_VERSION}
 ENV JMETER_HOME=/opt/apache-jmeter-${JMETER_VERSION}
 ENV PATH="${JMETER_HOME}/bin:${PATH}"
 
+# pip 走阿里云镜像，避免默认 pypi.org（美国）慢
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
 # Python + 工具：openjdk:17 是 debian 系，apt 装。Java 已由基础镜像自带，不再重复装。
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
@@ -22,16 +25,16 @@ RUN apt-get update && \
     /opt/agent-venv/bin/pip install --no-cache-dir --upgrade pip && \
     rm -rf /var/lib/apt/lists/*
 
-# 装 JMeter（无插件主体）
-RUN wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.zip -O /tmp/jmeter.zip && \
+# 装 JMeter（无插件主体）。用阿里云 apache 镜像替代 archive.apache.org（美国，慢）。
+RUN wget -q https://mirrors.aliyun.com/apache/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.zip -O /tmp/jmeter.zip && \
     unzip -q /tmp/jmeter.zip -d /opt && \
     rm /tmp/jmeter.zip && \
     chmod +x ${JMETER_HOME}/bin/jmeter
 
-# 装 JMeter 插件（与主控 setup_jmeter 命令对齐）
+# 装 JMeter 插件（与主控 setup_jmeter 命令对齐）。用阿里云 maven 镜像替代 repo1.maven.org。
 RUN cd ${JMETER_HOME}/lib/ext && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-casutg/2.10/jmeter-plugins-casutg-2.10.jar && \
-    wget -q https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
+    wget -q https://maven.aliyun.com/repository/public/kg/apc/jmeter-plugins-casutg/2.10/jmeter-plugins-casutg-2.10.jar && \
+    wget -q https://maven.aliyun.com/repository/public/kg/apc/jmeter-plugins-cmn-jmeter/0.6/jmeter-plugins-cmn-jmeter-0.6.jar
 
 # 安装 agent 依赖
 # 注意：构建上下文 = 本目录(backend/agent/)，所以 COPY 路径相对本目录，不带 agent/ 前缀。
