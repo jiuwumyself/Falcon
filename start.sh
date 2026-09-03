@@ -30,6 +30,13 @@ echo "→ 启动前端 (Vite @ :5173) …"
 ( cd frontend && npm run dev ) &
 FRONTEND_PID=$!
 
+# Arthas Pod 终端 WS 代理（:8011）：前端 /arthas-term → 这里 → zapp-server pod 终端。
+# 不起它，前端 Arthas 终端会「连接中…连接已关闭」。凭据走 backend/.env 的 ZAPP_*。
+echo "→ 启动 Arthas WS 代理 (@ :8011) …"
+( cd backend && ./venv/bin/python scripts/arthas_ws_proxy.py ) \
+  >> /tmp/falcon-arthas-proxy.log 2>&1 &
+ARTHAS_PID=$!
+
 # v1.2 多机：周期回收僵尸 agent（30min 无心跳的 idle agent 标 lost + scale_down）。
 # 生产环境应该走 cron / systemd timer，开发态简单起个 bg loop 够用。
 # IDLE_RELEASE_MINUTES 默认 30，可在 backend/.env 覆盖。
@@ -58,7 +65,7 @@ SCHEDULE_PID=$!
 cleanup() {
   echo
   echo "→ 停止 …"
-  kill "$BACKEND_PID" "$FRONTEND_PID" "$RELEASE_PID" "$SCHEDULE_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$FRONTEND_PID" "$ARTHAS_PID" "$RELEASE_PID" "$SCHEDULE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   exit 0
 }
