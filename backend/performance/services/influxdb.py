@@ -10,6 +10,7 @@ InfluxDB v1.x 查询封装 —— 只读，写入由 JMeter Backend Listener 直
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any
 
@@ -18,15 +19,19 @@ from django.conf import settings
 
 # influxdb 5.x 客户端是同步的；用模块级单例缓存。
 _CLIENT: Any | None = None
-_CLIENT_FAILED: bool = False  # 已知连不上时跳过重试，避免每次请求都 hang
+# 已知连不上时短路，避免每次请求都 hang 满 5s timeout。但**只短路 _FAIL_TTL 秒**：
+# 发版时 backend pod 常比 InfluxDB 先就绪,首次连接必然失败;若永久缓存失败,之后
+# InfluxDB 起来了本进程也一直认为不可达,必须重启 pod 才恢复(踩过)。
+_CLIENT_FAILED_AT: float | None = None
+_FAIL_TTL = 30.0
 
 
 def _build_client():
-    """构造客户端；连接失败返 None 并记缓存。"""
-    global _CLIENT, _CLIENT_FAILED
+    """构造客户端；连接失败返 None 并记缓存(_FAIL_TTL 秒后自动重试)。"""
+    global _CLIENT, _CLIENT_FAILED_AT
     if _CLIENT is not None:
         return _CLIENT
-    if _CLIENT_FAILED:
+    if _CLIENT_FAILED_AT is not None and (time.monotonic() - _CLIENT_FAILED_AT) < _FAIL_TTL:
         return None
     try:
         from influxdb import InfluxDBClient
@@ -50,9 +55,10 @@ def _build_client():
         # 主动 ping 一次确认连通
         client.ping()
         _CLIENT = client
+        _CLIENT_FAILED_AT = None
         return client
     except Exception:  # noqa: BLE001
-        _CLIENT_FAILED = True
+        _CLIENT_FAILED_AT = time.monotonic()
         return None
 
 
@@ -63,22 +69,34 @@ def get_client():
 
 def reset_client_cache() -> None:
     """单元测试 / 配置变更后用；清掉单例缓存。"""
-    global _CLIENT, _CLIENT_FAILED
+    global _CLIENT, _CLIENT_FAILED_AT
     _CLIENT = None
-    _CLIENT_FAILED = False
+    _CLIENT_FAILED_AT = None
 
 
 def ping() -> bool:
-    """pre_check 用：InfluxDB 是否可达 + 数据库是否存在。"""
+    """pre_check 用：InfluxDB 是否可达 + 目标库存在（**缺库自动建**）。
+
+    为什么要自动建库：ops 部署 InfluxDB 时若没给容器配 `INFLUXDB_DB=jmeter` env，库
+    就不存在。旧实现直接返 False → 预检报「不可达」，而唯一会建保留策略的
+    ensure_retention_policy() 又只在 ping 成功后才调用 —— 死锁，人不介入永远起不来。
+    建库是幂等的 DDL，这里顺手做掉，让「重新发一版就能跑」成立。
+    """
     client = get_client()
     if client is None:
         return False
+    target_db = getattr(settings, 'INFLUXDB_DB', 'jmeter')
     try:
         client.ping()
-        # 顺便校验目标库存在
-        target_db = getattr(settings, 'INFLUXDB_DB', 'jmeter')
         existing = {db['name'] for db in client.get_list_database()}
-        return target_db in existing
+        if target_db in existing:
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+    # 库不存在 → 建。失败(多半是开了鉴权且账号无权限)如实返 False,让预检报错。
+    try:
+        client.create_database(target_db)
+        return True
     except Exception:  # noqa: BLE001
         return False
 

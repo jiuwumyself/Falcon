@@ -8,7 +8,9 @@
 #   2. 确认 storageClassName（不填用集群默认 StorageClass）
 #   3. kubectl -n apps apply -f k8s-influxdb.yaml
 #   4. 后端的 INFLUXDB_URL / AGENT_INFLUXDB_URL 已在 settings.py 里 K8s 内默认指向
-#      http://influxdb:8086（本清单的 Service 名），无需额外配 env
+#      http://falcon-influxdb:8086（本清单的 Service 名），无需额外配 env。
+#      ⚠️ 若 ops 改了 Service 名，必须同步改 settings.py 的默认值，或在 backend/agent
+#      的 Deployment 里显式配这两个 env——否则预检报「InfluxDB 不可达 localhost:8086」。
 #
 # 数据写入：agent 上的 JMeter BackendListener 直接 POST /write?db=jmeter
 # 数据读取：主控 performance/services/influxdb.py 查询给前端展示
@@ -79,7 +81,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: influxdb                  # ← settings.py 里 K8s 默认连 http://influxdb:8086 就是这个名
+  name: falcon-influxdb           # ← settings.py 里 K8s 默认连 http://falcon-influxdb:8086 就是这个名
   namespace: apps
 spec:
   selector:
