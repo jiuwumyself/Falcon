@@ -6,7 +6,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.http import FileResponse, Http404, HttpResponse
+from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
@@ -1711,6 +1711,36 @@ class RunViewSet(viewsets.GenericViewSet):
         if not ai_analyst.is_configured():
             return Response({'detail': '未配置 AI 端点（backend/.env: AI_BASE_URL / AI_API_KEY / AI_MODEL）'},
                             status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        # 流式（?stream=1）：SSE 逐块发增量，末尾整段缓存
+        if request.query_params.get('stream') == '1':
+            import json as _json  # noqa: PLC0415
+
+            def _sse():
+                chunks = []
+                try:
+                    for delta in ai_analyst.generate_summary_stream(run):
+                        chunks.append(delta)
+                        yield f'data: {_json.dumps({"delta": delta}, ensure_ascii=False)}\n\n'
+                except Exception as e:  # noqa: BLE001
+                    yield f'data: {_json.dumps({"error": f"{type(e).__name__}: {e}"})}\n\n'
+                    return
+                text = ''.join(chunks).strip()
+                if not text:
+                    yield f'data: {_json.dumps({"error": "AI 返回空结果"})}\n\n'
+                    return
+                a, _ = RunAnalysis.objects.get_or_create(run=run)
+                m = {'model': settings.AI_MODEL, 'generated_at': timezone.now().isoformat()}
+                a.ai_summary = text
+                a.ai_summary_meta = m
+                a.save(update_fields=['ai_summary', 'ai_summary_meta'])
+                yield f'data: {_json.dumps({"done": True, "meta": m}, ensure_ascii=False)}\n\n'
+
+            sresp = StreamingHttpResponse(_sse(), content_type='text/event-stream')
+            sresp['Cache-Control'] = 'no-cache'
+            sresp['X-Accel-Buffering'] = 'no'
+            return sresp
+
         try:
             text = ai_analyst.generate_summary(run)
         except Exception as e:  # noqa: BLE001

@@ -232,3 +232,40 @@ def generate_summary(run) -> str:
     resp.raise_for_status()
     data = resp.json()
     return (data.get('choices') or [{}])[0].get('message', {}).get('content', '').strip()
+
+
+def generate_summary_stream(run):
+    """流式版：逐块 yield 文本增量（SSE delta）。前端实时逐字渲染。"""
+    if not is_configured():
+        raise RuntimeError('未配置 AI 端点：请在 backend/.env 设 AI_BASE_URL / AI_API_KEY / AI_MODEL')
+    base = settings.AI_BASE_URL.rstrip('/')
+    url = base + ('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
+    with requests.post(
+        url,
+        headers={'Authorization': f'Bearer {settings.AI_API_KEY}', 'Content-Type': 'application/json'},
+        json={'model': settings.AI_MODEL, 'messages': build_messages(run),
+              'temperature': 0.3, 'max_tokens': 1500, 'stream': True},
+        timeout=settings.AI_TIMEOUT, stream=True,
+    ) as resp:
+        resp.raise_for_status()
+        # 按字节累积 → 按 SSE 事件分隔(\n\n)切 → 整行再 decode(避免中文跨 chunk 截断)
+        buf = b''
+        for chunk in resp.iter_content(chunk_size=1024):
+            if not chunk:
+                continue
+            buf += chunk
+            while b'\n\n' in buf:
+                event, buf = buf.split(b'\n\n', 1)
+                for raw in event.split(b'\n'):
+                    if not raw.startswith(b'data:'):
+                        continue
+                    payload = raw[5:].strip()
+                    if payload == b'[DONE]':
+                        return
+                    try:
+                        obj = json.loads(payload.decode('utf-8'))
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    delta = (obj.get('choices') or [{}])[0].get('delta', {}).get('content')
+                    if delta:
+                        yield delta

@@ -8,7 +8,7 @@ import {
   AlertOctagon, ListChecks, Stethoscope, Terminal, ChevronDown, ChevronRight, RefreshCw,
   Sparkles, GitCompare, TrendingUp, Flag, Layers, Cpu, Loader2,
 } from 'lucide-vue-next'
-import { tasksApi, runsApi, ApiError } from '@/lib/api'
+import { tasksApi, runsApi } from '@/lib/api'
 import type {
   Task, TaskRun, SamplerStat, ErrorAggregateRow, DiagnosisResponse, ArthasCapture,
   RunEvent, RunMetrics, PrometheusMetricsResponse, SeriesPoint,
@@ -25,6 +25,7 @@ import SamplerRtRangeChart from '@/components/tasks/execute/dashboard/trends/Sam
 import BaselineVersionBar from '@/components/tasks/execute/dashboard/trends/BaselineVersionBar.vue'
 import AnalyzeTgReport from './AnalyzeTgReport.vue'
 import MarkdownView from '@/components/MarkdownView.vue'
+import RunHistoryDropdown from './execute/RunHistoryDropdown.vue'
 
 const props = defineProps<{ task: Task; isDark: boolean }>()
 const d = (l: string, dk: string) => (props.isDark ? dk : l)
@@ -49,6 +50,13 @@ async function fetchRuns() {
     const terminal = runs.value.find((r) => TERMINAL.includes(r.status))
     selectedRunId.value = (terminal || runs.value[0])?.run_id || null
   } catch (e) { console.error('listRuns 失败', e) } finally { loadingRuns.value = false }
+}
+
+// 历史下拉里删了某 run → 从列表移除；删的是当前选中的则切到下一条
+function onRunDeleted(rid: string) {
+  runs.value = runs.value.filter((r) => r.run_id !== rid)
+  allRuns.value = allRuns.value.filter((r) => r.run_id !== rid)
+  if (selectedRunId.value === rid) selectedRunId.value = runs.value[0]?.run_id || null
 }
 
 // ── 该 run 的派生数据 ──
@@ -401,12 +409,35 @@ async function loadAi(runId: string) {
 }
 async function genAi() {
   if (!selectedRunId.value || aiLoading.value) return
-  aiLoading.value = true; aiError.value = ''
+  aiLoading.value = true; aiError.value = ''; aiSummary.value = ''
   try {
-    const r = await runsApi.generateAiSummary(selectedRunId.value)
-    aiSummary.value = r.summary; aiMeta.value = r.meta || {}; aiConfigured.value = true
+    // 流式 SSE：逐块追加，MarkdownView 实时渲染
+    const resp = await fetch(`/api/performance/runs/${selectedRunId.value}/ai-summary/?stream=1`, { method: 'POST' })
+    if (!resp.ok || !resp.body) {
+      const j = await resp.json().catch(() => null)
+      throw new Error(j?.detail || `HTTP ${resp.status}`)
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const parts = buf.split('\n\n')
+      buf = parts.pop() || ''
+      for (const part of parts) {
+        const line = part.trim()
+        if (!line.startsWith('data:')) continue
+        let obj: any
+        try { obj = JSON.parse(line.slice(5).trim()) } catch { continue }
+        if (obj.delta) aiSummary.value += obj.delta
+        else if (obj.error) aiError.value = obj.error
+        else if (obj.done) { aiMeta.value = obj.meta || {}; aiConfigured.value = true }
+      }
+    }
   } catch (e) {
-    aiError.value = e instanceof ApiError ? e.humanMessage : String(e)
+    aiError.value = e instanceof Error ? e.message : String(e)
   } finally { aiLoading.value = false }
 }
 
@@ -426,10 +457,6 @@ const card = computed(() => ({
   background: props.isDark ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.6)',
   border: `1px solid ${props.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
 }))
-const RUN_LABEL: Record<string, string> = {
-  success: '成功', failed: '失败', timeout: '超时', cancelled: '已取消',
-  pre_check_failed: '预检失败', running: '运行中', pending: '排队', pre_checking: '预检中', cancelling: '取消中',
-}
 </script>
 
 <template>
@@ -438,15 +465,11 @@ const RUN_LABEL: Record<string, string> = {
       <!-- 顶部：run 选择 -->
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-[15px] font-semibold m-0" :style="{ color: d('#1a1a2e', '#fff') }">压测分析报告</h2>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1">
           <span class="text-[10px]" :style="{ color: d('rgba(0,0,0,0.35)', 'rgba(255,255,255,0.35)') }">选择记录</span>
-          <select v-model="selectedRunId" class="text-[12px] px-2 py-1 rounded-md outline-none cursor-pointer"
-                  :style="{ background: d('rgba(0,0,0,0.04)', 'rgba(255,255,255,0.06)'), color: d('#1a1a2e', '#fff'), border: `1px solid ${d('rgba(0,0,0,0.08)', 'rgba(255,255,255,0.1)')}` }">
-            <option v-for="r in runs" :key="r.run_id" :value="r.run_id"
-                    :style="{ background: d('#fff', '#1a2330'), color: d('#1a1a2e', '#fff') }">
-              {{ r.run_id.slice(0, 8) }} · {{ RUN_LABEL[r.status] || r.status }} · {{ fmtTime(r.created_at) }}
-            </option>
-          </select>
+          <!-- 复用 Step 3 历史下拉（玻璃浮层 + 状态/时长/VU/成功率/场景/基准/keep/删除）；只传 keep 的 run -->
+          <RunHistoryDropdown :runs="runs" :selected-run="selectedRun" :is-dark="isDark"
+                              @select="selectedRunId = $event" @run-deleted="onRunDeleted" />
           <button v-if="selectedRunId" class="p-1 rounded-md" title="刷新"
                   :style="{ color: d('rgba(0,0,0,0.5)', 'rgba(255,255,255,0.5)') }"
                   @click="loadRunData(selectedRunId)">
