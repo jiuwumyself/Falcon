@@ -134,7 +134,7 @@ const fields = computed<Field[]>(() => {
   if (k === 'ThreadGroup') return [
     { name: 'users', label: '虚拟用户数', max: MAX_USERS },
     { name: 'ramp_up', label: 'Ramp-up (秒)', max: MAX_DURATION_SECONDS },
-    { name: 'duration', label: '持续时间 (秒)', max: MAX_DURATION_SECONDS },
+    { name: 'duration', label: '稳态时长 (秒)', max: MAX_DURATION_SECONDS },
   ]
   if (k === 'SteppingThreadGroup') return [
     { name: 'initial_threads', label: '初始用户', max: MAX_USERS },

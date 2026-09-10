@@ -648,7 +648,12 @@ def _build_standard_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree.
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.num_threads'}).text = str(p['users'])
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.ramp_time'}).text = str(p['ramp_up'])
     etree.SubElement(el, 'boolProp', {'name': 'ThreadGroup.scheduler'}).text = 'true'
-    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.duration'}).text = str(p['duration'])
+    # Step 2 的 `duration` 语义 = **稳态时长**（加压完成后的持续秒数，不含 ramp），
+    # 而 JMeter 的 ThreadGroup.duration 是"从线程启动算起的总时长"（含 ramp）。
+    # 两者差一个 ramp——不换算的话 5 用户 ramp 10s + 稳态 60s 只会跑 60s 总时长，
+    # 真实稳态被压到 50s。这里补上 ramp，让用户填的 60 就是实打实的 60 秒稳态。
+    _total = int(p['ramp_up']) + int(p['duration'])
+    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.duration'}).text = str(_total)
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.delay'}).text = ''
     return el
 
@@ -841,6 +846,17 @@ def replace_thread_group(
 
     builder = _TG_BUILDERS[kind]
     new_el = builder(preserved_testname, preserved_enabled, params)
+
+    # setUp / tearDown 线程组保留原标签：JMeter 保证 SetupThreadGroup 在所有普通
+    # 线程组**之前**跑完、PostThreadGroup 在之后跑，脚本常靠它做开课/建数据等前置。
+    # 早期实现把它们统一替换成 <ThreadGroup>，语义被静默丢掉 —— 前置逻辑变成与主压测
+    # 并发执行，且被 duration 驱动反复循环（实测开课接口被重复调用 180 次）。
+    # kind 映射（_TAG_TO_TG_KIND）仍把它们归到 'ThreadGroup' 以复用参数表单，
+    # 这里只在写回时把标签还原。
+    if existing_tag in ('SetupThreadGroup', 'PostThreadGroup') and new_el.tag == 'ThreadGroup':
+        new_el.tag = existing_tag
+        new_el.set('guiclass', f'{existing_tag}Gui')
+        new_el.set('testclass', existing_tag)
 
     parent = target.getparent()
     if parent is None:
@@ -1754,6 +1770,37 @@ def _build_validate_tg_element(testname: str, enabled: str) -> etree._Element:
     return el
 
 
+def _neutralize_throughput_controllers(root: etree._Element) -> int:
+    """试跑专用：把百分比型 ThroughputController 的比例统统提到 100%，返回改动个数。
+
+    为什么需要：试跑把线程组降级成 1 线程 × 1 循环，而 JMeter 的百分比控制器按**累计
+    比例**判定是否执行——10% 的分支要到第 6~10 次迭代才第一次触发，单次迭代必然跳过，
+    于是该分支下的接口全部报「未被 JMeter 执行」，用户以为接口有问题（实测复现）。
+
+    试跑的目的是"每个接口真跑一次确认通不通"，不是验证流量配比，所以这里直接中性化。
+    只改内存中的试跑 XML，原件和正式压测路径都不受影响。
+
+    注意：Random / Interleave / Switch 等"只选一个分支"的控制器有同样的覆盖盲区，
+    本函数暂不处理（需要换标签，风险更高），遇到时试跑仍会漏测部分接口。
+    """
+    changed = 0
+    for el in root.iter():
+        if not isinstance(el.tag, str) or _local(el) != 'ThroughputController':
+            continue
+        # style: 1 = percent executions（按比例）；0 = total executions（按次数，
+        # maxThroughput>=1 时单次迭代本来就会执行，无需处理）
+        style = (el.findtext("intProp[@name='ThroughputController.style']") or '').strip()
+        if style != '1':
+            continue
+        for fp in el.findall('FloatProperty'):
+            if (fp.findtext('name') or '').strip() == 'ThroughputController.percentThroughput':
+                v = fp.find('value')
+                if v is not None:
+                    v.text = '100.0'
+                    changed += 1
+    return changed
+
+
 def replace_tgs_for_validate(xml_bytes: bytes) -> bytes:
     """把所有**启用**的 ThreadGroup-like 元素替换成 1 线程 1 循环的标准 ThreadGroup。
 
@@ -1784,6 +1831,8 @@ def replace_tgs_for_validate(xml_bytes: bytes) -> bytes:
         if parent is None:
             continue
         parent.replace(old_el, new_el)
+
+    _neutralize_throughput_controllers(top)
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 

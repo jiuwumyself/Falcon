@@ -317,6 +317,16 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
         />
       </div>
 
+      <!-- 覆盖提示：Step 2 存了配置后，脚本里线程组自身的并发/时长参数一律不生效。
+           不写清楚的话，用户会以为「脚本里写了 90 秒怎么跑了 390 秒」是 bug。 -->
+      <p
+        v-if="currentConfig"
+        class="flex-shrink-0 text-[11px] leading-relaxed m-0"
+        :style="{ color: isDark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.45)' }"
+      >
+        以下配置会覆盖脚本里该线程组自身的并发数与时长；「稳态时长」不含 Ramp-up，实际运行 = Ramp-up + 稳态时长。
+      </p>
+
       <!-- ③ Left form / Right chart -->
       <div
         v-if="currentConfig"

@@ -66,7 +66,9 @@ def _estimate_tg_seconds(kind: str, params: dict) -> int:
             return default
 
     if kind == 'ThreadGroup':
-        return _i('duration')
+        # duration = 稳态时长（不含 ramp），整段实跑 = ramp + 稳态。与
+        # jmx._build_standard_tg 写进 ThreadGroup.duration 的值保持同一口径。
+        return _i('ramp_up') + _i('duration')
     if kind == 'SteppingThreadGroup':
         ramp = _i('step_count') * _i('step_delay')
         # 用户的 `shutdown` 字段语义 = 「退出总时长」(从峰值到 0 的总秒数)。
@@ -128,7 +130,8 @@ def estimate_phase_anchors_sec(thread_groups_config: list[dict]) -> dict[str, in
         return {
             'ramp_done_sec': ramp,
             'hold_start_sec': ramp,
-            'shutdown_start_sec': duration,  # 标准 TG 没显式 shutdown，duration 结束就退
+            # duration 是稳态时长 → 退出时刻 = ramp + 稳态（标准 TG 无显式 shutdown 段）
+            'shutdown_start_sec': ramp + duration,
         }
     if kind == 'SteppingThreadGroup':
         ramp = _i('step_count') * _i('step_delay')
