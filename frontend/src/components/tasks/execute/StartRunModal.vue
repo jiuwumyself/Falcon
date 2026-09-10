@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  X, Plus, RefreshCw, Loader, AlertCircle, AlertTriangle, CheckCircle2, Server, Play,
+  X, RefreshCw, Loader, AlertCircle, AlertTriangle, CheckCircle2, Server, Play,
 } from 'lucide-vue-next'
 import { ApiError, loadGeneratorsApi } from '@/lib/api'
 import type { LoadGenerator } from '@/types/task'
@@ -24,8 +24,6 @@ const emit = defineEmits<{
 const lgs = ref<LoadGenerator[]>([])
 const selectedIds = ref<Set<number>>(new Set())
 const loading = ref(false)
-const scaling = ref(false)
-const scaleCount = ref(3)
 const error = ref('')
 // SSH 机自检（点刷新时连机器 + 清残留 jmeter + 验版本）状态
 const sshChecking = ref(false)
@@ -125,21 +123,6 @@ function toggle(id: number) {
   selectedIds.value = set
 }
 
-async function doScaleUp() {
-  if (scaling.value || scaleCount.value < 1) return
-  scaling.value = true
-  error.value = ''
-  try {
-    await loadGeneratorsApi.scaleUp(scaleCount.value)
-    setTimeout(refresh, 6000)
-    setTimeout(refresh, 14000)
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.humanMessage : String(e)
-  } finally {
-    scaling.value = false
-  }
-}
-
 function confirm() {
   if (!canConfirm.value) return
   emit('confirm', Array.from(selectedIds.value))
@@ -230,7 +213,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         <p v-if="!visibleLgs.length && !loading"
            class="text-[11px] py-4 text-center"
            :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }">
-          暂无可用压力源。点下方「+扩容」拉起 agent 容器。
+          暂无可用压力源。压力机为固定编制，请联系运维确认 agent pod 状态。
         </p>
         <button
           v-for="g in visibleLgs"
@@ -281,42 +264,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
                 :style="{ background: '#10b981', boxShadow: '0 0 4px rgba(16,185,129,0.5)' }"
                 title="online"></span>
         </button>
-      </div>
-
-      <!-- 扩容控件 -->
-      <div class="flex items-center gap-1.5 mt-3 pt-3"
-           :style="{
-             borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
-           }">
-        <input
-          v-model.number="scaleCount"
-          type="number"
-          min="1"
-          max="20"
-          class="w-12 px-1.5 py-1 rounded text-[11px] text-center outline-none"
-          :style="{
-            background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
-            color: isDark ? '#fff' : '#1a1a2e',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
-          }"
-        />
-        <button
-          class="flex items-center gap-1 px-2 py-1 rounded text-[11px] cursor-pointer disabled:opacity-50"
-          :style="{
-            background: isDark ? 'rgba(59,130,246,0.16)' : 'rgba(59,130,246,0.1)',
-            color: '#3b82f6',
-          }"
-          :disabled="scaling"
-          @click="doScaleUp"
-        >
-          <Loader v-if="scaling" :size="10" class="animate-spin" />
-          <Plus v-else :size="10" />
-          扩容 {{ scaleCount }} 台
-        </button>
-        <span class="text-[10px] ml-2"
-              :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.45)' }">
-          扩容后 ~10s agent 自动 register
-        </span>
       </div>
 
       <!-- 多 TG + 多压力源 警告：jmx 缩放每个 TG 各自 ceil 累加，总线程数会有 ±N 误差 -->

@@ -1825,6 +1825,11 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
         前端「+ 扩容 N 台」按钮调；编排适配器拉起新副本，agent 起来后自调 register。
         立即返回当前已知 pod_name 列表（不阻塞等 register）。
         """
+        if not getattr(settings, 'SCALING_ENABLED', False):
+            return Response(
+                {'detail': '压力机为固定编制，扩缩容已停用（如需启用：SCALING_ENABLED=true）'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             count = int(request.data.get('count', 1))
         except (TypeError, ValueError):
@@ -1849,6 +1854,11 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
         - pod_names：明确缩这几台
         - idle_only：把所有 idle 的容器都释放（v1.2 release_idle_agents 命令也调它）
         """
+        if not getattr(settings, 'SCALING_ENABLED', False):
+            return Response(
+                {'detail': '压力机为固定编制，扩缩容已停用（如需启用：SCALING_ENABLED=true）'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         pod_names = request.data.get('pod_names')
         idle_only = request.data.get('idle_only')
 
@@ -1878,7 +1888,13 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
         对所有 transport='ssh' 的压力机：SSH 连通自检 + 清残留 jmeter 进程 +
         jmeter --version 验可用。成功 → status=idle + 刷新心跳；失败/超时 → status=lost。
         前端「刷新」按钮在列表含 SSH 机时调用。返回 [{id, pod_name, ok, message}]。
+
+        ⚠️ 有副作用：会在远端跑 pkill 清残留 jmeter，可能杀掉别人正在跑的压测，
+        所以和 register / heartbeat 一样走 agent token 校验。
         """
+        if not _check_agent_token(request):
+            return Response({'detail': 'Invalid agent token'}, status=401)
+
         from concurrent.futures import ThreadPoolExecutor
         from .services import ssh as ssh_svc
 

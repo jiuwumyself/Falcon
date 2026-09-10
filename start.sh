@@ -37,18 +37,11 @@ echo "→ 启动 Arthas WS 代理 (@ :8011) …"
   >> /tmp/falcon-arthas-proxy.log 2>&1 &
 ARTHAS_PID=$!
 
-# v1.2 多机：周期回收僵尸 agent（30min 无心跳的 idle agent 标 lost + scale_down）。
-# 生产环境应该走 cron / systemd timer，开发态简单起个 bg loop 够用。
-# IDLE_RELEASE_MINUTES 默认 30，可在 backend/.env 覆盖。
-echo "→ 启动 agent 周期回收 (每 5 min release_idle_agents) …"
-(
-  while true; do
-    sleep 300
-    ( cd backend && ./venv/bin/python manage.py release_idle_agents ) \
-      >> /tmp/falcon-release-idle.log 2>&1 || true
-  done
-) &
-RELEASE_PID=$!
+# 压力机已改为固定编制（生产 10 台常驻 agent），不再做自动回收：
+# release_idle_agents 会把 30 分钟没心跳的 idle agent 标成 lost 并尝试销毁容器，
+# 固定机器场景下有害无益（网络抖动一次就可能把好机器摘掉）。
+# 真要用回动态编制，把下面这段恢复，并把 settings 的 SCALING_ENABLED 设成 true。
+RELEASE_PID=""
 
 # 定时任务 tick：每分钟扫到点的 TaskSchedule，HTTP 触发 web 的 run 接口起压测。
 # 生产环境走 K8s CronJob（deploy/k8s/80-scheduler-cronjob.yaml）。
@@ -65,7 +58,7 @@ SCHEDULE_PID=$!
 cleanup() {
   echo
   echo "→ 停止 …"
-  kill "$BACKEND_PID" "$FRONTEND_PID" "$ARTHAS_PID" "$RELEASE_PID" "$SCHEDULE_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$FRONTEND_PID" "$ARTHAS_PID" "$SCHEDULE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   exit 0
 }
@@ -75,7 +68,6 @@ cat <<EOF
 
   Backend         → http://localhost:8000   (pid $BACKEND_PID)
   Frontend        → http://localhost:5173   (pid $FRONTEND_PID)
-  release-idle    → 每 5 min 跑一次          (pid $RELEASE_PID, log /tmp/falcon-release-idle.log)
 
   Ctrl+C 同时停止
 EOF

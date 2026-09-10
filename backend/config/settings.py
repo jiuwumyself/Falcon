@@ -156,6 +156,10 @@ STORAGES = {
 CSRF_TRUSTED_ORIGINS = [
     o.strip() for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()
 ]
+# dev 下 admin 从 Vite 代理进来（5173 → 8000），Origin 与 Host 不同源，
+# 登录 POST 会被 CSRF 拒。DEBUG 时恒定信任 Vite dev server。
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS += ['http://localhost:5173', 'http://127.0.0.1:5173']
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -226,6 +230,12 @@ AGENT_COMPOSE_SERVICE = os.getenv('AGENT_COMPOSE_SERVICE', 'agent')
 AGENT_COMPOSE_PROJECT = os.getenv('AGENT_COMPOSE_PROJECT', None)
 AGENT_K8S_NAMESPACE = os.getenv('AGENT_K8S_NAMESPACE', 'falcon')
 AGENT_K8S_DEPLOYMENT = os.getenv('AGENT_K8S_DEPLOYMENT', 'falcon-agent')
+
+# 压力机扩缩容开关。生产是固定 10 台常驻 agent，不需要动态扩缩容，默认关闭：
+# scale-up / scale-down 端点直接返回 403，避免误操作销毁正在跑压测的容器
+# （这两个端点没有鉴权，平台又是 AllowAny，敞着风险太大）。
+# 真要用回动态扩缩容，设 SCALING_ENABLED=true。
+SCALING_ENABLED = os.getenv('SCALING_ENABLED', 'false').lower() == 'true'
 
 MAX_VUSERS_PER_AGENT = int(os.getenv('MAX_VUSERS_PER_AGENT', '100'))
 IDLE_RELEASE_MINUTES = int(os.getenv('IDLE_RELEASE_MINUTES', '30'))
