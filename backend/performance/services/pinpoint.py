@@ -15,27 +15,32 @@ API endpoint 路径（按 Pinpoint 通用约定，客户实例不一致时调整
 """
 from __future__ import annotations
 
+import time
+
 from typing import Any
 from urllib.parse import urlencode
 
 
-# 模块级 client / 失败缓存。PinpointConfig 改了之后调 reset_client_cache。
+# 模块级 client / 失败缓存。PinpointConfig 改了之后调 reset_client_cache
+# （admin 保存时会自动调，见 PinpointConfigAdmin.save_model）。
+# 失败**不再永久短路**：配置从"未启用"改成"已启用"后，不重启 pod 也能在 TTL 后自愈。
 _CONFIG_CACHE: dict[str, Any] | None = None
-_FAILED: bool = False
+_FAILED_AT: float | None = None
+_FAIL_TTL = 60.0
 
 
 def _load_config() -> dict[str, Any] | None:
     """从 PinpointConfig 单例拿配置；enabled=False 或 base_url 空时返 None。"""
-    global _CONFIG_CACHE, _FAILED
+    global _CONFIG_CACHE, _FAILED_AT
     if _CONFIG_CACHE is not None:
         return _CONFIG_CACHE
-    if _FAILED:
+    if _FAILED_AT is not None and (time.monotonic() - _FAILED_AT) < _FAIL_TTL:
         return None
     try:
         from ..models import PinpointConfig  # noqa: PLC0415
         cfg = PinpointConfig.get_config()
         if not cfg.enabled or not cfg.base_url:
-            _FAILED = True  # 静默：当作不可用，别每次重试
+            _FAILED_AT = time.monotonic()  # 当作暂不可用，_FAIL_TTL 秒后重试
             return None
         _CONFIG_CACHE = {
             'base_url': cfg.base_url.rstrip('/'),
@@ -44,15 +49,15 @@ def _load_config() -> dict[str, Any] | None:
         }
         return _CONFIG_CACHE
     except Exception:  # noqa: BLE001
-        _FAILED = True
+        _FAILED_AT = time.monotonic()
         return None
 
 
 def reset_client_cache() -> None:
     """admin 改 PinpointConfig 后或单测调用，清掉模块级 cache。"""
-    global _CONFIG_CACHE, _FAILED
+    global _CONFIG_CACHE, _FAILED_AT
     _CONFIG_CACHE = None
-    _FAILED = False
+    _FAILED_AT = None
 
 
 def _headers(cfg: dict[str, Any]) -> dict[str, str]:

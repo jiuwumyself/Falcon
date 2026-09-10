@@ -119,6 +119,19 @@ class PinpointConfigAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+    def save_model(self, request, obj, form, change):
+        """保存后立刻清掉进程内的配置缓存。
+
+        pinpoint 客户端把 base_url / token 缓存在模块级变量里，不清的话在后台改完
+        配置得重启 pod 才生效（后端是单副本，进程内清缓存就够）。"""
+        super().save_model(request, obj, form, change)
+        try:
+            from .services import pinpoint as pinpoint_svc  # noqa: PLC0415
+            pinpoint_svc.reset_client_cache()
+            pinpoint_svc.reset_app_cache()
+        except Exception:  # noqa: BLE001
+            pass  # 清缓存失败不该挡住保存；最差退化成 _FAIL_TTL 秒后自愈
+
 
 @admin.register(RunEventAnchor)
 class RunEventAnchorAdmin(admin.ModelAdmin):
