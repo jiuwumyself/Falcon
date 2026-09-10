@@ -388,6 +388,41 @@ class RunExecutor:
                     cfg.get('scenario', '?') for cfg in task.thread_groups_config
                 )
                 sub_lines.append(f'✅ Step 2 配置: {tg_count} 个 ThreadGroup [{scenarios}]')
+
+            # CSV 绑定检查：JMX 里有 CSVDataSet 但没在平台绑定文件时，JMeter 启动时
+            # 会抛 JMeterStopThreadException（"File xxx must exist and be readable"）
+            # 把整个线程组的线程直接停掉——现象是该 TG 下所有 sampler 一条没跑，
+            # 界面显示成一片「未被 JMeter 执行」，极难自查（实测踩过）。这里提前拦。
+            # 触发场景最常见的是「重新上传脚本」——replace-jmx 会解绑全部 CSV。
+            try:
+                bound = {b.component_path for b in task.csv_bindings.all() if b.component_path}
+
+                # list_components 返回的是组件**树**（children 嵌套），要拍平
+                def _flat_csv(nodes):
+                    for n in nodes:
+                        if n.kind == 'CSVDataSet' and n.enabled:
+                            yield n
+                        if n.children:
+                            yield from _flat_csv(n.children)
+
+                csv_nodes = list(_flat_csv(jmx_svc.list_components(jmx_path.read_bytes())))
+                missing = [c for c in csv_nodes if c.path not in bound]
+                if missing:
+                    sub_ok = False
+                    names = '、'.join(f'{c.testname or c.path}' for c in missing[:3])
+                    more = f' 等 {len(missing)} 个' if len(missing) > 3 else ''
+                    sub_lines.append(
+                        f'❌ {len(missing)} 个 CSVDataSet 未绑定 CSV 文件：{names}{more}',
+                    )
+                    sub_lines.append(
+                        '      → 在 Step 1 组件树里点该组件的回形针图标上传 CSV；'
+                        '不绑定会导致该线程组所有接口一条都跑不出来',
+                    )
+                elif csv_nodes:
+                    sub_lines.append(f'✅ CSV 绑定: {len(csv_nodes)} 个 CSVDataSet 均已绑定')
+            except Exception as e:  # noqa: BLE001
+                sub_lines.append(f'⚠️ CSV 绑定检查跳过: {e}')
+
             # build_run_xml 试运行
             try:
                 xml = jmx_svc.build_run_xml(

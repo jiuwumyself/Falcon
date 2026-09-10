@@ -293,7 +293,7 @@ const summary = computed(() => {
                 v-if="!hasDetail(r)"
                 class="text-[11px]"
                 :style="{ color: isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)' }"
-              >(此条没捕获到响应详情，可能 sampler 没真跑或被前置失败短路)</p>
+              >(此条没捕获到响应详情：sampler 没真跑，或被前置失败短路。若整组接口都是这样，先查 CSVDataSet 是否已绑定 CSV)</p>
             </div>
           </Motion>
         </AnimatePresence>

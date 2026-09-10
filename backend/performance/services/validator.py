@@ -178,7 +178,7 @@ def _match_samples_to_paths(
                 status=0,
                 elapsed_ms=0,
                 ok=False,
-                error='未被 JMeter 执行（可能被前面的失败 / 控制器跳过）',
+                error='未被 JMeter 执行（常见原因：CSVDataSet 未绑定 CSV 导致线程终止 / 前置请求失败 / 条件控制器跳过）',
             ))
     return results
 
