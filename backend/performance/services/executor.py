@@ -1535,6 +1535,12 @@ class RunExecutor:
         if 'error_breakdown' not in summary:
             jtl_summary = _summarize_jtl(get_run_dir(run.run_id) / 'results.jtl')
             summary['error_breakdown'] = jtl_summary.get('error_breakdown', {})
+            # avg_rps 以 JTL 为准：JTL 有每条样本的真实时间戳，算出来是精确值；
+            # InfluxDB 那边只能按上报点推断跨度，且历史上出过"虚高 5 倍"的坑。
+            # 同时保证执行页 KPI 与接口统计表（走 jtl_analysis）显示同一个数字。
+            jtl_rps = jtl_summary.get('avg_rps') or 0
+            if jtl_rps > 0:
+                summary['avg_rps'] = jtl_rps
 
         status_update = {
             'finished_at': dj_timezone.now(),

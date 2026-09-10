@@ -1013,22 +1013,35 @@ def query_run_summary(run_id: str) -> dict:
         if summary['total_requests'] > 0:
             summary['error_rate'] = errors / summary['total_requests'] * 100
 
-        # avg_rps：JMeter Backend Listener 报的 count 已经是每秒的请求计数；
-        # 平均 = 总请求数 / 持续秒数。用 InfluxQL 拿不到 elapsed_seconds，
-        # 我们改用 SHOW SERIES 风格简化：先按 1s GROUP BY 算每秒 rps 再取均值。
+        # avg_rps = 总请求数 / 实际持续秒数。
+        #
+        # 【坑】Backend Listener 报的 `count` **不是每秒计数**，而是一个上报周期
+        # （influxdbSendInterval，默认 5s）内的累计请求数。旧实现按 time(1s) 分桶后
+        # 过滤掉空桶再对剩下的桶取平均 —— 等于把「5 秒的总量」当成「每秒速率」平均，
+        # avg_rps 恒定虚高一个上报间隔的倍数（默认 5 倍）。实测两个 run 都精确吻合：
+        #   9976 请求 / 4 个非空桶 = 2494（真值 501）
+        #    999 请求 / 7 个非空桶 = 142.7（真值 33.4）
+        # 现在改成用首末点的时间跨度算，并补上一个上报间隔（首个上报点承载的是它
+        # **之前**那个间隔的数据，光用 last-first 会少算一段）。
         rps_q = (
             "SELECT sum(\"count\") AS rps "
             f"FROM \"jmeter\" WHERE \"run_id\"='{safe_run}' "
             "AND \"transaction\"='all' AND \"statut\"='all' "
             "GROUP BY time(1s) fill(0)"
         )
-        rps_values = [
-            float(r.get('rps') or 0)
+        stamps = [
+            _ts_to_ms(r['time'])
             for r in client.query(rps_q).get_points()
+            if float(r.get('rps') or 0) > 0 and r.get('time')
         ]
-        rps_values = [v for v in rps_values if v > 0]
-        if rps_values:
-            summary['avg_rps'] = sum(rps_values) / len(rps_values)
+        stamps = sorted(t for t in stamps if t > 0)
+        if summary['total_requests'] > 0 and len(stamps) >= 2:
+            gaps = sorted(stamps[i] - stamps[i - 1] for i in range(1, len(stamps)))
+            interval_ms = gaps[len(gaps) // 2] or 1000  # 中位间隔 = 上报周期
+            span_ms = (stamps[-1] - stamps[0]) + interval_ms
+            if span_ms > 0:
+                summary['avg_rps'] = summary['total_requests'] / (span_ms / 1000.0)
+        # 点数 < 2 时无法推断上报间隔 → 留 0，由调用方回退到 JTL 精确值
     except Exception:  # noqa: BLE001
         pass
 
