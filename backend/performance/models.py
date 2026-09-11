@@ -576,6 +576,57 @@ class PinpointConfig(models.Model):
         return obj
 
 
+class ArthasConfig(models.Model):
+    """Arthas / zapp-server 接入全局配置（singleton pk=1）。
+
+    原先账号密码走环境变量 ZAPP_ACCOUNT / ZAPP_PASSWORD，改密码得找运维改 Secret
+    再滚 pod，很别扭；改成入库后在 admin 里改、保存即生效（同 PinpointConfig）。
+    环境变量仍作兜底：库里留空时回落到 env，本地开发 .env 的用法不受影响。
+
+    ⚠️ password 是明文存库（同 PinpointConfig.auth_token）。这是内网运维凭据，
+    平台本身也无鉴权，真要收紧得整体做权限体系，不是这张表单独能解决的。
+    """
+    enabled = models.BooleanField(
+        default=True,
+        help_text='关闭后 Arthas 相关端点直接返回未启用，前端不展示终端入口。',
+    )
+    http_base_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='zapp-server HTTP 地址，留空用默认 https://zapp-server.zhihuishu.com',
+    )
+    ws_base_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='zapp-server WebSocket 地址，留空用默认 wss://zapp-server.zhihuishu.com',
+    )
+    account = models.CharField(
+        max_length=200, blank=True,
+        help_text='zapp-server 登录账号。留空时回落到环境变量 ZAPP_ACCOUNT。',
+    )
+    password = models.CharField(
+        max_length=200, blank=True,
+        help_text='zapp-server 登录密码。留空时回落到环境变量 ZAPP_PASSWORD。',
+    )
+    request_timeout_sec = models.IntegerField(
+        default=10, help_text='HTTP 请求超时秒数。',
+    )
+
+    class Meta:
+        verbose_name = 'Arthas 全局配置'
+        verbose_name_plural = 'Arthas 全局配置'
+
+    def __str__(self) -> str:
+        return f'Arthas 全局配置（{"已启用" if self.enabled else "已禁用"}）'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls) -> 'ArthasConfig':
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class RunPinpointTrace(models.Model):
     """run 终态拉到的 Pinpoint 慢 trace 元数据（v1.3）。
 

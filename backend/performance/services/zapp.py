@@ -4,7 +4,8 @@
 container 全自动带出。登录拿 JWT、带 Authorization header、trust_env=False 绕本机代理
 （同 Pinpoint：内网域名走系统代理会 502/reset）。
 
-账号密码走环境变量 ZAPP_ACCOUNT / ZAPP_PASSWORD（写在 backend/.env，dotenv 会加载）。
+账号密码优先读 ArthasConfig 单例表（admin 里改、保存即生效），库里留空时回落到
+环境变量 ZAPP_ACCOUNT / ZAPP_PASSWORD（本地 backend/.env 的老用法仍可用）。
 """
 from __future__ import annotations
 
@@ -14,16 +15,50 @@ from typing import Any
 
 import requests
 
-BASE = os.getenv('ZAPP_BASE_URL', 'https://zapp-server.zhihuishu.com')
-# 账号密码走 backend/.env（gitignored，不进 git）：ZAPP_ACCOUNT / ZAPP_PASSWORD
-ACCOUNT = os.getenv('ZAPP_ACCOUNT', '')
-PASSWORD = os.getenv('ZAPP_PASSWORD', '')
+_DEFAULT_BASE = 'https://zapp-server.zhihuishu.com'
 
+# 配置缓存：admin 保存时由 ArthasConfigAdmin.save_model 调 reset_config_cache 清掉。
+_CFG: dict[str, Any] | None = None
 _tok: dict[str, Any] = {'v': None, 'ts': 0.0}
 
 
+def reset_config_cache() -> None:
+    """admin 改 ArthasConfig 后调用；顺带把登录 token 也作废（换账号了）。"""
+    global _CFG
+    _CFG = None
+    _tok['v'] = None
+    _tok['ts'] = 0.0
+
+
+def _config() -> dict[str, Any]:
+    """读配置：DB 单例优先，逐字段回落环境变量。DB 不可用时纯走 env。"""
+    global _CFG
+    if _CFG is not None:
+        return _CFG
+    enabled, base, account, password, timeout = True, '', '', '', 10
+    try:
+        from ..models import ArthasConfig  # noqa: PLC0415
+        cfg = ArthasConfig.get_config()
+        enabled = cfg.enabled
+        base = (cfg.http_base_url or '').strip()
+        account = (cfg.account or '').strip()
+        password = cfg.password or ''
+        timeout = cfg.request_timeout_sec or 10
+    except Exception:  # noqa: BLE001  DB 未迁移 / 不可用 → 纯 env 模式
+        pass
+    _CFG = {
+        'enabled': enabled,
+        'base': base or os.getenv('ZAPP_BASE_URL', _DEFAULT_BASE),
+        'account': account or os.getenv('ZAPP_ACCOUNT', ''),
+        'password': password or os.getenv('ZAPP_PASSWORD', ''),
+        'timeout': timeout,
+    }
+    return _CFG
+
+
 def is_enabled() -> bool:
-    return bool(ACCOUNT and PASSWORD)
+    c = _config()
+    return bool(c['enabled'] and c['account'] and c['password'])
 
 
 def _session() -> requests.Session:
@@ -35,8 +70,10 @@ def _session() -> requests.Session:
 def _token() -> str:
     if _tok['v'] and time.time() - _tok['ts'] < 1500:
         return _tok['v']
-    r = _session().post(f'{BASE}/access/user/login',
-                        json={'account': ACCOUNT, 'password': PASSWORD}, timeout=10)
+    c = _config()
+    r = _session().post(f'{c["base"]}/access/user/login',
+                        json={'account': c['account'], 'password': c['password']},
+                        timeout=c['timeout'])
     r.raise_for_status()
     d = r.json().get('data')
     tok = d if isinstance(d, str) else (d or {}).get('token')
@@ -47,7 +84,7 @@ def _token() -> str:
 
 
 def _get(path: str, timeout: int = 12) -> Any:
-    r = _session().get(f'{BASE}/{path}', headers={'Authorization': _token()}, timeout=timeout)
+    r = _session().get(f'{_config()["base"]}/{path}', headers={'Authorization': _token()}, timeout=timeout)
     r.raise_for_status()
     body = r.json()
     return body.get('data') if isinstance(body, dict) else body

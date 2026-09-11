@@ -8,7 +8,8 @@
 故由本服务代连：本服务登录拿 JWT、带 header、proxy=None 连上游，再把字节双向桥接给前端。
 
 跑（账号密码走环境变量，别写进代码/前端）：
-  ZAPP_ACCOUNT=xxx ZAPP_PASSWORD=yyy ./venv/bin/python scripts/arthas_ws_proxy.py
+  ./venv/bin/python scripts/arthas_ws_proxy.py
+（账号密码优先读 admin 的「Arthas 全局配置」，留空时回落 ZAPP_ACCOUNT / ZAPP_PASSWORD）
 前端连（Vite 代理 /arthas-term → :8011）：
   ws://localhost:5173/arthas-term?cluster=7&namespace=polymas&pod=<pod>&container=<容器>
 """
@@ -26,11 +27,59 @@ from dotenv import load_dotenv
 # 独立脚本，自己加载 backend/.env（拿 ZAPP_ACCOUNT / ZAPP_PASSWORD，不进 git）
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
-HTTP = 'https://zapp-server.zhihuishu.com'
-WS = 'wss://zapp-server.zhihuishu.com'
-ACCOUNT = os.getenv('ZAPP_ACCOUNT', '')
-PASSWORD = os.getenv('ZAPP_PASSWORD', '')
+_DEFAULT_HTTP = 'https://zapp-server.zhihuishu.com'
+_DEFAULT_WS = 'wss://zapp-server.zhihuishu.com'
 PORT = int(os.getenv('ARTHAS_PROXY_PORT', '8011'))
+
+# 配置优先读 ArthasConfig 单例表（admin 里改、无需重启本进程），库里留空回落环境变量。
+# 本进程是 sidecar / 独立脚本，这里自己起一次 Django ORM。
+_CFG_TTL = 30.0          # 缓存 30s：既不每次连接都查库，也能让 admin 改动很快生效
+_cfg_cache = {'v': None, 'ts': 0.0}
+_django_ready = False
+
+
+def _ensure_django() -> bool:
+    global _django_ready
+    if _django_ready:
+        return True
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+        import django  # noqa: PLC0415
+        django.setup()
+        _django_ready = True
+    except Exception as e:  # noqa: BLE001
+        print(f'[arthas-proxy] Django 初始化失败，回落环境变量: {e}', file=sys.stderr, flush=True)
+    return _django_ready
+
+
+def _cfg() -> dict:
+    now = time.time()
+    if _cfg_cache['v'] is not None and now - _cfg_cache['ts'] < _CFG_TTL:
+        return _cfg_cache['v']
+    http_url = ws_url = account = password = ''
+    enabled = True
+    if _ensure_django():
+        try:
+            from performance.models import ArthasConfig  # noqa: PLC0415
+            c = ArthasConfig.get_config()
+            enabled = c.enabled
+            http_url = (c.http_base_url or '').strip()
+            ws_url = (c.ws_base_url or '').strip()
+            account = (c.account or '').strip()
+            password = c.password or ''
+        except Exception as e:  # noqa: BLE001
+            print(f'[arthas-proxy] 读 ArthasConfig 失败，回落环境变量: {e}',
+                  file=sys.stderr, flush=True)
+    out = {
+        'enabled': enabled,
+        'http': http_url or os.getenv('ZAPP_BASE_URL', _DEFAULT_HTTP),
+        'ws': ws_url or _DEFAULT_WS,
+        'account': account or os.getenv('ZAPP_ACCOUNT', ''),
+        'password': password or os.getenv('ZAPP_PASSWORD', ''),
+    }
+    _cfg_cache.update(v=out, ts=now)
+    return out
 
 _tok = {'v': None, 'ts': 0.0}
 
@@ -40,7 +89,9 @@ def get_token() -> str:
         return _tok['v']
     s = requests.Session()
     s.trust_env = False  # 绕代理
-    r = s.post(f'{HTTP}/access/user/login', json={'account': ACCOUNT, 'password': PASSWORD}, timeout=10)
+    c = _cfg()
+    r = s.post(f'{c["http"]}/access/user/login',
+               json={'account': c['account'], 'password': c['password']}, timeout=10)
     d = r.json().get('data')
     tok = d if isinstance(d, str) else (d or {}).get('token')
     if not tok:
@@ -64,7 +115,8 @@ async def handler(client) -> None:
         await client.close()
         return
 
-    url = f'{WS}/ws/cluster/{cluster}/namespace/{ns}/pod/{pod}/container/{container}/terminal'
+    url = (f'{_cfg()["ws"]}/ws/cluster/{cluster}/namespace/{ns}'
+           f'/pod/{pod}/container/{container}/terminal')
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -101,8 +153,10 @@ async def handler(client) -> None:
 
 
 async def main() -> None:
-    if not (ACCOUNT and PASSWORD):
-        print('请先设 ZAPP_ACCOUNT / ZAPP_PASSWORD 环境变量', file=sys.stderr)
+    c = _cfg()
+    if not (c['account'] and c['password']):
+        print('未配置 Arthas 账号密码：请在 admin 的「Arthas 全局配置」里填写，'
+              '或设环境变量 ZAPP_ACCOUNT / ZAPP_PASSWORD', file=sys.stderr)
         sys.exit(1)
     print(f'[arthas-proxy] 监听 ws://localhost:{PORT}（Vite /arthas-term 转发到这里）', file=sys.stderr)
     async with websockets.serve(handler, 'localhost', PORT, max_size=None):

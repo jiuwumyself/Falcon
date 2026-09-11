@@ -2,6 +2,7 @@ from django import forms
 from django.contrib import admin
 
 from .models import (
+    ArthasConfig,
     BackendListenerConfig, Environment, LoadGenerator, MetricSample,
     PinpointConfig, PrometheusDataSource, RunEventAnchor, RunPinpointTrace, Service,
     Task, TaskCsvBinding, TaskRun, TaskSchedule, TaskScheduleType,
@@ -131,6 +132,31 @@ class PinpointConfigAdmin(admin.ModelAdmin):
             pinpoint_svc.reset_app_cache()
         except Exception:  # noqa: BLE001
             pass  # 清缓存失败不该挡住保存；最差退化成 _FAIL_TTL 秒后自愈
+
+
+@admin.register(ArthasConfig)
+class ArthasConfigAdmin(admin.ModelAdmin):
+    """Arthas / zapp-server 接入配置（singleton）。
+
+    账号密码原先只能走环境变量，改密码要找运维改 Secret + 滚 pod。入库后在这里改，
+    保存即生效：web 进程清自己的缓存，WS 代理 sidecar 30 秒内自动读到新值。
+    """
+    list_display = ('id', 'enabled', 'http_base_url', 'account', 'request_timeout_sec')
+    readonly_fields = ('id',)
+
+    def has_add_permission(self, request):
+        return not ArthasConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        try:
+            from .services import zapp as zapp_svc  # noqa: PLC0415
+            zapp_svc.reset_config_cache()
+        except Exception:  # noqa: BLE001
+            pass  # 清缓存失败不挡保存
 
 
 @admin.register(RunEventAnchor)
