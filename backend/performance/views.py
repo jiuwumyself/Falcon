@@ -489,7 +489,17 @@ class TaskViewSet(viewsets.ModelViewSet):
         """返回内存生成的可执行 JMX，用于调试 / 用户预览。不写盘。"""
         instance = self.get_object()
         try:
-            xml = build_run_xml(instance)
+            # 按真实执行的方式生成：注入 Environment DNS + BackendListener +
+            # 错误响应监听器。以前预览用的是"纯净版"（三个开关全关），用户拿它排查
+            # 「为什么没指标 / hosts 没生效」时看不到这些节点，被误导过。
+            # run_id 用占位串——真跑时是具体 run_id，这里只为让节点结构一致。
+            xml = build_run_xml(
+                instance,
+                inject_environment_dns=bool(instance.environment_id),
+                inject_backend_listener=True,
+                inject_error_response_listener=True,
+                run_id='PREVIEW',
+            )
         except (FileNotFoundError, OSError) as e:
             raise Http404(f'JMX 文件不存在: {e}')
         except JmxParseError as e:
@@ -911,6 +921,20 @@ class TaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        # 活跃 run 检查前置：下面的 DB 唯一约束（unique_active_run_per_task）本来也能
+        # 兜住，但它要等到 TaskRun.objects.create() 才触发，排在压力源校验之后 ——
+        # 用户拿同一台机器重复起 run 时，先撞上「压力源非 idle」（因为那台正在跑这个
+        # 任务），被引导去刷新压力源列表，真实原因反而看不到。提前拦，给准确的话。
+        active_run = instance.runs.filter(
+            status__in=[s.value for s in ACTIVE_RUN_STATUSES],
+        ).first()
+        if active_run:
+            return Response(
+                {'detail': '该任务已有运行中的 run，请先取消',
+                 'active_run_id': active_run.run_id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         # v1.2 多机调度：前端可选传 load_generator_ids 指定哪些 agent 来跑
         # 不传 / 空 → executor 走 LOCAL_FALLBACK 本机执行（开发态友好）
         lg_ids: list[int] = request.data.get('load_generator_ids') or []
@@ -1085,7 +1109,7 @@ class RunViewSet(viewsets.GenericViewSet):
     def set_keep(self, request, run_id=None):
         """勾选/取消「保留」。keep=True 的 run 目录永不被 cleanup_old_runs 自动清理。"""
         run = self.get_object()
-        run.keep = bool(request.data.get('keep'))
+        run.keep = _as_bool(request.data.get('keep'))
         run.save(update_fields=['keep'])
         return Response(TaskRunSerializer(run).data)
 
@@ -1093,7 +1117,7 @@ class RunViewSet(viewsets.GenericViewSet):
     def set_baseline(self, request, run_id=None):
         """设/清历史基准。每 task 单选：设 true 时先清掉同 task 其它 run 的 is_baseline。"""
         run = self.get_object()
-        on = bool(request.data.get('is_baseline'))
+        on = _as_bool(request.data.get('is_baseline'))
         if on:
             TaskRun.objects.filter(task=run.task, is_baseline=True).exclude(
                 pk=run.pk,
@@ -1759,6 +1783,21 @@ class RunViewSet(viewsets.GenericViewSet):
 
 # ── v1.2 LoadGenerator：列表 + agent 自注册 / 心跳 ──────────────────────────
 
+def _as_bool(value, default: bool = False) -> bool:
+    """把请求体里的布尔参数解析成真布尔。
+
+    别直接用 bool()：JSON 里传字符串 "false" / "0" 时 bool("false") 是 True，
+    实测 set-keep 传 {"keep": "false"} 会把 keep 设成 True。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _check_agent_token(request) -> bool:
     """
     Agent ↔ 主控用共享 token（settings.FALCON_AGENT_TOKEN）做 Bearer 鉴权。
@@ -1796,14 +1835,36 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
         if not pod_name:
             return Response({'detail': 'pod_name required'}, status=400)
 
+        # 数值字段逐个解析：直接 int()/float() 遇到畸形值会抛 ValueError → 500 HTML
+        # 错误页（实测 port="abc" 就能触发），对调用方毫无提示。改成 400 + 字段名。
+        def _num(key, caster, default):
+            raw = data.get(key, default)
+            if raw is None or raw == '':
+                return default
+            try:
+                return caster(raw)
+            except (TypeError, ValueError):
+                raise ValueError(key) from None
+
+        try:
+            port = _num('port', int, 9100)
+            cpu_cores = _num('cpu_cores', int, 0)
+            memory_gb = _num('memory_gb', float, 0.0)
+            max_vusers = _num('max_vusers', int, 100)
+        except ValueError as bad_field:
+            return Response(
+                {'detail': f'字段 {bad_field} 格式非法，应为数值'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         defaults = {
             'hostname': data.get('hostname', ''),
             'ip': data.get('ip', ''),
-            'port': int(data.get('port', 9100)),
+            'port': port,
             'token': data.get('token', ''),
-            'cpu_cores': int(data.get('cpu_cores', 0) or 0),
-            'memory_gb': float(data.get('memory_gb', 0) or 0),
-            'max_vusers': int(data.get('max_vusers', 100) or 100),
+            'cpu_cores': cpu_cores,
+            'memory_gb': memory_gb,
+            'max_vusers': max_vusers,
             'jmeter_version': data.get('jmeter_version', ''),
             'orchestrator_type': data.get('orchestrator_type', 'docker'),
             'status': LoadGeneratorStatus.IDLE,

@@ -458,6 +458,12 @@ class RunExecutor:
                 ok = False
                 lines.append(f'❌ 磁盘空间不足 ({_ms(t0)}ms)')
                 lines.append(f'   └─ 剩余 {free_mb} MB < 100 MB · {get_runs_dir()}')
+            elif free_gb > 1024 * 100:
+                # 某些 CSI 存储（生产 PVC 实测）会返回上百 PB 的荒唐值，
+                # 「< 100MB 拒绝」这道保护形同虚设。如实标注，别让人以为空间充足。
+                lines.append(f'⚠️ 磁盘空间读数异常 {free_gb:,.0f} GB ({_ms(t0)}ms)')
+                lines.append(f'   └─ {get_runs_dir()}（存储驱动未上报真实容量，'
+                             f'空间保护失效，请自行关注 PVC 用量）')
             else:
                 lines.append(f'✅ 磁盘空间 剩余 {free_gb:.1f} GB ({_ms(t0)}ms)')
                 lines.append(f'   └─ {get_runs_dir()}')

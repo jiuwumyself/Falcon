@@ -53,7 +53,12 @@ def build_servermap(run, service: str, inbound: int = 2, outbound: int = 2,
     st = app_types.get(app)
     targets, skipped = [], []
     if not st:
-        skipped.append({'service': service, 'reason': '不是 Pinpoint 应用（需在 admin 配 pinpoint_app）'})
+        err = pp.last_error()
+        skipped.append({
+            'service': service,
+            'reason': (f'Pinpoint 连接失败：{err}' if err else
+                       f'Pinpoint 里没有名为「{app}」的应用（共 {len(app_types)} 个）'),
+        })
     else:
         targets.append((service, app, st))
 
@@ -111,7 +116,17 @@ def build_diagnosis(run, service: str, brief: bool = False,
     app = (svc.pinpoint_app if svc and svc.pinpoint_app else service)
     app_types = pp.list_applications()
     if app not in app_types:
-        base['reason'] = '不是 Pinpoint 应用（可在 admin 配 pinpoint_app）'
+        # 区分两种情况：拉不到列表（连不上）vs 列表里真没这个应用。
+        # 以前一律报「不是 Pinpoint 应用」，把排查方向带偏过。
+        err = pp.last_error()
+        if err:
+            base['reason'] = f'Pinpoint 连接失败：{err}'
+            base['pinpoint_error'] = err
+        else:
+            base['reason'] = (
+                f'Pinpoint 里没有名为「{app}」的应用（共 {len(app_types)} 个应用）。'
+                f'若应用名不同，在 admin → 服务 里配 pinpoint_app'
+            )
         return base
     code = pp.app_service_type_code(app) or 0
 

@@ -25,6 +25,7 @@ from urllib.parse import urlencode
 # （admin 保存时会自动调，见 PinpointConfigAdmin.save_model）。
 # 失败**不再永久短路**：配置从"未启用"改成"已启用"后，不重启 pod 也能在 TTL 后自愈。
 _CONFIG_CACHE: dict[str, Any] | None = None
+_LAST_ERROR: str = ''   # 最近一次拉应用列表失败的原因（供界面显示）
 _FAILED_AT: float | None = None
 _FAIL_TTL = 60.0
 
@@ -202,13 +203,24 @@ def _direct_session():
     return s
 
 
+def last_error() -> str:
+    """最近一次拉应用列表失败的原因（空串 = 没失败过 / 已恢复）。
+
+    上层用它区分「Pinpoint 里确实没这个应用」和「压根没连上 Pinpoint」——
+    以前两者都表现成一句「不是 Pinpoint 应用」，排查时被误导过（实际是集群
+    到 Pinpoint 的 DNS 不通，界面上一点线索都没有）。
+    """
+    return _LAST_ERROR
+
+
 def list_applications() -> dict[str, str]:
     """拉 Pinpoint 应用列表 → {applicationName: serviceType}（进程级缓存）。失败返 {}。"""
-    global _APP_TYPE_CACHE
+    global _APP_TYPE_CACHE, _LAST_ERROR
     if _APP_TYPE_CACHE is not None:
         return _APP_TYPE_CACHE
     cfg = _load_config()
     if cfg is None:
+        _LAST_ERROR = 'Pinpoint 未启用或未配置 base_url（admin → Pinpoint 全局配置）'
         return {}
     try:
         r = _direct_session().get(
@@ -216,10 +228,13 @@ def list_applications() -> dict[str, str]:
             headers=_headers(cfg), timeout=cfg['timeout'],
         )
         if r.status_code != 200:
+            _LAST_ERROR = f'拉应用列表返回 HTTP {r.status_code}（{cfg["base_url"]}）'
             return {}
         apps = r.json()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _LAST_ERROR = f'连接 Pinpoint 失败：{type(e).__name__}: {str(e)[:200]}'
         return {}
+    _LAST_ERROR = ''
     out: dict[str, str] = {}
     for a in apps if isinstance(apps, list) else []:
         name, st = a.get('applicationName'), a.get('serviceType')
