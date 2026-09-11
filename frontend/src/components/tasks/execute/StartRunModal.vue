@@ -55,7 +55,7 @@ const totalCapacity = computed(() =>
 )
 const recommended = computed(() => Math.max(1, Math.ceil(props.vusers / 100)))
 const capacityOk = computed(() => totalCapacity.value >= props.vusers)
-const canConfirm = computed(() => !loading.value && !scaling.value)
+const canConfirm = computed(() => !loading.value)
 // 0 选 = 主控本机直跑（LOCAL_FALLBACK），用于开发态 / 没拉 agent 容器时
 const localOnly = computed(() => selected.value.size === 0)
 
