@@ -1354,8 +1354,22 @@ def _inject_dns_cache_manager(
     pairs = matched
     top = _top_hashtree(tree)
 
-    # TestPlan 的 hashTree 是 top 的第一个 hashTree 子节点（或 top 自己——我们就放在 top 里）
-    dns_mgr = etree.SubElement(top, 'DNSCacheManager', {
+    # ⚠️ 必须放进 **TestPlan 的子 hashTree**，不能放 top。
+    # top 是根 hashTree，它的直接子节点是 [TestPlan, hashTree(TestPlan 的内容)]；
+    # 往 top 里 append 会让 DNSCacheManager 变成 TestPlan 的**兄弟**，落在测试计划
+    # 作用域之外 —— JMeter 直接忽略，压测机照样走系统 DNS 解析。
+    # （实测踩过：生产 UnknownHostException，XML 里明明有 DNSCacheManager 且
+    #   isCustomResolver=true，就是不生效，根因就是这里的层级放错。）
+    # 定位方式与 _inject_backend_listener 一致。
+    test_plan_subtree = None
+    for el, child_ht, _idx in _hashtree_pairs(top):
+        if _local(el) == 'TestPlan':
+            test_plan_subtree = child_ht
+            break
+    if test_plan_subtree is None:
+        test_plan_subtree = top  # 兜底：非常规结构，至少不崩
+
+    dns_mgr = etree.Element('DNSCacheManager', {
         'guiclass': 'DNSCachePanel',
         'testclass': 'DNSCacheManager',
         'testname': 'Falcon Environment DNS',
@@ -1374,8 +1388,10 @@ def _inject_dns_cache_manager(
     etree.SubElement(dns_mgr, 'boolProp', {'name': 'DNSCacheManager.clearEachIteration'}).text = 'false'
     etree.SubElement(dns_mgr, 'boolProp', {'name': 'DNSCacheManager.isCustomResolver'}).text = 'true'
 
-    # DNSCacheManager 后面紧跟一个空 hashTree（JMeter 配对结构要求）
-    etree.SubElement(top, 'hashTree')
+    # 插到 TestPlan 子树最前面：配置元素要排在线程组之前才符合 JMeter 习惯用法，
+    # 后面紧跟一个空 hashTree（JMeter 的元素/子树配对结构要求）。
+    test_plan_subtree.insert(0, dns_mgr)
+    test_plan_subtree.insert(1, etree.Element('hashTree'))
 
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
