@@ -7,7 +7,22 @@ const emit = defineEmits<{ (e: 'update:detail', next: JSONExtractorDetail): void
 
 const local = reactive<JSONExtractorDetail>({ ...props.detail })
 
-watch(() => props.detail, (d) => Object.assign(local, d))
+// 防回环：父层用 `detail = $event` 接收，每次 emit 都是新对象引用，
+// 会再次触发下面的 props 监听 → 回写 local → deep watch 再 emit …… 无限往返，
+// 表现为抽屉里点「添加参数/添加文件」等操作后整个页面卡死（实测）。
+// 用内容比对做守卫：与当前 local 等价的入参直接忽略，父层真改了才回写。
+function sameAsLocal(d: unknown): boolean {
+  try {
+    return JSON.stringify(d) === JSON.stringify(local)
+  } catch {
+    return false
+  }
+}
+
+watch(() => props.detail, (d) => {
+  if (sameAsLocal(d)) return
+  Object.assign(local, d)
+})
 watch(local, () => emit('update:detail', { ...local }), { deep: true })
 
 const inputStyle = (isDark: boolean) => ({
