@@ -1294,6 +1294,25 @@ def _set_csv_filename_at_path(xml_bytes: bytes, path: str, filename: str) -> byt
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
+def collect_sampler_domains(xml_bytes: bytes) -> set[str]:
+    """收集 JMX 里所有**启用的** HTTP Sampler 的 domain（去重）。
+
+    给两处用：① DNS 注入时只注入脚本真用到的域名 ② 预检的域名解析检查。
+    含 ${...} 的变量域名原样返回，由调用方决定怎么处理（静态查不了）。
+    """
+    tree = _parse_tree(xml_bytes)
+    out: set[str] = set()
+    for sampler in tree.iter('HTTPSamplerProxy'):
+        if sampler.get('enabled', 'true').lower() == 'false':
+            continue
+        for sp in sampler.findall('stringProp'):
+            if sp.get('name') == 'HTTPSampler.domain' and sp.text:
+                d = sp.text.strip()
+                if d:
+                    out.add(d)
+    return out
+
+
 def _parse_host_entry(entry: dict | str) -> tuple[str, str] | None:
     """
     把单条 host_entries 条目统一成 (hostname, ip)。
@@ -1333,15 +1352,7 @@ def _inject_dns_cache_manager(
 
     # 只注入 JMX 里实际用到的域名，避免冗余 StaticHost 条目干扰
     tree = _parse_tree(xml_bytes)
-    used_domains: set[str] = set()
-    for sampler in tree.iter('HTTPSamplerProxy'):
-        if sampler.get('enabled', 'true').lower() == 'false':
-            continue
-        for sp in sampler.findall('stringProp'):
-            if sp.get('name') == 'HTTPSampler.domain' and sp.text:
-                d = sp.text.strip()
-                if d:
-                    used_domains.add(d)
+    used_domains = collect_sampler_domains(xml_bytes)
     matched = [(h, i) for h, i in pairs if h in used_domains]
     if not matched:
         if warnings is not None and used_domains:

@@ -313,6 +313,76 @@ class RunExecutor:
 
     # ── pre check ──────────────────────────────────────────
 
+    def _check_domains_resolvable(self, task, sub_lines: list) -> bool:
+        """检查脚本里的域名是否可达（Environment 映射 或 DNS 可解析）。返回是否通过。
+
+        跳过的情况（返回 True 不拦）：
+          - 域名含 ${...} 变量：运行时才确定，静态查不了
+          - 选了 SSH 型压力机：它在集群外，本进程的解析结果不代表它
+        """
+        import socket  # noqa: PLC0415
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        from . import jmx as jmx_mod  # noqa: PLC0415
+
+        lgs = list(self.run.load_generators.all())
+        if any(getattr(lg, 'transport', 'agent') == 'ssh' for lg in lgs):
+            sub_lines.append('ℹ️ 含 SSH 型压力机，域名解析检查跳过（其网络环境与主控不同）')
+            return True
+
+        xml = task.read_jmx_bytes()
+        domains = jmx_mod.collect_sampler_domains(xml)
+        if not domains:
+            return True
+
+        mapped = set()
+        if task.environment_id and task.environment.host_entries:
+            for entry in task.environment.host_entries:
+                parsed = jmx_mod._parse_host_entry(entry)
+                if parsed:
+                    mapped.add(parsed[0])
+
+        dynamic = {d for d in domains if '${' in d}
+        static = sorted(domains - dynamic)
+
+        def _resolvable(host: str) -> bool:
+            try:
+                socket.getaddrinfo(host, None)
+                return True
+            except OSError:
+                return False
+
+        to_probe = [d for d in static if d not in mapped]
+        results = {}
+        if to_probe:
+            with ThreadPoolExecutor(max_workers=min(8, len(to_probe))) as ex:
+                futs = {ex.submit(_resolvable, d): d for d in to_probe}
+                for f, d in futs.items():
+                    try:
+                        results[d] = f.result(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        results[d] = False
+
+        bad = [d for d in to_probe if not results.get(d)]
+        if bad:
+            names = '、'.join(bad[:3]) + (f' 等 {len(bad)} 个' if len(bad) > 3 else '')
+            sub_lines.append(f'❌ {len(bad)} 个域名压测机解析不了：{names}')
+            env_hint = (f'当前环境「{task.environment.name}」的 hosts 里没有它们'
+                        if task.environment_id else '当前任务未选择执行环境')
+            sub_lines.append(f'      → {env_hint}；请在 Step 2 选择/配置包含这些域名'
+                             f'映射的执行环境，否则跑起来会 100% UnknownHostException')
+            return False
+        else:
+            ok_desc = []
+            if mapped & domains:
+                ok_desc.append(f'{len(mapped & domains)} 个走环境 hosts 映射')
+            if to_probe:
+                ok_desc.append(f'{len(to_probe)} 个 DNS 可解析')
+            if dynamic:
+                ok_desc.append(f'{len(dynamic)} 个是变量（运行时定）')
+            sub_lines.append(f'✅ 域名解析: {"，".join(ok_desc) or "无 HTTP 域名"}')
+        return True
+
     def _flush_pre_check_log(self, lines: list[str]) -> None:
         """把当前累积的预检日志同步写回 DB，让前端 3s 轮询能看到逐项点亮。"""
         self._update_run(pre_check_log='\n'.join(lines))
@@ -422,6 +492,17 @@ class RunExecutor:
                     sub_lines.append(f'✅ CSV 绑定: {len(csv_nodes)} 个 CSVDataSet 均已绑定')
             except Exception as e:  # noqa: BLE001
                 sub_lines.append(f'⚠️ CSV 绑定检查跳过: {e}')
+
+            # 域名解析检查：脚本打的域名，压测机能不能解析？
+            # 不检查的话，现象是预检全绿、跑起来 100% 报 UnknownHostException，
+            # 要翻错误明细看 Java 堆栈才知道是 DNS（实测踩过：白跑 14179 个失败请求）。
+            # 覆盖两种通过条件：① Environment hosts 里有映射（会注入 DNSCacheManager）
+            # ② 本进程能解析（backend 和 agent 同集群同 CoreDNS，可代表 agent）。
+            try:
+                if not self._check_domains_resolvable(task, sub_lines):
+                    sub_ok = False
+            except Exception as e:  # noqa: BLE001
+                sub_lines.append(f'⚠️ 域名解析检查跳过: {e}')
 
             # build_run_xml 试运行
             try:
