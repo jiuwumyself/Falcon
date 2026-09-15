@@ -11,15 +11,51 @@ import csv
 import re
 from pathlib import Path
 
-# ── 定长延迟直方图：1ms 桶覆盖 0~_HIST_MAX_MS,溢出归末桶。O(1) 内存算分位/极值/均值 ──
-_HIST_MAX_MS = 60_000
+# ── 定长延迟直方图：分段桶宽，O(1) 内存算分位/极值/均值 ──
+#   0 ~ 10s    : 1ms   桶（常规接口，精度 1ms）
+#   10s ~ 60s  : 10ms  桶
+#   60s ~ 600s : 100ms 桶（被压垮的服务，10 分钟封顶）
+# 为什么要分段：原实现是「1ms 桶覆盖 0~60s，溢出全归末桶」，于是**任何落在 60 秒
+# 以上的分位数都会被报成正好 60000ms**。实测对比老平台 JMeter 报告：同一脚本
+# housing 接口真实 p99 = 72.9s，新平台报 60.0s，少报 18%。饱和场景下这个误差
+# 会直接误导"到底有多慢"的判断。
+# 桶总数 10_000 + 5_000 + 5_400 = 20_400，比原来的 60_001 还省内存。
+_HIST_T1_MAX = 10_000        # 第一段上界（1ms 桶）
+_HIST_T2_MAX = 60_000        # 第二段上界（10ms 桶）
+_HIST_MAX_MS = 600_000       # 第三段上界（100ms 桶），超出归末桶
+_HIST_T1_N = _HIST_T1_MAX                                   # 10_000
+_HIST_T2_N = (_HIST_T2_MAX - _HIST_T1_MAX) // 10            # 5_000
+_HIST_T3_N = (_HIST_MAX_MS - _HIST_T2_MAX) // 100           # 5_400
+_HIST_BUCKETS = _HIST_T1_N + _HIST_T2_N + _HIST_T3_N + 1    # +1 = 溢出桶
+
+
+def _hist_index(ms: int) -> int:
+    """毫秒 → 桶下标（分段桶宽）。"""
+    if ms < _HIST_T1_MAX:
+        return ms
+    if ms < _HIST_T2_MAX:
+        return _HIST_T1_N + (ms - _HIST_T1_MAX) // 10
+    if ms < _HIST_MAX_MS:
+        return _HIST_T1_N + _HIST_T2_N + (ms - _HIST_T2_MAX) // 100
+    return _HIST_BUCKETS - 1
+
+
+def _hist_value(idx: int) -> float:
+    """桶下标 → 该桶代表的毫秒值（取桶下界，与 nearest-rank 语义一致）。"""
+    if idx < _HIST_T1_N:
+        return float(idx)
+    if idx < _HIST_T1_N + _HIST_T2_N:
+        return float(_HIST_T1_MAX + (idx - _HIST_T1_N) * 10)
+    if idx < _HIST_BUCKETS - 1:
+        return float(_HIST_T2_MAX + (idx - _HIST_T1_N - _HIST_T2_N) * 100)
+    return float(_HIST_MAX_MS)
 
 
 class LatencyHistogram:
     __slots__ = ('buckets', 'count', 'total', 'min', 'max')
 
     def __init__(self) -> None:
-        self.buckets = [0] * (_HIST_MAX_MS + 1)
+        self.buckets = [0] * _HIST_BUCKETS
         self.count = 0
         self.total = 0
         self.min: int | None = None
@@ -34,7 +70,7 @@ class LatencyHistogram:
             self.min = ms
         if ms > self.max:
             self.max = ms
-        self.buckets[ms if ms <= _HIST_MAX_MS else _HIST_MAX_MS] += 1
+        self.buckets[_hist_index(ms)] += 1
 
     def percentile(self, p: float) -> float:
         """nearest-rank:跟旧 sorted 实现 elapsed[int(N*p/100)-1] 等价(±1ms)。"""
@@ -42,11 +78,14 @@ class LatencyHistogram:
             return 0.0
         target = max(1, int(self.count * p / 100.0))
         cum = 0
-        for ms, c in enumerate(self.buckets):
+        for idx, c in enumerate(self.buckets):
             if c:
                 cum += c
                 if cum >= target:
-                    return float(ms)
+                    # 落在溢出桶（>600s）时退回真实最大值，别报一个假的 600000
+                    if idx == _HIST_BUCKETS - 1:
+                        return float(self.max)
+                    return _hist_value(idx)
         return float(self.max)
 
     @property
