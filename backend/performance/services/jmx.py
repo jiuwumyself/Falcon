@@ -1940,6 +1940,17 @@ def build_validate_xml(
         except JmxParseError:
             continue
 
+    # multipart 附件：试跑在主控本机跑，直接换成 scripts/ 绝对路径。
+    # 漏了这一步的话 JMeter 会把裸文件名按 jmx 所在目录（runs/_validate_N/）解析，
+    # 报 "No such file or directory"（实测踩过）。
+    try:
+        assets = {a.filename: str((scripts_dir / a.filename).resolve())
+                  for a in task.asset_files.all()}
+    except Exception:  # noqa: BLE001  老库未迁移
+        assets = {}
+    if assets:
+        xml = patch_sampler_file_paths(xml, assets)
+
     if host_entries is None and task.environment_id:
         host_entries = list(task.environment.host_entries or [])
     if host_entries:
