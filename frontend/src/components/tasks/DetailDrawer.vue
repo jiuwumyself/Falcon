@@ -175,6 +175,7 @@ const title = computed(() => {
             <HttpSamplerForm
               v-if="detail.kind === 'HTTPSamplerProxy'"
               :detail="detail"
+              :task-id="taskId"
               :is-dark="isDark"
               @update:detail="detail = $event"
             />

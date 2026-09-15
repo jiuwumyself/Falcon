@@ -291,6 +291,34 @@ class LoadGenerator(models.Model):
         return f'http://{self.ip}:{self.port}'
 
 
+class TaskAssetFile(models.Model):
+    """任务的上传附件：HTTP Sampler 的 multipart 文件（.wav / .jpg / .pdf 等）。
+
+    与 TaskCsvBinding 的区别：CSV 是**按组件路径**绑定（一个 CSVDataSet 一个文件），
+    附件是**按文件名**索引的任务级资源池——同一个文件可以被多个 Sampler 引用，
+    而且用户在组件抽屉里改动文件行的顺序 / 增删，不会让绑定错位。
+
+    落盘位置与 CSV 相同（scripts/），命名 `<jmx_stem>__asset__<安全原名>`。
+    运行时：build_run_xml 把 multipart 的 File.path 按 basename 匹配换成绝对路径；
+    分布式下 build_shard_jmx 再换成 agent 端相对路径 `csv/<filename>`，
+    executor 跟 CSV 一起作 multipart 传给 agent（agent 不校验扩展名，无需改镜像）。
+    """
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='asset_files')
+    filename = models.CharField(max_length=255, help_text='落盘文件名（scripts/ 下）')
+    original_name = models.CharField(max_length=255, help_text='用户上传时的原始文件名')
+    size_bytes = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('task', 'filename')]
+        ordering = ['original_name']
+        verbose_name = '任务附件'
+        verbose_name_plural = '任务附件'
+
+    def __str__(self) -> str:
+        return f'{self.task_id} / {self.original_name} ({self.size_bytes} B)'
+
+
 class TaskRun(models.Model):
     """Task 的一次执行记录。Step 3 (v1.1) 起，由 services/executor.py 的 RunExecutor
     在子线程里编排：pre_checking → pending → running → 终态。run_id 是面向用户的

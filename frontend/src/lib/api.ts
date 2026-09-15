@@ -106,6 +106,14 @@ export const tasksApi = {
     }),
   delete: (id: number) =>
     api<void>(`/tasks/${id}/`, { method: 'DELETE' }),
+  /** 上传 HTTP Sampler multipart 附件（.wav/.jpg 等）。返回落盘文件名，填进文件行的 path。 */
+  uploadComponentFile: (id: number, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return apiForm<{ filename: string; original_name: string; size_bytes: number }>(
+      `/tasks/${id}/components/upload-file/`, fd,
+    )
+  },
   uploadComponentCsv: (id: number, componentPath: string, file: File) => {
     const fd = new FormData()
     fd.append('path', componentPath)

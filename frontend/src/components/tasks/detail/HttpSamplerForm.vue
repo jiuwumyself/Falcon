@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
-import { Plus, Trash2 } from 'lucide-vue-next'
+import { reactive, ref, watch } from 'vue'
+import { Plus, Trash2, Upload, Loader } from 'lucide-vue-next'
+import { tasksApi, ApiError } from '@/lib/api'
 import type { HttpSamplerDetail } from '@/types/task'
 
-const props = defineProps<{ detail: HttpSamplerDetail; isDark: boolean }>()
+const props = defineProps<{ detail: HttpSamplerDetail; taskId: number; isDark: boolean }>()
 const emit = defineEmits<{ (e: 'update:detail', next: HttpSamplerDetail): void }>()
 
 // Deep-copy the incoming detail so we can edit freely without mutating parent.
@@ -51,6 +52,36 @@ const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
 function addParam() { local.params.push({ name: '', value: '' }) }
 function removeParam(i: number) { local.params.splice(i, 1) }
 function addFile() { local.files.push({ path: '', paramname: '', mimetype: '' }) }
+
+// 附件上传：文件落到服务端 scripts/，把返回的落盘名填进该行的 path。
+// 运行时 build_run_xml 按 basename 换成绝对路径，分布式再换成 agent 相对路径，
+// 并随 run 分发到压力机——所以压测机上不需要预先放文件。
+const uploadingIdx = ref<number | null>(null)
+const uploadErr = ref('')
+const fileInputs = ref<Record<number, HTMLInputElement | null>>({})
+
+function pickFile(i: number) {
+  uploadErr.value = ''
+  fileInputs.value[i]?.click()
+}
+
+async function onFileChosen(i: number, e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  uploadingIdx.value = i
+  uploadErr.value = ''
+  try {
+    const res = await tasksApi.uploadComponentFile(props.taskId, f)
+    local.files[i].path = res.filename
+    if (!local.files[i].mimetype && f.type) local.files[i].mimetype = f.type
+  } catch (err) {
+    uploadErr.value = err instanceof ApiError ? err.humanMessage : String(err)
+  } finally {
+    uploadingIdx.value = null
+  }
+}
 function removeFile(i: number) { local.files.splice(i, 1) }
 
 function inputStyle(dark: boolean) {
@@ -270,10 +301,30 @@ function inputStyle(dark: boolean) {
           <input
             v-model="f.path"
             type="text"
-            placeholder="/path/to/file"
+            placeholder="点右侧上传，或手填压力机上的绝对路径"
             class="flex-1 px-2.5 py-1 rounded-md text-[12px] font-mono outline-none"
             :style="inputStyle(isDark)"
           />
+          <input
+            :ref="(el) => (fileInputs[i] = el as HTMLInputElement)"
+            type="file"
+            class="hidden"
+            @change="(e) => onFileChosen(i, e)"
+          />
+          <button
+            class="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 cursor-pointer"
+            :style="{
+              background: isDark ? 'rgba(59,130,246,0.12)' : 'rgba(59,130,246,0.1)',
+              color: '#3b82f6',
+              border: `1px solid ${isDark ? 'rgba(59,130,246,0.25)' : 'rgba(59,130,246,0.2)'}`,
+            }"
+            :title="'上传文件到服务器（压测时自动分发到压力机）'"
+            :disabled="uploadingIdx === i"
+            @click="pickFile(i)"
+          >
+            <Loader v-if="uploadingIdx === i" :size="12" class="animate-spin" />
+            <Upload v-else :size="12" />
+          </button>
           <button
             class="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 cursor-pointer"
             :style="{
@@ -304,6 +355,11 @@ function inputStyle(dark: boolean) {
         </div>
       </div>
 
+      <p
+        v-if="uploadErr"
+        class="text-[11px] py-1"
+        :style="{ color: '#ef4444' }"
+      >{{ uploadErr }}</p>
       <p
         v-if="!local.files.length"
         class="text-[11px] py-2"

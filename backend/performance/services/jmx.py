@@ -16,6 +16,8 @@ JMX (JMeter test plan) L1 编辑服务。
 """
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -1683,6 +1685,45 @@ def _inject_error_response_listener(xml_bytes: bytes, *, errors_xml_path: str) -
     return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
 
 
+def patch_sampler_file_paths(xml_bytes: bytes, mapping: dict[str, str]) -> bytes:
+    """把 HTTP Sampler multipart 里的 File.path 按 **basename** 换成 mapping 给的新值。
+
+    mapping: {落盘文件名: 新路径}。按 basename 匹配而不是按组件路径绑定，好处是
+    同一个附件可以被多个 Sampler 复用，且用户在抽屉里增删/调整文件行不会错位。
+    匹配不上的行原样保留（可能是用户手填的、压力机上本来就有的绝对路径）。
+
+    两处调用：
+      - build_run_xml   → 换成宿主 scripts/ 绝对路径（本机执行 / LOCAL_FALLBACK）
+      - build_shard_jmx → 再换成 agent 端相对路径 csv/<filename>
+    """
+    if not mapping:
+        return xml_bytes
+    tree = _parse_tree(xml_bytes)
+    changed = False
+    for sampler in tree.iter('HTTPSamplerProxy'):
+        wrapper = sampler.find("elementProp[@name='HTTPsampler.Files']")
+        if wrapper is None:
+            continue
+        coll = wrapper.find("collectionProp[@name='HTTPFileArgs.files']")
+        if coll is None:
+            continue
+        for eprop in coll.findall('elementProp'):
+            sp = None
+            for cand in eprop.findall('stringProp'):
+                if cand.get('name') == 'File.path':
+                    sp = cand
+                    break
+            if sp is None or not (sp.text or '').strip():
+                continue
+            base = PurePosixPath((sp.text or '').strip().replace('\\', '/')).name
+            if base in mapping:
+                sp.text = mapping[base]
+                changed = True
+    if not changed:
+        return xml_bytes
+    return etree.tostring(tree, xml_declaration=True, encoding='UTF-8')
+
+
 def build_run_xml(
     task,
     *,
@@ -1734,6 +1775,17 @@ def build_run_xml(
         except JmxParseError:
             # 配置悬空（path 不再指向 CSVDataSet）→ 跳过；上层 replace-jmx 已经清空过
             continue
+
+    # 2.5) multipart 附件路径改写到绝对路径（按 basename 匹配，见
+    #      patch_sampler_file_paths）。分布式下 build_shard_jmx 会再改成
+    #      agent 端相对路径 csv/<filename>。
+    try:
+        assets = {a.filename: str((scripts_dir / a.filename).resolve())
+                  for a in task.asset_files.all()}
+    except Exception:  # noqa: BLE001  老库未迁移 → 无附件功能，跳过
+        assets = {}
+    if assets:
+        xml = patch_sampler_file_paths(xml, assets)
 
     # 3) Environment DNS 注入（仅执行时需要）
     if inject_environment_dns and task.environment_id:

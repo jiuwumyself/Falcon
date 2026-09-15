@@ -612,6 +612,16 @@ def build_shard_jmx(
             # path 在 build_run_xml 之后理论上一定有效；脏数据跳过
             continue
 
+    # multipart 附件同理改成 agent 端相对路径 csv/<filename>（agent 把所有上传文件
+    # 都写到 <work_dir>/csv/，不校验扩展名，所以 .wav 等也走这个通道，无需改 agent）。
+    try:
+        asset_map = {a.filename: f'csv/{a.filename}' for a in task.asset_files.all()}
+    except Exception:  # noqa: BLE001
+        asset_map = {}
+    if asset_map:
+        from .jmx import patch_sampler_file_paths  # noqa: PLC0415
+        sliced = patch_sampler_file_paths(sliced, asset_map)
+
     # 每个 enabled TG 各注入一个 BackendListener（详见 jmx._inject_backend_listener_per_tg
     # 的注释）；每个 listener 额外带 host/shard tag，前端"按主机"切线时仍能区分 pod。
     sliced = _inject_backend_listener_per_tg(

@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from django.utils import timezone
 
 from .models import (
+    TaskAssetFile,
     ACTIVE_RUN_STATUSES, Environment, LoadGenerator, LoadGeneratorStatus,
     PrometheusDataSource, RunStatus, Service, Task, TaskCsvBinding, TaskRun,
 )
@@ -30,7 +31,8 @@ from .services import influxdb as influxdb_svc
 from .services.jmeter import (
     DiskFullError, delete_csv, delete_script, ensure_jmeter_installed,
     ensure_plugins_installed, generate_html_report, get_run_dir, get_runs_dir,
-    get_scripts_dir, rename_script, unique_script_filename, write_csv, write_jar,
+    get_scripts_dir, rename_script, sanitize_script_name, unique_script_filename,
+    write_csv, write_jar,
     write_script,
 )
 from .services.jmx import (
@@ -590,6 +592,60 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
 
     # —— 单个 CSVDataSet 绑定：上传 / 替换 —— #
+    @action(detail=True, methods=['post'], url_path='components/upload-file',
+            parser_classes=[MultiPartParser, FormParser])
+    def upload_component_file(self, request, pk=None):
+        """上传 HTTP Sampler multipart 用的附件（.wav/.jpg/.pdf 等）。
+
+        与 CSV 的区别：附件是**任务级资源池**、按文件名索引，不绑定具体组件路径。
+        上传后把返回的 filename 填进该 Sampler 文件行的 path，运行时会被换成
+        绝对路径（本机）/ agent 相对路径（分布式），并随 run 分发到压力机。
+        """
+        instance = self.get_object()
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'file': ['必须上传文件']}, status=status.HTTP_400_BAD_REQUEST)
+        max_size = getattr(settings, 'MAX_UPLOAD_SIZE', 10 * 1024 * 1024)
+        if upload.size and upload.size > max_size:
+            mb = max_size // (1024 * 1024)
+            return Response({'file': [f'文件超过 {mb}MB 上限']},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.jmeter import write_asset  # noqa: PLC0415
+
+        original = Path(upload.name).name
+        safe = sanitize_script_name(Path(original).stem)[:60] or 'asset'
+        suffix = Path(original).suffix[:16]
+        stem = Path(instance.jmx_filename or f'task{instance.id}').stem
+        filename = f'{stem}__asset__{safe}{suffix}'
+
+        data = upload.read()
+        try:
+            write_asset(filename, data)
+        except DiskFullError as e:
+            return Response({'detail': str(e)},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        obj, _ = TaskAssetFile.objects.update_or_create(
+            task=instance, filename=filename,
+            defaults={'original_name': original, 'size_bytes': len(data)},
+        )
+        return Response({'filename': obj.filename, 'original_name': obj.original_name,
+                         'size_bytes': obj.size_bytes}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='components/delete-file')
+    def delete_component_file(self, request, pk=None):
+        """删除任务附件（解除记录 + 删物理文件）。脚本里引用它的行不动，由用户自己改。"""
+        instance = self.get_object()
+        filename = request.data.get('filename')
+        if not isinstance(filename, str) or not filename:
+            return Response({'filename': ['必填']}, status=status.HTTP_400_BAD_REQUEST)
+        from .services.jmeter import delete_asset  # noqa: PLC0415
+        deleted, _ = TaskAssetFile.objects.filter(task=instance, filename=filename).delete()
+        if deleted:
+            delete_asset(filename)
+        return Response({'deleted': bool(deleted)}, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'], url_path='components/upload-csv',
             parser_classes=[MultiPartParser, FormParser])
     def upload_component_csv(self, request, pk=None):

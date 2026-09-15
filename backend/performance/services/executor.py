@@ -1130,6 +1130,23 @@ class RunExecutor:
                     'csv_files',
                     (binding.filename, payload, 'text/csv'),
                 ))
+            # multipart 附件（.wav/.jpg 等）：与 CSV 走同一个 csv_files 通道，
+            # agent 落到 <work_dir>/csv/<filename>，与 build_shard_jmx 改写的
+            # 相对路径对得上。附件不切片——每台都要完整文件。
+            try:
+                for asset in self.run.task.asset_files.all():
+                    src = scripts_dir / asset.filename
+                    if not src.exists():
+                        print(f'[executor] WARN: 附件 {asset.filename} 物理文件不存在，跳过',
+                              file=sys.stderr)
+                        continue
+                    files.append((
+                        'csv_files',
+                        (asset.filename, src.read_bytes(), 'application/octet-stream'),
+                    ))
+            except Exception as e:  # noqa: BLE001
+                print(f'[executor] WARN: 附件分发失败 {e}', file=sys.stderr)
+
             try:
                 r = requests.post(
                     f'{shard.base_url}/runs',

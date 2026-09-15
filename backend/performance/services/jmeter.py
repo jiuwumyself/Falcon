@@ -528,6 +528,22 @@ def write_csv(filename: str, data: bytes) -> Path:
     return path
 
 
+def write_asset(filename: str, data: bytes) -> Path:
+    """写 multipart 附件到 <scripts_dir>/<filename>（与 CSV 同目录，同样的磁盘保护）。"""
+    ensure_jmeter_installed()
+    scripts = get_scripts_dir()
+    _check_free_space(scripts)
+    path = scripts / filename
+    _atomic_write_bytes(path, data)
+    return path
+
+
+def delete_asset(filename: str) -> None:
+    if not filename:
+        return
+    (get_scripts_dir() / filename).unlink(missing_ok=True)
+
+
 def read_csv(filename: str) -> bytes:
     return (get_scripts_dir() / filename).read_bytes()
 
