@@ -104,6 +104,49 @@ def get_run_dir(run_id: str) -> Path:
     return d
 
 
+def _count_malformed_jtl_rows(path: Path, limit: int = 50) -> int:
+    """数一数 JTL 里列数与 header 不符的行（最多数到 limit 就返回，只为判定用）。"""
+    import csv as _csv  # noqa: PLC0415
+    try:
+        with path.open('r', encoding='utf-8', errors='replace', newline='') as f:
+            reader = _csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return 0
+            n = len(header)
+            bad = 0
+            for row in reader:
+                if row and len(row) != n:
+                    bad += 1
+                    if bad >= limit:
+                        break
+            return bad
+    except OSError:
+        return 0
+
+
+def _write_clean_jtl(src: Path, dst: Path) -> int:
+    """流式复制 JTL，丢掉列数不符的残行。返回保留的数据行数。"""
+    import csv as _csv  # noqa: PLC0415
+    kept = 0
+    with src.open('r', encoding='utf-8', errors='replace', newline='') as fi, \
+            dst.open('w', encoding='utf-8', newline='') as fo:
+        reader = _csv.reader(fi)
+        writer = _csv.writer(fo)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return 0
+        writer.writerow(header)
+        n = len(header)
+        for row in reader:
+            if row and len(row) == n:
+                writer.writerow(row)
+                kept += 1
+    return kept
+
+
 def generate_html_report(run_id: str) -> Path:
     """按需从 results.jtl 生成 JMeter 原生 HTML 报告(jmeter -g),**成功后删 results.jtl**。
 
@@ -121,11 +164,26 @@ def generate_html_report(run_id: str) -> Path:
     # jmeter -g 要求输出目录不存在 / 为空
     if report_dir.exists():
         shutil.rmtree(report_dir, ignore_errors=True)
+    # 存量脏数据兜底：老 run 的 results.jtl 里可能留着残行（run 被强制终止时，
+    # 主控最后一次从 agent 拉 jtl 截在半行上）。jmeter -g 对此零容忍，一行不合法
+    # 就整个失败：Mismatch between expected number of columns:17 and columns:5。
+    # 合并那一步已经在源头剔除（jtl_merger），这里只为已经落盘的坏文件兜底：
+    # 先扫一遍，有残行才付出复制代价，干净文件零开销。
+    src_jtl = jtl
+    cleaned: Path | None = None
+    bad = _count_malformed_jtl_rows(jtl)
+    if bad:
+        cleaned = run_dir / 'results.clean.jtl'
+        kept = _write_clean_jtl(jtl, cleaned)
+        print(f'[report] {jtl.name} 有 {bad} 行残行，已剔除后生成报告（保留 {kept} 行）',
+              file=sys.stderr, flush=True)
+        src_jtl = cleaned
+
     env = _augmented_env()
     env.setdefault('JAVA_TOOL_OPTIONS', '-Dfile.encoding=UTF-8')
     try:
         proc = subprocess.run(
-            [str(get_jmeter_bin()), '-g', str(jtl), '-o', str(report_dir)],
+            [str(get_jmeter_bin()), '-g', str(src_jtl), '-o', str(report_dir)],
             cwd=str(get_jmeter_home()), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600,
         )
@@ -134,6 +192,9 @@ def generate_html_report(run_id: str) -> Path:
     if proc.returncode != 0 or not (report_dir / 'index.html').exists():
         tail = (proc.stdout or b'').decode('utf-8', 'replace')[-500:]
         raise RuntimeError(f'报告生成失败(exit={proc.returncode}): {tail}')
+    if cleaned is not None:
+        cleaned.unlink(missing_ok=True)
+
     # 成功 → 删 results.jtl 腾盘(报告 + DB 已覆盖全部分析需求)
     try:
         jtl.unlink()

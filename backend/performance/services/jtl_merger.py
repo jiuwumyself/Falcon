@@ -80,12 +80,27 @@ def merge_jtls(input_paths: list[Path], output_path: Path,
             pass
 
     written = 0
+    dropped = 0
+    ncol = len(common_header)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open('w', encoding=encoding, newline='') as out:
         writer = csv.writer(out)
         writer.writerow(common_header)
         while heap:
             ts, src_idx, row = heapq.heappop(heap)
+            # 丢弃列数对不上的残行：主控是边跑边按 size snapshot 拉 agent 的 jtl，
+            # run 被强制终止时最后一次拉取可能截在半行上。分析入库那条路按行解析能
+            # 容忍，但 `jmeter -g` 生成原生报告是严格的，一行不合法就整个失败：
+            #   Mismatch between expected number of columns:17 and columns in CSV file:5
+            # 所以在合并这一步就把残行剔掉（它本来也不是完整样本，丢了不影响统计）。
+            if len(row) != ncol:
+                dropped += 1
+                try:
+                    nxt = next(iters[src_idx][1])
+                    heapq.heappush(heap, (_ts(nxt), src_idx, nxt))
+                except StopIteration:
+                    pass
+                continue
             writer.writerow(row)
             written += 1
             try:
@@ -93,4 +108,8 @@ def merge_jtls(input_paths: list[Path], output_path: Path,
                 heapq.heappush(heap, (_ts(nxt), src_idx, nxt))
             except StopIteration:
                 pass
+    if dropped:
+        import sys  # noqa: PLC0415
+        print(f'[jtl_merger] 丢弃 {dropped} 行残行（列数与 header 不符）',
+              file=sys.stderr, flush=True)
     return written
