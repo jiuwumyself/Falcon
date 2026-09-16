@@ -2085,9 +2085,20 @@ class LoadGeneratorViewSet(viewsets.ReadOnlyModelViewSet):
             lg.status = LoadGeneratorStatus.IDLE
             update_fields.append('status')
         if next_status in {s.value for s in LoadGeneratorStatus}:
-            lg.status = next_status
-            if 'status' not in update_fields:
-                update_fields.append('status')
+            # 守卫：主控派发时会先把机器标 busy（executor._mark_generators），此时
+            # agent 可能还没来得及起 jmeter 进程，它这一拍心跳仍上报 idle。直接覆盖
+            # 会让机器短暂回到可选列表，并发起第二个任务就可能抢走它。
+            # 所以 busy→idle 的降级只在「没有活跃 run 引用这台机器」时才允许——
+            # 这样既堵住抢占窗口，又保留自愈（主控崩溃后无活跃 run，30s 内自动回 idle）。
+            demoting = (lg.status == LoadGeneratorStatus.BUSY
+                        and next_status == LoadGeneratorStatus.IDLE)
+            held = demoting and lg.runs.filter(
+                status__in=[s.value for s in ACTIVE_RUN_STATUSES],
+            ).exists()
+            if not held:
+                lg.status = next_status
+                if 'status' not in update_fields:
+                    update_fields.append('status')
         lg.save(update_fields=update_fields)
         return Response(LoadGeneratorSerializer(lg).data)
 

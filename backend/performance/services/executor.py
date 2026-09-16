@@ -733,7 +733,32 @@ class RunExecutor:
                 lgs.append(lg)
             elif lg.last_heartbeat_at and lg.last_heartbeat_at >= cutoff:
                 lgs.append(lg)
+        # 立即占用：别等 agent 30s 后自己上报 busy，否则并发起第二个任务会抢到同一批机器
+        self._mark_generators(lgs, busy=True)
         return lgs
+
+    def _mark_generators(self, lgs: list, busy: bool) -> None:
+        """派发/收尾时占用或释放压力机。
+
+        为什么需要：agent 的 busy 状态是它自己每 30s 心跳上报的（agent/main.py
+        _current_status），主控派发时不标记的话，**起完任务 A 的 30 秒内**那批机器
+        在主控看来还是 idle —— 这时起任务 B 会选中同一批机器，一台 agent 上并行跑
+        两个 JMeter，CPU/内存互抢，两边数据都失真且界面上看不出来。
+
+        释放时只把「本 run 占用的、当前仍是 busy」的置回 idle，避免误伤：
+        agent 上报的真实 busy（它还在跑别的 run）会被下一次心跳纠正回来。
+        SSH 型没有心跳机制，同样按这里的标记走。
+        """
+        from ..models import LoadGenerator, LoadGeneratorStatus  # noqa: PLC0415
+        ids = [lg.id for lg in lgs if getattr(lg, 'id', None)]
+        if not ids:
+            return
+        target = LoadGeneratorStatus.BUSY if busy else LoadGeneratorStatus.IDLE
+        cond = LoadGeneratorStatus.IDLE if busy else LoadGeneratorStatus.BUSY
+        try:
+            LoadGenerator.objects.filter(id__in=ids, status=cond).update(status=target)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: 压力机状态标记失败({target}): {e}', file=sys.stderr)
 
     def _agent_headers(self) -> dict:
         token = getattr(settings, 'FALCON_AGENT_TOKEN', '') or ''
@@ -1686,6 +1711,13 @@ class RunExecutor:
                 )
 
         TaskRun.objects.filter(pk=run.pk).update(**status_update)
+
+        # 释放本 run 占用的压力机，让它们立刻回到可选列表（不用等 30s 心跳）
+        try:
+            self._mark_generators(list(run.load_generators.all()), busy=False)
+        except Exception as e:  # noqa: BLE001
+            print(f'[executor] WARN: 释放压力机失败: {e}', file=sys.stderr)
+
         final_status = status_update.get('status', '?')
         total = summary.get('total_requests') or 0
         err_rate = summary.get('error_rate') or 0
