@@ -66,6 +66,12 @@ def _estimate_tg_seconds(kind: str, params: dict) -> int:
             return default
 
     if kind == 'ThreadGroup':
+        # 「循环次数」≥1 = 跑固定圈数就结束，没有调度器、没有时长可估。
+        # 这类 TG（典型是 setUp 前置准备）几乎不会是整个 run 里最长的那个，
+        # 上层取 max 时由主压测 TG 决定总时长；这里给 ramp + 一点余量做兜底，
+        # 免得它算出 0 让 max_wall 失去超时保护。
+        if _i('loops') >= 1:
+            return _i('ramp_up') + 120
         # duration = 稳态时长（不含 ramp），整段实跑 = ramp + 稳态。与
         # jmx._build_standard_tg 写进 ThreadGroup.duration 的值保持同一口径。
         return _i('ramp_up') + _i('duration')

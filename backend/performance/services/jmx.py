@@ -418,10 +418,20 @@ def _extract_tg_params(el: etree._Element, kind: str) -> dict[str, Any]:
             return fallback
 
     if kind == 'ThreadGroup':
+        # 脚本里 loops=-1 表示无限循环（按时长跑）→ UI 上回填为 0
+        raw_loops = 0
+        ctrl = el.find("elementProp[@name='ThreadGroup.main_controller']")
+        if ctrl is not None:
+            lp = ctrl.find("stringProp[@name='LoopController.loops']")
+            try:
+                raw_loops = int((lp.text or '0').strip()) if lp is not None else 0
+            except (ValueError, AttributeError):
+                raw_loops = 0
         return {
             'users': _i('ThreadGroup.num_threads', 10),
             'ramp_up': _i('ThreadGroup.ramp_time', 0),
             'duration': _i('ThreadGroup.duration', 60),
+            'loops': max(0, raw_loops),
         }
     if kind == 'SteppingThreadGroup':
         return {
@@ -565,7 +575,10 @@ def validate_thread_group_params(kind: str, params: dict[str, Any]) -> None:
     if kind == 'ThreadGroup':
         _int('users', 1, MAX_USERS)
         _int('ramp_up', 0, MAX_DURATION_SECONDS)
-        _int('duration', 1, MAX_DURATION_SECONDS)
+        loops = _int('loops', 0, 1_000_000) if 'loops' in (params or {}) else 0
+        if loops < 1:
+            # 只有"按时长跑"模式才需要 duration；跑固定圈数时它没有意义
+            _int('duration', 1, MAX_DURATION_SECONDS)
     elif kind == 'SteppingThreadGroup':
         initial = _int('initial_threads', 0, MAX_USERS)
         step_u = _int('step_users', 0, MAX_USERS)
@@ -643,19 +656,30 @@ def _build_standard_tg(testname: str, enabled: str, p: dict[str, Any]) -> etree.
         'testname': 'Loop Controller',
         'enabled': 'true',
     })
+    # loops 语义（Step 2 的「循环次数」）：
+    #   0（默认）→ 无限循环 + 调度器，按「稳态时长」跑，适合常规压测
+    #   N ≥ 1     → 每个线程跑 N 圈就结束，**关掉调度器**，适合 setUp 类
+    #               「把课开起来就行」的前置准备——用时长驱动会让开课接口被反复调用
+    #               （实测踩过：开课/建活动被重复执行 180 次，污染业务数据）
+    loops = int(p.get('loops') or 0)
+    once_mode = loops >= 1
     etree.SubElement(controller, 'boolProp', {'name': 'LoopController.continue_forever'}).text = 'false'
-    # -1 = 无限循环，由 scheduler + duration 负责停止
-    etree.SubElement(controller, 'stringProp', {'name': 'LoopController.loops'}).text = '-1'
+    etree.SubElement(controller, 'stringProp', {'name': 'LoopController.loops'}).text = (
+        str(loops) if once_mode else '-1'
+    )
 
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.num_threads'}).text = str(p['users'])
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.ramp_time'}).text = str(p['ramp_up'])
-    etree.SubElement(el, 'boolProp', {'name': 'ThreadGroup.scheduler'}).text = 'true'
-    # Step 2 的 `duration` 语义 = **稳态时长**（加压完成后的持续秒数，不含 ramp），
-    # 而 JMeter 的 ThreadGroup.duration 是"从线程启动算起的总时长"（含 ramp）。
-    # 两者差一个 ramp——不换算的话 5 用户 ramp 10s + 稳态 60s 只会跑 60s 总时长，
-    # 真实稳态被压到 50s。这里补上 ramp，让用户填的 60 就是实打实的 60 秒稳态。
-    _total = int(p['ramp_up']) + int(p['duration'])
-    etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.duration'}).text = str(_total)
+    etree.SubElement(el, 'boolProp', {'name': 'ThreadGroup.scheduler'}).text = (
+        'false' if once_mode else 'true'
+    )
+    if not once_mode:
+        # Step 2 的 `duration` 语义 = **稳态时长**（加压完成后的持续秒数，不含 ramp），
+        # 而 JMeter 的 ThreadGroup.duration 是"从线程启动算起的总时长"（含 ramp）。
+        # 两者差一个 ramp——不换算的话 5 用户 ramp 10s + 稳态 60s 只会跑 60s 总时长，
+        # 真实稳态被压到 50s。这里补上 ramp，让用户填的 60 就是实打实的 60 秒稳态。
+        _total = int(p['ramp_up']) + int(p['duration'])
+        etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.duration'}).text = str(_total)
     etree.SubElement(el, 'stringProp', {'name': 'ThreadGroup.delay'}).text = ''
     return el
 

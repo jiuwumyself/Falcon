@@ -64,7 +64,7 @@ const ultimateColDefs: { key: keyof UltimatePeakRow; label: string; max: number 
 // ── 其他场景 ────────────────────────────────────────────────────────
 
 function defaultsFor(kind: TGKind): Record<string, number | string> {
-  if (kind === 'ThreadGroup') return { users: 10, ramp_up: 5, duration: 60 }
+  if (kind === 'ThreadGroup') return { users: 10, ramp_up: 5, duration: 60, loops: 0 }
   if (kind === 'SteppingThreadGroup') {
     return { initial_threads: 0, step_users: 10, step_delay: 30,
              step_count: 10, hold: 60, shutdown: 30 }
@@ -134,7 +134,15 @@ const fields = computed<Field[]>(() => {
   if (k === 'ThreadGroup') return [
     { name: 'users', label: '虚拟用户数', max: MAX_USERS },
     { name: 'ramp_up', label: 'Ramp-up (秒)', max: MAX_DURATION_SECONDS },
-    { name: 'duration', label: '稳态时长 (秒)', max: MAX_DURATION_SECONDS },
+    {
+      name: 'loops', label: '循环次数', max: 1000000,
+      hint: '0 = 按稳态时长持续跑（常规压测）；填 1 = 每个线程只跑一遍就结束，'
+        + '适合 setUp 这类「把课开起来就行」的前置准备——用时长驱动会让开课接口被反复调用',
+    },
+    // 循环次数 ≥1 时按圈数结束，时长没有意义，隐藏掉免得误导
+    ...(Number(props.config.params?.loops ?? 0) >= 1
+      ? []
+      : [{ name: 'duration', label: '稳态时长 (秒)', max: MAX_DURATION_SECONDS }]),
   ]
   if (k === 'SteppingThreadGroup') return [
     { name: 'initial_threads', label: '初始用户', max: MAX_USERS },
