@@ -272,10 +272,43 @@ def _unique_csv_for_binding(jmx_filename: str, component_path: str) -> str:
 
 
 class EnvironmentViewSet(viewsets.ReadOnlyModelViewSet):
-    """只读列表/详情。创建和编辑走 Django admin。"""
+    """只读列表/详情。创建和编辑走 Django admin。
+
+    例外：add-host 允许前端往 host_entries 追加一条映射——Step 2 发现缺 host 时
+    一键补全用。只追加、不删不改，避免把 admin 里维护的条目改坏。
+    """
     queryset = Environment.objects.all()
     serializer_class = EnvironmentSerializer
     pagination_class = None  # 环境不会太多，直接全返
+
+    @action(detail=True, methods=['post'], url_path='add-host')
+    def add_host(self, request, pk=None):
+        """追加一条 hosts 映射。body: {hostname, ip}"""
+        import re as _re  # noqa: PLC0415
+        env = self.get_object()
+        hostname = (request.data.get('hostname') or '').strip()
+        ip = (request.data.get('ip') or '').strip()
+        if not hostname or not ip:
+            return Response({'detail': 'hostname 和 ip 必填'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not _re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', ip):
+            return Response({'detail': f'ip 格式非法: {ip}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.jmx import _parse_host_entry  # noqa: PLC0415
+        entries = list(env.host_entries or [])
+        for e in entries:
+            parsed = _parse_host_entry(e)
+            if parsed and parsed[0] == hostname:
+                return Response(
+                    {'detail': f'该环境里已有 {hostname} 的映射（{parsed[1]}），'
+                               f'如需改 IP 请去后台编辑'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+        entries.append(f'{ip} {hostname}')
+        env.host_entries = entries
+        env.save(update_fields=['host_entries'])
+        return Response(EnvironmentSerializer(env).data)
 
 
 class ServiceViewSet(viewsets.ReadOnlyModelViewSet):
@@ -592,6 +625,65 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response(_filter_tree_dicts(tree_dicts, _HIDDEN_COMPONENT_TAGS))
 
     # —— 单个 CSVDataSet 绑定：上传 / 替换 —— #
+    @action(detail=True, methods=['get'], url_path='host-suggestions')
+    def host_suggestions(self, request, pk=None):
+        """为脚本里「环境 hosts 没覆盖到」的域名推荐候选 IP 并现场校验。
+
+        平台无法自动查出 IP——主控 pod 自己也解析不了这些内网域名。但能用
+        IP + Host 头探测，所以这里做的是「从已有数据推荐 + 逐个验证」：
+        候选来自当前环境其它条目、以及别的环境里同域名的条目。
+        """
+        from .services import hostprobe  # noqa: PLC0415
+        from .services.jmx import _parse_host_entry, collect_sampler_domains  # noqa: PLC0415
+
+        instance = self.get_object()
+        try:
+            xml = instance.read_jmx_bytes()
+        except (FileNotFoundError, OSError) as e:
+            raise Http404(f'JMX 文件不存在: {e}')
+
+        domains = {d for d in collect_sampler_domains(xml) if '${' not in d}
+        env = instance.environment if instance.environment_id else None
+
+        mapped: dict[str, str] = {}
+        if env:
+            for entry in env.host_entries or []:
+                parsed = _parse_host_entry(entry)
+                if parsed:
+                    mapped[parsed[0]] = parsed[1]
+        missing = sorted(domains - set(mapped))
+
+        # 候选 IP：当前环境已有条目 + 其它环境里同域名的条目（去重保序）
+        cands: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for host, ip in mapped.items():
+            if ip not in seen:
+                seen.add(ip)
+                cands.append((ip, f'本环境「{host}」在用'))
+        for other in Environment.objects.exclude(pk=env.pk if env else None):
+            for entry in other.host_entries or []:
+                parsed = _parse_host_entry(entry)
+                if parsed and parsed[1] not in seen:
+                    seen.add(parsed[1])
+                    cands.append((parsed[1], f'环境「{other.name}」的「{parsed[0]}」'))
+
+        # 用脚本里真实的接口路径去探，比打根路径更能区分站点在不在
+        sample_paths: dict[str, tuple[str, str]] = {}
+        for node in _iter_http_samplers(xml):
+            dom, scheme, path = node
+            if dom in missing and dom not in sample_paths:
+                sample_paths[dom] = (scheme or 'https', path or '/')
+
+        suggestions = hostprobe.suggest_for_domains(missing, cands, sample_paths) \
+            if (missing and cands) else []
+        return Response({
+            'environment': ({'id': env.id, 'name': env.name} if env else None),
+            'missing': missing,
+            'mapped': sorted(mapped),
+            'candidates_source_count': len(cands),
+            'suggestions': suggestions,
+        })
+
     @action(detail=True, methods=['post'], url_path='components/upload-file',
             parser_classes=[MultiPartParser, FormParser])
     def upload_component_file(self, request, pk=None):
@@ -1852,6 +1944,26 @@ def _as_bool(value, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _iter_http_samplers(xml_bytes: bytes):
+    """遍历启用的 HTTP Sampler，产出 (domain, protocol, path)。给 host 探测挑真实路径用。"""
+    from lxml import etree  # noqa: PLC0415
+    try:
+        root = etree.fromstring(xml_bytes)
+    except Exception:  # noqa: BLE001
+        return
+    for el in root.iter('HTTPSamplerProxy'):
+        if (el.get('enabled', 'true') or 'true').lower() == 'false':
+            continue
+        vals = {}
+        for sp in el.findall('stringProp'):
+            n = sp.get('name') or ''
+            if n in ('HTTPSampler.domain', 'HTTPSampler.protocol', 'HTTPSampler.path'):
+                vals[n] = (sp.text or '').strip()
+        dom = vals.get('HTTPSampler.domain', '')
+        if dom:
+            yield dom, vals.get('HTTPSampler.protocol', ''), vals.get('HTTPSampler.path', '')
 
 
 def _check_agent_token(request) -> bool:

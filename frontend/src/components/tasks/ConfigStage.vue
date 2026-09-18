@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import {
-  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info, FileCode2,
+  Save, PlayCircle, Loader, AlertCircle, CheckCircle2, Info, FileCode2, Search, Plus,
 } from 'lucide-vue-next'
 import { api, ApiError, tasksApi } from '@/lib/api'
 import type {
@@ -58,6 +58,55 @@ function memoGet(path: string, scenario: ScenarioId) {
   return scenarioMemo.value[path]?.[scenario]
 }
 const environmentId = ref<number | null>(null)
+
+// ── 缺 hosts 映射时的「一键补全」──────────────────────────────────────
+// 平台查不出 IP（主控自己也解析不了这些内网域名），但能用 IP + Host 头验证候选。
+// 候选来自已有环境条目，验证通过才让加，避免配错 IP 导致请求落到默认 vhost
+// （踩过：HTTPS 落到 openresty 默认站点返回 404，看起来像接口路径写错）。
+type HostCandidate = { ip: string; source: string; confidence: string; note: string }
+type HostSuggestion = { domain: string; probe_path: string; candidates: HostCandidate[] }
+const hostSuggestions = ref<HostSuggestion[]>([])
+const hostProbing = ref(false)
+const hostErr = ref('')
+const hostAdding = ref('')
+
+const needHostFix = computed(() =>
+  validateWarnings.value.some((w) => w.includes('环境 hosts 里没有匹配')),
+)
+
+async function probeHosts() {
+  if (!props.task?.id || hostProbing.value) return
+  hostProbing.value = true
+  hostErr.value = ''
+  hostSuggestions.value = []
+  try {
+    const r = await tasksApi.hostSuggestions(props.task.id)
+    hostSuggestions.value = r.suggestions || []
+    if (!r.suggestions?.length) {
+      hostErr.value = r.missing?.length
+        ? '没有可用的候选 IP —— 当前环境里还没有任何 hosts 条目可供参考，请先在后台手工加一条'
+        : '所有域名都已有映射，无需补全'
+    }
+  } catch (e) {
+    hostErr.value = e instanceof ApiError ? e.humanMessage : String(e)
+  } finally {
+    hostProbing.value = false
+  }
+}
+
+async function addHost(domain: string, ip: string) {
+  if (!environmentId.value) { hostErr.value = '请先选择执行环境'; return }
+  hostAdding.value = `${domain}@${ip}`
+  hostErr.value = ''
+  try {
+    await tasksApi.addEnvHost(environmentId.value, domain, ip)
+    hostSuggestions.value = hostSuggestions.value.filter((x) => x.domain !== domain)
+  } catch (e) {
+    hostErr.value = e instanceof ApiError ? e.humanMessage : String(e)
+  } finally {
+    hostAdding.value = ''
+  }
+}
 const serviceNames = ref<string[]>([])
 const prometheusSourceId = ref<number | null>(null)
 const serviceSaving = ref(false)
@@ -445,6 +494,70 @@ const showSaved = computed(() => savedAt.value > 0 && Date.now() - savedAt.value
           <div v-if="validateError" class="text-[11px] text-red-500 flex items-center gap-1">
             <AlertCircle :size="11" /> {{ validateError }}
           </div>
+          <!-- 缺 hosts 映射：一键补全（候选来自已有环境条目，加之前用 Host 头验证过） -->
+          <div v-if="needHostFix" class="flex-shrink-0 flex flex-col gap-2">
+            <button
+              class="self-start px-2.5 py-1.5 rounded-md text-[11px] flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              :style="{
+                background: isDark ? 'rgba(245,158,11,0.12)' : 'rgba(245,158,11,0.1)',
+                color: '#f59e0b',
+                border: `1px solid ${isDark ? 'rgba(245,158,11,0.3)' : 'rgba(245,158,11,0.25)'}`,
+              }"
+              :disabled="hostProbing"
+              @click="probeHosts"
+            >
+              <Loader v-if="hostProbing" :size="11" class="animate-spin" />
+              <Search v-else :size="11" />
+              {{ hostProbing ? '正在探测候选 IP…' : '查找可用 IP 并补全 hosts' }}
+            </button>
+
+            <p v-if="hostErr" class="text-[11px]" :style="{ color: '#ef4444' }">{{ hostErr }}</p>
+
+            <div
+              v-for="sug in hostSuggestions"
+              :key="sug.domain"
+              class="rounded-md p-2.5 flex flex-col gap-1.5"
+              :style="{
+                background: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                border: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
+              }"
+            >
+              <div class="text-[11px] font-mono" :style="{ color: isDark ? '#fff' : '#1a1a2e' }">
+                {{ sug.domain }}
+                <span class="ml-1.5 opacity-50">探测 {{ sug.probe_path }}</span>
+              </div>
+              <div
+                v-for="c in sug.candidates"
+                :key="c.ip"
+                class="flex items-center gap-2 text-[11px]"
+              >
+                <span
+                  class="px-1.5 py-0.5 rounded text-[10px] flex-shrink-0"
+                  :style="{
+                    background: c.confidence === 'good' ? 'rgba(16,185,129,0.14)'
+                      : c.confidence === 'doubtful' ? 'rgba(245,158,11,0.14)' : 'rgba(239,68,68,0.12)',
+                    color: c.confidence === 'good' ? '#10b981'
+                      : c.confidence === 'doubtful' ? '#f59e0b' : '#ef4444',
+                  }"
+                >{{ c.confidence === 'good' ? '可用' : c.confidence === 'doubtful' ? '存疑' : '不通' }}</span>
+                <span class="font-mono flex-shrink-0" :style="{ color: isDark ? '#fff' : '#1a1a2e' }">{{ c.ip }}</span>
+                <span class="flex-1 truncate opacity-60">{{ c.note }} · {{ c.source }}</span>
+                <button
+                  v-if="c.confidence !== 'unreachable'"
+                  class="px-2 py-0.5 rounded text-[10px] flex items-center gap-1 cursor-pointer flex-shrink-0 disabled:opacity-50"
+                  :style="{
+                    background: 'rgba(59,130,246,0.12)', color: '#3b82f6',
+                    border: '1px solid rgba(59,130,246,0.25)',
+                  }"
+                  :disabled="hostAdding === `${sug.domain}@${c.ip}`"
+                  @click="addHost(sug.domain, c.ip)"
+                >
+                  <Plus :size="9" /> 加入环境
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div v-if="validateTriggered && !validateError" class="flex-1 min-h-0 overflow-y-auto">
             <ValidateResultTable
               :results="validateResults"

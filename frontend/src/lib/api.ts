@@ -107,6 +107,24 @@ export const tasksApi = {
   delete: (id: number) =>
     api<void>(`/tasks/${id}/`, { method: 'DELETE' }),
   /** 上传 HTTP Sampler multipart 附件（.wav/.jpg 等）。返回落盘文件名，填进文件行的 path。 */
+  /** 缺 hosts 映射时：为脚本域名推荐候选 IP，并用 Host 头现场校验。 */
+  hostSuggestions: (id: number) =>
+    api<{
+      environment: { id: number; name: string } | null
+      missing: string[]
+      suggestions: {
+        domain: string
+        probe_path: string
+        candidates: { ip: string; source: string; confidence: string; note: string }[]
+      }[]
+    }>(`/tasks/${id}/host-suggestions/`),
+  /** 往环境里追加一条 hosts 映射（只追加，不改不删）。 */
+  addEnvHost: (envId: number, hostname: string, ip: string) =>
+    api(`/environments/${envId}/add-host/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostname, ip }),
+    }),
   uploadComponentFile: (id: number, file: File) => {
     const fd = new FormData()
     fd.append('file', file)
