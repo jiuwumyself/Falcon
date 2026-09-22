@@ -239,7 +239,13 @@ def validate_task(
     xml_bytes = build_validate_xml(task, host_entries=he_list, warnings=warnings)
     samplers = _list_sampler_infos(xml_bytes)
 
-    work_dir = get_runs_dir() / f'_validate_{task.id}'
+    # 每次试跑用**独立**目录：原来固定 `_validate_<task_id>` 复用同一路径，生产 PVC
+    # 是网络存储，上次残留的文件若仍被占用（NFS 风格延迟删除），rmtree 会抛
+    # OSError: [Errno 16] Device or resource busy，导致整个试跑起不来（实测踩过）。
+    # 换成带随机后缀就永远不会被上一次的残留挡住；遗留目录由 cleanup_old_runs
+    # 按 TTL 统一回收（它本来就清 `_validate_*`）。
+    import secrets  # noqa: PLC0415
+    work_dir = get_runs_dir() / f'_validate_{task.id}_{secrets.token_hex(3)}'
     # save_response_data=True 让 JTL 出 XML 格式，附带响应体 / 头 / sampler 数据
     try:
         samples = run_jmeter(xml_bytes, work_dir, save_response_data=True)

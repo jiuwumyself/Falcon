@@ -97,7 +97,9 @@ def run_jmeter(
     用于 Step 2 试跑展示完整响应；Step 3 真压测保持 CSV 格式（体积可控）。
     """
     if work_dir.exists():
-        shutil.rmtree(work_dir)
+        # ignore_errors：网络存储上残留的被占用文件会让 rmtree 抛 EBUSY，
+        # 不该因此让整次执行失败——清不干净就在原目录里继续写（文件名固定会覆盖）。
+        shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     run_jmx = work_dir / 'run.jmx'

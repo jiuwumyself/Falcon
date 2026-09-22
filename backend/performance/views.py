@@ -1002,8 +1002,16 @@ class TaskViewSet(viewsets.ModelViewSet):
             warnings, results, executed_tgs = validate_task(
                 instance, host_entries=host_entries,
             )
-        except (FileNotFoundError, OSError) as e:
+        except FileNotFoundError as e:
             raise Http404(f'JMX 文件不存在: {e}')
+        except OSError as e:
+            # 磁盘 / 网络存储问题（EBUSY、空间不足、权限等）不是"文件不存在"，
+            # 笼统报 404 会把人往错误方向带（实测：EBUSY 被报成 JMX 文件不存在）
+            return Response(
+                {'detail': f'试跑工作目录读写失败（{e.__class__.__name__}: {e}）。'
+                           f'多为压测机磁盘或存储卷异常，可稍后重试'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except JmxParseError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except JMeterRunError as e:
