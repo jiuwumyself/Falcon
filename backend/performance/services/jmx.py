@@ -1321,21 +1321,40 @@ def _set_csv_filename_at_path(xml_bytes: bytes, path: str, filename: str) -> byt
 
 
 def collect_sampler_domains(xml_bytes: bytes) -> set[str]:
-    """收集 JMX 里所有**启用的** HTTP Sampler 的 domain（去重）。
+    """收集 JMX 里所有**启用的** HTTP 请求域名（去重）。
 
     给两处用：① DNS 注入时只注入脚本真用到的域名 ② 预检的域名解析检查。
     含 ${...} 的变量域名原样返回，由调用方决定怎么处理（静态查不了）。
+
+    两个来源都要收（很多脚本尤其 curl/Chrome 导入把域名统一放 HTTP Request
+    Defaults，各 sampler 自己的 domain 字段留空继承——只扫 sampler 会漏掉，
+    导致 DNS 注入误判「脚本没用到该域名」而静默跳过）：
+      ① HTTPSamplerProxy 自己的 HTTPSampler.domain
+      ② HTTP Request Defaults（ConfigTestElement + HttpDefaultsGui）的 HTTPSampler.domain
     """
     tree = _parse_tree(xml_bytes)
     out: set[str] = set()
-    for sampler in tree.iter('HTTPSamplerProxy'):
-        if sampler.get('enabled', 'true').lower() == 'false':
-            continue
-        for sp in sampler.findall('stringProp'):
+
+    def _add_domain(el) -> None:
+        for sp in el.findall('stringProp'):
             if sp.get('name') == 'HTTPSampler.domain' and sp.text:
                 d = sp.text.strip()
                 if d:
                     out.add(d)
+
+    for sampler in tree.iter('HTTPSamplerProxy'):
+        if sampler.get('enabled', 'true').lower() == 'false':
+            continue
+        _add_domain(sampler)
+
+    # HTTP Request Defaults 的域名（各 sampler domain 留空时继承它）
+    for cfg in tree.iter('ConfigTestElement'):
+        if cfg.get('enabled', 'true').lower() == 'false':
+            continue
+        if cfg.get('guiclass') != 'HttpDefaultsGui':
+            continue
+        _add_domain(cfg)
+
     return out
 
 
