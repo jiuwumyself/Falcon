@@ -468,9 +468,13 @@ class RunExecutor:
                 bound = {b.component_path for b in task.csv_bindings.all() if b.component_path}
 
                 # list_components 返回的是组件**树**（children 嵌套），要拍平
+                # 父级被禁用（如整个禁用的线程组）时，子组件自己的 enabled 仍是 true，
+                # 但 JMeter 不会执行它，不该要求绑定——要整棵子树跳过。
                 def _flat_csv(nodes):
                     for n in nodes:
-                        if n.kind == 'CSVDataSet' and n.enabled:
+                        if not n.enabled:
+                            continue
+                        if n.kind == 'CSVDataSet':
                             yield n
                         if n.children:
                             yield from _flat_csv(n.children)
@@ -483,6 +487,10 @@ class RunExecutor:
                     more = f' 等 {len(missing)} 个' if len(missing) > 3 else ''
                     sub_lines.append(
                         f'❌ {len(missing)} 个 CSVDataSet 未绑定 CSV 文件：{names}{more}',
+                    )
+                    sub_lines.append(
+                        f'      · 脚本中待绑定路径: {[c.path for c in missing]}；'
+                        f'平台已绑定路径: {sorted(bound) or "无"}',
                     )
                     sub_lines.append(
                         '      → 在 Step 1 组件树里点该组件的回形针图标上传 CSV；'
